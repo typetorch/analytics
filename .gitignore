@@ -15,3 +15,4 @@ data/
 # private working notes (not published)
 CHANGELOG.md
 *.log
+.scratch/

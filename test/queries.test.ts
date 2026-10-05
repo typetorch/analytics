@@ -1,0 +1,340 @@
+/**
+ * The logical queries against a real DuckDB holding the fixture, checked against plain-JS reference computations.
+ */
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { DuckDBConnection, DuckDBInstance } from "@duckdb/node-api";
+import { Graph, LEFT, START } from "../src/graph.ts";
+import { registerDecoder, type DecodedRecording } from "../src/recording.ts";
+import type { EventRow } from "../src/schema.ts";
+import { DuckDbStore } from "../src/store/duckdb.ts";
+import { ACCESS_CODE, ART_NEW, ART_OLD, DAY, NOW, TODAY, fixtureDb, generateFixture } from "./fixtures.ts";
+
+const fx = generateFixture();
+let instance: DuckDBInstance;
+let connection: DuckDBConnection;
+let store: DuckDbStore;
+
+beforeAll(async () => {
+	({ instance, connection } = await fixtureDb(fx));
+	store = new DuckDbStore(connection, (name) => name, () => NOW);
+});
+afterAll(() => {
+	connection.closeSync();
+	instance.closeSync();
+});
+
+const inRange = (days: number) => fx.events.filter((e) => e.t >= NOW - days * DAY && e.t < NOW);
+const playerEvents = (rows: EventRow[]) => rows.filter((e) => e.pid && e.sid);
+const day = (t: number) => Math.floor(t / DAY);
+const zoneOf = (state?: string) => (state ? (/(?:^|\|)zone:([^|]*)/.exec(state)?.[1] ?? "") || null : null);
+const screenOf = (state?: string) => (state ? (/(?:^|\|)screen:([^|]*)/.exec(state)?.[1] ?? "") || null : null);
+
+function sessions(rows: EventRow[]) {
+	const out = new Map<string, { pid: string; t0: number; t1: number; isnew: boolean }>();
+	for (const e of playerEvents(rows)) {
+		const s = out.get(e.sid as string) ?? { pid: e.pid as string, t0: e.t, t1: e.t, isnew: false };
+		s.t0 = Math.min(s.t0, e.t);
+		s.t1 = Math.max(s.t1, e.t);
+		s.isnew ||= e.newp === true;
+		out.set(e.sid as string, s);
+	}
+	return out;
+}
+
+describe("overview", () => {
+	test("totals and days match a reference computation", async () => {
+		const r = await store.query("overview");
+		const rows = inRange(30);
+		const s = sessions(rows);
+		const players = new Set(playerEvents(rows).map((e) => e.pid));
+		const newPlayers = new Set(playerEvents(rows).filter((e) => e.newp).map((e) => e.pid));
+		const playtime = [...s.values()].reduce((sum, x) => sum + x.t1 - x.t0, 0);
+		expect(r.players).toBe(players.size);
+		expect(r.newPlayers).toBe(newPlayers.size);
+		expect(r.sessions).toBe(s.size);
+		expect(r.events).toBe(rows.length);
+		expect(r.playtimeHours).toBe(Math.round((playtime / 3_600_000) * 10) / 10);
+		expect(r.days.reduce((sum, d) => sum + d.sessions, 0)).toBe(s.size);
+		expect(r.days[0].date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+	});
+
+	test("filters: device, artifact, new/returning, variant", async () => {
+		const all = await store.query("overview");
+		const phone = await store.query("overview", { dev: "phone" });
+		const ref = new Set(playerEvents(inRange(30)).filter((e) => e.dev === "phone").map((e) => e.pid));
+		expect(phone.players).toBe(ref.size);
+		expect(phone.players).toBeLessThan(all.players);
+		const old = await store.query("overview", { art: ART_OLD });
+		const neu = await store.query("overview", { art: [ART_NEW] });
+		expect(old.sessions + neu.sessions).toBe(all.sessions);
+		const fresh = await store.query("overview", { players: "new" });
+		const back = await store.query("overview", { players: "returning" });
+		expect(fresh.sessions + back.sessions).toBe(all.sessions);
+		expect(fresh.sessions).toBe(fresh.newPlayers);
+		const short = await store.query("overview", { variant: { experiment: "onboarding", variant: "short" } });
+		const long = await store.query("overview", { variant: { experiment: "onboarding", variant: ["long"] } });
+		expect(short.players + long.players).toBe(all.players);
+	});
+
+	test("date ranges: a date-only `to` includes that day", async () => {
+		const date = new Date((TODAY - 3) * DAY).toISOString().slice(0, 10);
+		const r = await store.query("overview", { from: date, to: date });
+		expect(r.days.map((d) => d.date)).toEqual([date]);
+		expect(() => store.render("overview", { from: "2026-10-05", to: "2026-10-01" })).toThrow("before");
+		expect(() => store.render("overview", { from: "yesterday" })).toThrow("not a date");
+	});
+});
+
+describe("roblox numbers and retention", () => {
+	function reference(k: number) {
+		const rows = inRange(30);
+		const cohort = new Map<string, number>();
+		for (const e of playerEvents(rows).filter((e) => e.newp)) cohort.set(e.pid as string, Math.min(cohort.get(e.pid as string) ?? Infinity, day(e.t)));
+		const days = new Map<string, Set<number>>();
+		for (const e of fx.events) if (e.pid && e.t >= NOW - 30 * DAY) (days.get(e.pid) ?? days.set(e.pid, new Set()).get(e.pid))?.add(day(e.t));
+		let of = 0;
+		let kept = 0;
+		for (const [pid, cday] of cohort) {
+			if (cday + k >= TODAY) continue;
+			of++;
+			if (days.get(pid)?.has(cday + k)) kept++;
+		}
+		return { of, kept, cohort };
+	}
+
+	test("D1/D7, bounce, qualified plays, payers", async () => {
+		const r = await store.query("roblox");
+		const d1 = reference(1);
+		const d7 = reference(7);
+		expect(r.d1Retention).toEqual({ rate: Math.round((d1.kept / d1.of) * 10_000) / 10_000, count: d1.kept, of: d1.of });
+		expect(r.d7Retention.count).toBe(d7.kept);
+		expect(r.d7Retention.of).toBe(d7.of);
+		const s = [...sessions(inRange(30)).values()];
+		expect(r.qualifiedPlays.count).toBe(s.filter((x) => x.t1 - x.t0 >= 5 * 60_000).length);
+		expect(r.firstPlayBounce.count).toBe(s.filter((x) => x.isnew && x.t1 - x.t0 < 60_000).length);
+		const purchases = inRange(30).filter((e) => e.kind === "purchase");
+		expect(r.purchases).toBe(purchases.length);
+		expect(r.payerConversion.count).toBe(new Set(purchases.map((e) => e.pid)).size);
+		const robux = purchases.reduce((sum, e) => sum + JSON.parse(e.props as string).robux, 0);
+		expect(r.robuxPerUser).toBe(Math.round((robux / r.players) * 100) / 100);
+		const longer = await store.query("roblox", {}, { qualifiedMinutes: 20 });
+		expect(longer.qualifiedPlays.count).toBeLessThan(r.qualifiedPlays.count);
+		expect(() => store.render("roblox", {}, { qualifiedMinutes: 0 })).toThrow("qualifiedMinutes");
+	});
+
+	test("retention cohorts", async () => {
+		const r = await store.query("retention", {}, { days: [1, 7] });
+		const ref = reference(1);
+		const sizes = new Map<number, number>();
+		for (const cday of ref.cohort.values()) sizes.set(cday, (sizes.get(cday) ?? 0) + 1);
+		expect(r.cohorts.length).toBe(sizes.size);
+		expect(r.cohorts.reduce((s, c) => s + c.size, 0)).toBe(ref.cohort.size);
+		const last = r.cohorts.at(-1);
+		expect(last?.kept["1"]).toBeNull(); // yesterday's cohort: today isn't over
+		const keptD1 = r.cohorts.reduce((s, c) => s + (c.keptPlayers["1"] ?? 0), 0);
+		expect(keptD1).toBe(ref.kept);
+		expect(r.average["1"]).toBe(Math.round((ref.kept / ref.of) * 10_000) / 10_000);
+	});
+});
+
+describe("funnel", () => {
+	test("lists funnels without a name", async () => {
+		const r = await store.query("funnel");
+		expect(r.funnel).toBeNull();
+		if (r.funnel === null) expect(r.funnels.map((f) => f.name)).toEqual(["onboarding"]);
+	});
+
+	test("steps: reached = players whose highest step is at least this one", async () => {
+		const r = await store.query("funnel", {}, { funnel: "onboarding" });
+		if (r.funnel === null) throw new Error("expected steps");
+		const max = new Map<string, number>();
+		for (const e of inRange(30).filter((e) => e.kind === "funnel")) max.set(e.pid as string, Math.max(max.get(e.pid as string) ?? 0, JSON.parse(e.props as string).step));
+		for (const step of r.steps) expect(step.reached).toBe([...max.values()].filter((m) => m >= step.step).length);
+		expect(r.steps.map((s) => s.label)).toEqual(["spawned", "moved", "opened_shop", "bought_item", "joined_round"]);
+		expect(r.steps[0].ofStart).toBe(1);
+		expect(r.steps[1].medianSecondsFromStart).toBe(5);
+		expect(r.biggestDrop?.step).toBe(2);
+	});
+});
+
+describe("player timeline and graph", () => {
+	const pid = "p0003";
+	const mine = fx.events.filter((e) => e.pid === pid);
+
+	test("timeline", async () => {
+		const r = await store.query("timeline", {}, { pid });
+		expect(r.events.length).toBe(mine.length);
+		expect(r.sessions.length).toBe(new Set(mine.map((e) => e.sid)).size);
+		expect(r.sessions[0].firstSession).toBe(true);
+		expect(r.events[0].kind).toBe("session");
+		const limited = await store.query("timeline", {}, { pid, limit: 5 });
+		expect(limited.events.length).toBe(5);
+		expect(limited.truncated).toBe(true);
+		expect(() => store.render("timeline", {}, { pid: "x' OR 1=1 --" })).toThrow("pid");
+	});
+
+	test("player graph edges match the session's zone moves", async () => {
+		const g = await store.query("player-graph", {}, { pid, facet: "zone" });
+		expect(g).toBeInstanceOf(Graph);
+		const expected = new Map<string, number>();
+		const bySession = new Map<string, EventRow[]>();
+		for (const e of mine) (bySession.get(e.sid as string) ?? bySession.set(e.sid as string, []).get(e.sid as string))?.push(e);
+		for (const rows of bySession.values()) {
+			const seq: string[] = [];
+			for (const e of rows.sort((a, b) => a.t - b.t)) {
+				const z = zoneOf(e.state);
+				if (z && seq.at(-1) !== z) seq.push(z);
+			}
+			const path = [START, ...seq, LEFT];
+			for (let i = 1; i < path.length; i++) expected.set(`${path[i - 1]}>${path[i]}`, (expected.get(`${path[i - 1]}>${path[i]}`) ?? 0) + 1);
+		}
+		const got = new Map(g.edges.map((e) => [`${e.from}>${e.to}`, e.count]));
+		expect(got).toEqual(expected);
+		const mermaid = g.toMermaid();
+		expect(mermaid.startsWith("flowchart LR\n")).toBe(true);
+		expect(mermaid).toContain('(["start"])');
+		expect(mermaid).toContain("linkStyle 0 stroke-width:");
+	});
+
+	test("flow graph merges players and drops small edges", async () => {
+		const g = await store.query("flow", {}, { facet: "zone", minCount: 50 });
+		expect(g.kind).toBe("flow");
+		expect(g.edges.every((e) => e.count >= 50)).toBe(true);
+		expect(g.hiddenEdges).toBeGreaterThan(0);
+		const all = await store.query("flow", {}, { facet: "zone", minCount: 1 });
+		const starts = all.edges.filter((e) => e.from === START).reduce((s, e) => s + e.count, 0);
+		const withZone = new Set(playerEvents(inRange(7)).filter((e) => zoneOf(e.state)).map((e) => e.sid));
+		expect(starts).toBe(withZone.size);
+		const full = await store.query("flow", {}, { facet: "all", maxEdges: 10 });
+		expect(full.edges.length).toBe(10);
+		expect(full.edges[0].from.includes("zone:") || full.edges[0].from === START).toBe(true);
+		const json = JSON.parse(JSON.stringify(full));
+		expect(Graph.fromJSON(json).toMermaid()).toBe(full.toMermaid());
+	});
+});
+
+describe("experiments", () => {
+	test("lists experiments", async () => {
+		const r = await store.query("experiment");
+		expect(r.experiment).toBeNull();
+		if (r.experiment === null) expect(r.experiments.map((e) => e.variant).sort()).toEqual(["long", "short"]);
+	});
+
+	test("per-variant numbers and plain words", async () => {
+		const r = await store.query("experiment", {}, { experiment: "onboarding", control: "short" });
+		if (r.experiment === null) throw new Error("expected results");
+		expect(r.control).toBe("short");
+		const days = new Map<string, Set<number>>();
+		for (const e of playerEvents(inRange(30))) (days.get(e.pid as string) ?? days.set(e.pid as string, new Set()).get(e.pid as string))?.add(day(e.t));
+		const variantOf = (pid: string) => (Number(pid.slice(1)) % 2 === 0 ? "short" : "long");
+		for (const v of r.variants) {
+			const pids = [...days.keys()].filter((p) => variantOf(p) === v.variant);
+			expect(v.players).toBe(pids.length);
+			expect(v.returned.count).toBe(pids.filter((p) => (days.get(p)?.size ?? 0) >= 2).length);
+		}
+		const kept = r.comparisons.find((c) => c.variant === "long" && c.metric === "returned");
+		expect(kept?.method).toBe("two-proportion z-test");
+		expect(kept?.sure).toBeGreaterThan(0.95);
+		expect(kept?.words).toMatch(/^long keeps more players: 9\d% sure$/);
+		const playtime = r.comparisons.find((c) => c.metric === "playtime");
+		expect(playtime?.method).toBe("bootstrap");
+		const welch = await store.query("experiment", {}, { experiment: "onboarding", maxValues: 0 });
+		if (welch.experiment === null) throw new Error("expected results");
+		expect(welch.comparisons.find((c) => c.metric === "playtime")?.method).toBe("welch (normal approx.)");
+		expect(r.mixedPlayers).toBe(0);
+	});
+});
+
+describe("first-session confusion", () => {
+	test("signals from events", async () => {
+		const r = await store.query("confusion");
+		const firsts = playerEvents(inRange(14)).filter((e) => e.newp);
+		expect(r.firstSessions).toBe(new Set(firsts.map((e) => e.sid)).size);
+		// Screen loops: sessions that opened Shop 3+ times.
+		const opens = new Map<string, number>();
+		const last = new Map<string, string | null>();
+		for (const e of firsts.filter((e) => e.state).sort((a, b) => a.t - b.t)) {
+			const scr = screenOf(e.state);
+			if (scr && last.get(e.sid as string) !== scr) opens.set(e.sid as string, (opens.get(e.sid as string) ?? 0) + 1);
+			last.set(e.sid as string, scr);
+		}
+		const shop = r.screenLoops.find((s) => s.screen === "Shop");
+		expect(shop?.loopSessions).toBe([...opens.values()].filter((n) => n >= 3).length);
+		expect(shop?.loopSessions).toBeGreaterThan(0);
+		// Early leaves: the bounced first sessions (all in the Lobby).
+		const lobby = r.earlyLeave.find((z) => z.zone === "Lobby");
+		const bounced = [...sessions(firsts).values()].filter((s) => s.t1 - s.t0 < 120_000).length;
+		expect(lobby?.early).toBe(bounced);
+		expect(r.backAndForth[0].flagged).toBeGreaterThan(0);
+		expect(r.recordings.available).toBe(false);
+		expect(r.recordings.reason).toContain("tt-rec-1");
+	});
+
+	test("signals from recordings, with a decoder", async () => {
+		const restore = registerDecoder({
+			codec: "tt-rec-1",
+			decode(chunks): DecodedRecording {
+				const body = JSON.parse(Buffer.from(chunks[0].data, "base64").toString("utf8"));
+				return { pid: chunks[0].pid, sid: chunks[0].sid, samples: body.samples, inputs: body.inputs };
+			},
+		});
+		try {
+			const r = await store.query("confusion");
+			const firstSids = new Set(playerEvents(inRange(14)).filter((e) => e.newp).map((e) => e.sid));
+			const recorded = fx.recordings.filter((x) => x.t >= NOW - 14 * DAY && firstSids.has(x.sid));
+			expect(r.recordings.available).toBe(true);
+			expect(r.recordings.sessions).toBe(recorded.length);
+			expect(r.recordings.repeatedClicks).toEqual([{ button: "Shop/Buy/Coins100", count: recorded.length, avgPresses: 3 }]);
+		} finally {
+			restore();
+		}
+	});
+});
+
+describe("fleet (game servers)", () => {
+	test("servers: latest heartbeat per JobId, never the access code", async () => {
+		const r = await store.query("servers");
+		expect(r.servers.map((s) => s.job).sort()).toEqual(["job-1", "job-2", "job-4"]);
+		expect(r.players).toBe(30);
+		expect(r.byHealth).toEqual({ ok: 2, degraded: 1 });
+		expect(r.servers.find((s) => s.job === "job-4")?.lastError).toBe("swap failed: boom");
+		expect(JSON.stringify(r)).not.toContain(ACCESS_CODE);
+		const wide = await store.query("servers", {}, { maxAgeSeconds: 3600 });
+		expect(wide.servers.length).toBe(4);
+		expect((await store.query("servers", {}, { branch: "dev" })).servers).toEqual([]);
+		for (const sql of Object.values(store.render("servers").statements)) expect(sql).not.toMatch(/'k'|\$\."k"/);
+	});
+
+	test("deployReport: results, errors, servers still behind", async () => {
+		const latest = await store.query("deployReport");
+		expect(latest.seq).toBe(42);
+		expect(latest.results).toEqual([
+			{ result: "swapped", servers: 2, players: 20, medianSeconds: 1.8, maxSeconds: 2.4 },
+			{ result: "failed", servers: 1, players: 10, medianSeconds: 0.4, maxSeconds: 0.4 },
+		]);
+		expect(latest.errors).toEqual([{ error: "swap failed: boom", servers: 1, exampleJob: "job-4" }]);
+		expect(latest.behind.map((s) => s.job)).toEqual(["job-4"]);
+		const old = await store.query("deployReport", {}, { seq: 41 });
+		expect(old.results).toEqual([{ result: "swapped", servers: 3, players: 30, medianSeconds: 1.5, maxSeconds: 1.5 }]);
+		expect(old.behind).toEqual([]);
+		expect((await store.query("deployReport", {}, { artifact: ART_OLD })).seq).toBe(41);
+		const none = await store.query("deployReport", {}, { seq: 43 });
+		expect(none.reported).toBe(0);
+		expect(none.behind.map((s) => s.job).sort()).toEqual(["job-1", "job-2", "job-4"]);
+		expect(() => store.render("deployReport", {}, { seq: 1, latest: true })).toThrow("one of");
+		expect(JSON.stringify(latest)).not.toContain(ACCESS_CODE);
+	});
+});
+
+test("top-events", async () => {
+	const r = await store.query("top-events", {}, { limit: 3 });
+	expect(r.events.length).toBe(3);
+	expect(r.events[0]).toMatchObject({ kind: "zone", name: "enter" });
+	expect(r.events[0].count).toBe(inRange(7).filter((e) => e.kind === "zone" && e.name === "enter").length);
+});
+
+test("unknown queries and bad filters are refused", async () => {
+	await expect(store.query("nope" as never)).rejects.toThrow("unknown query");
+	expect(() => store.render("overview", { dev: "fridge" as never })).toThrow("dev must be one of");
+	expect(() => store.render("overview", { variant: { experiment: "a'b", variant: "x" } })).toThrow("experiment");
+});

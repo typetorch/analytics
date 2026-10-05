@@ -20,6 +20,8 @@ export const EVENT_KINDS = [
 	"experiment",
 	"custom",
 	"recording_meta",
+	/** Game-server rows (no player): `heartbeat` every ~60 s and `deploy_report` after each deploy (FLEET_PROPS). */
+	"fleet",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -186,4 +188,22 @@ export const PROP_KEYS = {
 	purchaseProduct: "product",
 	/** currency rows (`name` = currency): the signed amount. */
 	currencyAmount: "amount",
+	/** experiment rows (`name` = experiment): the variant the player got. */
+	experimentVariant: "variant",
 } as const;
+
+/**
+ * `kind = "fleet"` rows (game servers, no pid; `job` = JobId). Replaces the MemoryStore heartbeat and deploy reports.
+ *
+ * `name = "heartbeat"`, every ~60 s per server, props:
+ *   t time, b branch, c channel, a artifact, n players, m max players, s started at, u last write, p placeId,
+ *   k access code (private servers; NEVER returned by any query), x experiment, v kernel version, q applied seq,
+ *   g generation, h health (ok | failed | unverified | degraded), e last error, sv server version.
+ * `name = "deploy_report"`, after a deploy reaches a server, props:
+ *   s seq, b branch, a artifact, j JobId, r result (swapped | failed | rolled_back | skipped | booted), e error,
+ *   d seconds, t time, g generation, k kernel version, p players.
+ */
+export const FLEET_HEARTBEAT = "heartbeat";
+export const FLEET_DEPLOY_REPORT = "deploy_report";
+export const DEPLOY_RESULTS = ["swapped", "failed", "rolled_back", "skipped", "booted"] as const;
+export const SERVER_HEALTH = ["ok", "failed", "unverified", "degraded"] as const;
