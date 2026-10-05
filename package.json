@@ -8,7 +8,16 @@
 		"type": "git",
 		"url": "git+https://github.com/typetorch/analytics.git"
 	},
-	"keywords": ["roblox", "roblox-ts", "typetorch", "analytics", "duckdb", "cloudflare", "basin", "iceberg"],
+	"keywords": [
+		"roblox",
+		"roblox-ts",
+		"typetorch",
+		"analytics",
+		"duckdb",
+		"cloudflare",
+		"basin",
+		"iceberg"
+	],
 	"type": "module",
 	"bin": {
 		"typetorch-analytics-server": "dist/server/main.js"
@@ -21,7 +30,12 @@
 		},
 		"./package.json": "./package.json"
 	},
-	"files": ["dist", "basin", "README.md", "LICENSE"],
+	"files": [
+		"dist",
+		"basin",
+		"README.md",
+		"LICENSE"
+	],
 	"engines": {
 		"node": ">=20"
 	},
@@ -33,7 +47,8 @@
 		"basin:schemas": "bun scripts/gen-basin-schemas.ts",
 		"loadtest": "bun scripts/loadtest.ts",
 		"smoke": "node scripts/smoke.mjs",
-		"bench:nightly": "bun scripts/nightly-bench.ts"
+		"bench:nightly": "bun scripts/nightly-bench.ts",
+		"report": "bun scripts/report.ts"
 	},
 	"dependencies": {
 		"@duckdb/node-api": "^1.5.6-r.1"
