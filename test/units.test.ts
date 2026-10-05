@@ -86,7 +86,7 @@ describe("graph", () => {
 
 	test("state labels split on |", () => {
 		const one = buildGraph({ kind: "player", facet: "all", pid: "p1", edges: [{ src: "(start)", dst: "zone:A|screen:", n: 1, dwell_ms: 0 }], nodes: [{ st: "zone:A|screen:", visits: 1 }] });
-		expect(one.toMermaid()).toContain('["zone:A<br/>screen:<br/><small>1 visits</small>"]');
+		expect(one.toMermaid()).toContain('["zone:A<br/>screen:<br/><small>1 visit</small>"]');
 		expect(Graph.fromJSON(JSON.stringify(one)).toJSON()).toEqual(one.toJSON());
 	});
 

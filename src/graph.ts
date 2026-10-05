@@ -123,8 +123,8 @@ export class Graph implements GraphData {
 			if (node.id === START || node.id === LEFT) {
 				lines.push(`  ${key}(["${node.id === START ? "start" : "left"}"])`);
 			} else {
-				const who = node.players !== undefined ? `, ${node.players} players` : "";
-				lines.push(`  ${key}["${nodeLabel(node.id)}<br/><small>${node.visits} visits${who}</small>"]`);
+				const who = node.players !== undefined ? `, ${node.players} player${node.players === 1 ? "" : "s"}` : "";
+				lines.push(`  ${key}["${nodeLabel(node.id)}<br/><small>${node.visits} visit${node.visits === 1 ? "" : "s"}${who}</small>"]`);
 			}
 		});
 		const maxCount = Math.max(1, ...edges.map((e) => e.count));

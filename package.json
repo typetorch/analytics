@@ -32,7 +32,8 @@
 		"typecheck": "tsc --noEmit",
 		"basin:schemas": "bun scripts/gen-basin-schemas.ts",
 		"loadtest": "bun scripts/loadtest.ts",
-		"smoke": "node scripts/smoke.mjs"
+		"smoke": "node scripts/smoke.mjs",
+		"bench:nightly": "bun scripts/nightly-bench.ts"
 	},
 	"dependencies": {
 		"@duckdb/node-api": "^1.5.6-r.1"

@@ -1,0 +1,41 @@
+# systemd unit for the TypeTorch analytics server (README "Deploy on a 1 GB VPS").
+#   sudo cp server/typetorch-analytics.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now typetorch-analytics
+[Unit]
+Description=TypeTorch analytics + fleet API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=typetorch
+Group=typetorch
+WorkingDirectory=/opt/typetorch-analytics
+# Tokens and settings (chmod 640, root:typetorch). Never commit this file.
+EnvironmentFile=/etc/typetorch/analytics.env
+ExecStart=/usr/local/bin/bun src/server/main.ts
+Restart=always
+RestartSec=2
+# SIGTERM: the server loads the last raw files and checkpoints DuckDB before it exits.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Memory: DuckDB is capped at TT_ANALYTICS_MEMORY_LIMIT (400MB); the rest is the API. Swap absorbs spikes.
+MemoryHigh=800M
+MemoryMax=950M
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/typetorch-analytics
+
+[Install]
+WantedBy=multi-user.target
