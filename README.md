@@ -109,6 +109,9 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `top-events` | the most logged names per kind | 7 days |
 | `servers` | game servers from `fleet` heartbeat rows (history; the CLI's live view is the fleet API) | recent |
 | `deployReport` | a deploy's results, errors and servers still below its seq, from `fleet` rows | 2 days |
+| `players` | players seen in the range, most recent first (pid, sessions, events, playtime); `search` = part of a pid | 30 days |
+| `values` | the branches, artifacts (newest first), channels and devices seen in the range, for filter pickers | 30 days |
+| `events` | the newest rows, optionally of one `kind` / `name` / `pid` (`limit` up to 1,000); `fleet` rows come without props | 7 days |
 
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
 once: the DuckDB server drops exact duplicate rows when it writes each day's Parquet file; today's numbers and Basin can
@@ -249,6 +252,7 @@ bun src/server/main.ts --env-file analytics.env    # or, after bun run build: no
 | `POST /v1/query/<name>` | admin | `{ filters, options }` -> `{ result, ms }` (input errors 400, timeouts 504) |
 | `GET /v1/queries` | admin | the query list |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>?from=&to=&pid=&limit=` | admin | the nightly rollup tables |
+| `POST /v1/sql` | admin | `{ sql, limit? }` -> `{ columns, rows, truncated, ms }`: one read-only SELECT (below) |
 | `GET /v1/settings` | ingest or admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
 | `GET /healthz` | none / admin | `{ ok }`; with the admin token: memory, loader lag, row counts, fleet counts |
@@ -277,6 +281,20 @@ That needs `TT_ANALYTICS_OPENCLOUD_KEY`: an API key with `universe-datastores.ob
 once; Parquet files, rollups and raw archives are rewritten in the background, and later rows of that pid are dropped
 at load. The CLI can erase by pid: `POST /v1/erasure { "pid": "..." }` with the admin token. `data/erasure/log.jsonl`
 keeps the notification id and outcome, never the UserId.
+
+**Ad-hoc SQL** (`POST /v1/sql`, admin token; `TT_ANALYTICS_SQL=0` turns it off). One SELECT or WITH statement over two
+views, `events` and `recordings` (every day file plus a Parquet snapshot of today's live rows, taken again only when
+the live tables changed). Answers `{ columns: [{ name, type }], rows: [[...]], truncated, ms }`: at most `limit` rows
+(default 1,000, at most 10,000), within the query timeout. It runs in a separate DuckDB instance
+(`TT_ANALYTICS_SQL_MEMORY`, 256MB, 1 thread, one query at a time) on an empty READ_ONLY database file, with
+`enable_external_access = false` (only the data folders allowed), no extension install or load, and
+`lock_configuration = true`. Before it runs, a query must start with SELECT or WITH; hold no ATTACH, COPY, PRAGMA,
+INSTALL, LOAD, SET, CREATE, ... outside strings, quoted names and comments; parse (`json_serialize_sql`) to one SELECT
+that reads only `events`, `recordings` or its own CTEs (no file paths, no schemas) and calls no table function but
+`range`, `generate_series`, `unnest`, `json_each`, `json_tree`; and prepare as a SELECT. `fleet` rows show no props (a
+heartbeat's props can hold a private server's access code). Refusals and SQL errors answer 400 with the reason. The
+sandbox opens on the first query and its memory comes on top of the main instance's (on a 1 GB VPS, lower
+`TT_ANALYTICS_SQL_MEMORY` or turn it off if the nightly export and ad-hoc queries may overlap).
 
 Settings (environment or `--env-file`; values are never printed): see `server/analytics.env.example`.
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Graph, buildGraph, formatDuration } from "../src/graph.ts";
 import { decodeSessions, decodeTtRec1, decodeTtRec1Chunk, detectSignals, hasDecoder, lookVector, type RecordingSample } from "../src/recording.ts";
 import { RecWriter } from "./recwriter.ts";
+import { blankLiterals, checkAst, checkSqlText, jsonValue } from "../src/server/sql.ts";
 import { bootstrapMeans, normalCdf, percentSure, prng, twoProportion, verdict, welch } from "../src/stats.ts";
 
 describe("stats", () => {
@@ -203,5 +204,47 @@ describe("recordings", () => {
 			inputs: [press(T), press(T + 400), press(T + 800), press(T + 1200), { t: T + 5000, type: "screen_open", target: "Shop" }, press(T + 5100), press(T + 5200), { t: T + 5300, type: "screen_close" }, press(T + 5400)],
 		});
 		expect(signals).toEqual([{ kind: "repeated_clicks", pid: "p", sid: "s", t: T, amount: 4, target: "Shop/Buy" }]);
+	});
+});
+
+describe("ad-hoc SQL text checks", () => {
+	test("strings, quoted names and comments are blanked; positions kept", () => {
+		const sql = `SELECT 'a;b' AS "x;y" -- c;\n/* d; */ FROM $$e;$$`;
+		const bare = blankLiterals(sql);
+		expect(bare.length).toBe(sql.length);
+		expect(bare.includes(";")).toBe(false);
+		expect(() => blankLiterals("SELECT 'it''s")).toThrow("unterminated");
+	});
+
+	test("one SELECT/WITH statement, no write or setup words", () => {
+		expect(checkSqlText("  SELECT 1;  ")).toBe("SELECT 1");
+		expect(checkSqlText("WITH a AS (SELECT 1) SELECT * FROM a")).toContain("WITH");
+		expect(checkSqlText("(SELECT 1) UNION (SELECT 2)")).toContain("UNION");
+		expect(checkSqlText("SELECT 'set', \"load\" FROM events")).toContain("set");
+		for (const bad of ["", "VALUES (1)", "SELECT 1; SELECT 2", "SELECT 1 FROM x; ATTACH 'y'", "PRAGMA version", "SELECT * FROM t WHERE x IN (SELECT 1) AND load = 1", "WITH a AS (DELETE FROM t) SELECT 1"]) {
+			expect(() => checkSqlText(bad)).toThrow();
+		}
+		expect(() => checkSqlText(42)).toThrow("give the query");
+	});
+
+	test("AST checks: our views and the query's own CTEs only", () => {
+		const ast = (refs: object[]) => ({ error: false, statements: [{ node: { from_table: refs } }] });
+		expect(() => checkAst(ast([{ type: "BASE_TABLE", table_name: "events" }]))).not.toThrow();
+		expect(() => checkAst(ast([{ type: "BASE_TABLE", table_name: "C:/x.parquet" }]))).toThrow("unknown table");
+		expect(() => checkAst(ast([{ type: "BASE_TABLE", schema_name: "live", table_name: "events" }]))).toThrow("unknown table");
+		expect(() => checkAst(ast([{ type: "TABLE_FUNCTION", function: { function_name: "read_text" } }]))).toThrow("read_text");
+		expect(() => checkAst(ast([{ type: "TABLE_FUNCTION", function: { function_name: "range" } }]))).not.toThrow();
+		const withCte = { error: false, statements: [{ node: { cte_map: { map: [{ key: "a" }] }, from_table: { type: "BASE_TABLE", table_name: "A" } } }] };
+		expect(() => checkAst(withCte)).not.toThrow();
+		expect(() => checkAst({ error: true, error_message: "Only SELECT statements can be serialized to json!" })).toThrow("not a single SELECT");
+	});
+
+	test("JSON values", () => {
+		expect(jsonValue(5n)).toBe(5);
+		expect(jsonValue(2n ** 70n)).toBe((2n ** 70n).toString());
+		expect(jsonValue([1n, { a: 2n }])).toEqual([1, { a: 2 }]);
+		expect(jsonValue(new Date(0))).toBe("1970-01-01T00:00:00.000Z");
+		expect(jsonValue(new Uint8Array([1, 2]))).toBe("AQI=");
+		expect(jsonValue(Number.NaN)).toBe("NaN");
 	});
 });

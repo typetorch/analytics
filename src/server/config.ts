@@ -36,6 +36,10 @@ export interface ServerConfig {
 	queryTimeoutSeconds: number;
 	queryConcurrency: number;
 	fsyncMs: number;
+	/** POST /v1/sql: read-only ad-hoc SQL for the admin token (on by default). */
+	sql: boolean;
+	/** memory_limit of the separate DuckDB instance that runs ad-hoc SQL. */
+	sqlMemoryLimit: string;
 	// Right to Erasure
 	webhookSecret?: string;
 	openCloudKey?: string;
@@ -135,6 +139,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		queryTimeoutSeconds: num(env, "TT_ANALYTICS_QUERY_TIMEOUT", 60, 1, 3600),
 		queryConcurrency: num(env, "TT_ANALYTICS_QUERY_CONCURRENCY", 2, 1, 16),
 		fsyncMs: num(env, "TT_ANALYTICS_FSYNC_MS", 1000, 0, 60_000),
+		sql: flag(env, "TT_ANALYTICS_SQL", true),
+		sqlMemoryLimit: env.TT_ANALYTICS_SQL_MEMORY ?? "256MB",
 		erasureDeleteLink: flag(env, "TT_ANALYTICS_ERASURE_DELETE_LINK"),
 		fleetDb: resolve(env.TT_FLEET_DB ?? resolve(dataDir, "fleet.sqlite")),
 		fleetWebhookLevels: levels,
@@ -165,5 +171,6 @@ export function describeConfig(config: ServerConfig): string {
 		`open cloud key=${yes(config.openCloudKey)}`,
 		`fleet webhook=${yes(config.fleetWebhookUrl)}`,
 		`duckdb memory_limit=${config.memoryLimit} threads=${config.threads}`,
+		`ad-hoc sql=${config.sql ? `on (memory_limit=${config.sqlMemoryLimit})` : "off"}`,
 	].join(", ");
 }

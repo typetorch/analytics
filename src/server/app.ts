@@ -5,6 +5,7 @@
  *   POST /v1/query/<name>           { filters, options } -> { result }       admin token
  *   GET  /v1/queries                the query list                           admin token
  *   GET  /v1/rollups/<daily|players|edges>?from=&to=&pid=&limit=             admin token
+ *   POST /v1/sql                    { sql, limit? } -> { columns, rows, truncated }: one read-only SELECT   admin token
  *   GET  /v1/settings               live dials from data/settings.json       ingest or admin token
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts
@@ -26,6 +27,7 @@ import { BatchShapeError, validateBatch } from "../validate.ts";
 import type { ServerConfig } from "./config.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
 import { RateLimiter, bearer, clientIp, json, readCapped, tokenIn, tooMany } from "./http.ts";
+import { SqlInputError, SqlSandbox } from "./sql.ts";
 import { Warehouse } from "./warehouse.ts";
 
 export interface AppOptions {
@@ -164,6 +166,46 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 	}
 
+	let sandbox: Promise<SqlSandbox> | undefined;
+
+	async function adhocSql(req: Request): Promise<Response> {
+		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		if (!config.sql) return json(404, { error: "ad-hoc SQL is off on this server (TT_ANALYTICS_SQL=0)" });
+		const raw = await readCapped(req, 64 * 1024);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: { sql?: unknown; limit?: unknown };
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8") || "{}");
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		const w = warehouse;
+		sandbox ??= SqlSandbox.open({
+			layout: w.layout,
+			memoryLimit: config.sqlMemoryLimit,
+			timeoutSeconds: config.queryTimeoutSeconds,
+			snapshot: (tables) => w.snapshotLive(tables),
+		});
+		let box: SqlSandbox;
+		try {
+			box = await sandbox;
+		} catch (error) {
+			sandbox = undefined;
+			log(`sql sandbox failed to open: ${((error as Error).message ?? String(error)).slice(0, 300)}`);
+			return json(500, { error: "the SQL sandbox failed to open" });
+		}
+		const started = performance.now();
+		try {
+			const result = await box.run(body.sql, typeof body.limit === "number" ? body.limit : undefined);
+			return json(200, { ...result, ms: Math.round(performance.now() - started) });
+		} catch (error) {
+			const message = ((error as Error).message ?? String(error)).slice(0, 500);
+			if (/interrupt/i.test(message)) return json(504, { error: `query took longer than ${config.queryTimeoutSeconds} s` });
+			// Parser, binder and permission errors are the query's own; answer them as input errors.
+			return json(400, { error: error instanceof SqlInputError ? message : `query failed: ${message}` });
+		}
+	}
+
 	async function rollups(url: URL, kind: string): Promise<Response> {
 		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
 		const q = url.searchParams;
@@ -278,6 +320,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			}
 			if (!isAdmin(req)) return json(path.startsWith("/v1/") ? 401 : 404, { error: path.startsWith("/v1/") ? "admin token required" : "not found" });
 			if (path === "/v1/queries" && req.method === "GET") return json(200, { queries: describeQueries() });
+			if (path === "/v1/sql") return req.method === "POST" ? await adhocSql(req) : json(405, { error: "POST only" });
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
 			if (q) return req.method === "POST" ? await query(req, q[1]) : json(405, { error: "POST only" });
 			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);
@@ -349,6 +392,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		async stop() {
 			for (const t of timers) clearInterval(t);
 			await served.stop();
+			if (sandbox) await (await sandbox.catch(() => undefined))?.close();
 			if (warehouse) {
 				await warehouse.load().catch(() => {});
 				await warehouse.close();

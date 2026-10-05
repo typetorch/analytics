@@ -351,6 +351,51 @@ test("top-events", async () => {
 	expect(r.events[0].count).toBe(inRange(7).filter((e) => e.kind === "zone" && e.name === "enter").length);
 });
 
+describe("explorer lookups", () => {
+	test("players: most recent first, sessions and events match; search by part of a pid", async () => {
+		const r = await store.query("players", {}, { limit: 1000 });
+		const rows = playerEvents(inRange(30));
+		const pids = new Set(rows.map((e) => e.pid));
+		expect(r.players.length).toBe(pids.size);
+		for (let i = 1; i < r.players.length; i++) expect(r.players[i - 1].lastSeen >= r.players[i].lastSeen).toBe(true);
+		const p = r.players.find((x) => x.pid === "p0003");
+		const mine = rows.filter((e) => e.pid === "p0003");
+		if (p) {
+			expect(p.events).toBe(mine.length);
+			expect(p.sessions).toBe(new Set(mine.map((e) => e.sid)).size);
+		}
+		const found = await store.query("players", {}, { search: "p000", limit: 1000 });
+		expect(found.players.map((x) => x.pid).every((pid) => pid.includes("p000"))).toBe(true);
+		expect(found.players.length).toBe([...pids].filter((pid) => (pid as string).includes("p000")).length);
+		expect((await store.query("players", {}, { limit: 3 })).players.length).toBe(3);
+		expect(() => store.render("players", {}, { search: "x' OR 1=1 --" })).toThrow("search");
+	});
+
+	test("values: branches, artifacts (newest first), channels and devices", async () => {
+		const r = await store.query("values");
+		expect(r.branch.map((v) => v.value)).toEqual(["prod"]);
+		expect(r.art.map((v) => v.value)).toEqual([ART_NEW, ART_OLD]);
+		expect(r.dev.map((v) => v.value).sort()).toEqual(["console", "desktop", "phone", "tablet"]);
+		const rows = inRange(30);
+		expect(r.dev.reduce((sum, v) => sum + v.events, 0)).toBe(rows.filter((e) => e.dev).length);
+		expect(r.dev[0].value).toBe("phone");
+	});
+
+	test("events: newest first, by kind/name/pid; fleet rows never carry props", async () => {
+		const r = await store.query("events", {}, { kind: "zone", name: "enter", limit: 20 });
+		expect(r.events.length).toBe(20);
+		expect(r.events.every((e) => e.kind === "zone" && e.name === "enter")).toBe(true);
+		for (let i = 1; i < r.events.length; i++) expect(r.events[i - 1].t >= r.events[i].t).toBe(true);
+		const mine = await store.query("events", {}, { pid: "p0003", limit: 1000 });
+		expect(mine.events.length).toBe(inRange(7).filter((e) => e.pid === "p0003").length);
+		const fleet = await store.query("events", {}, { kind: "fleet", limit: 1000 });
+		expect(fleet.events.length).toBeGreaterThan(0);
+		expect(fleet.events.every((e) => e.props === null)).toBe(true);
+		expect(JSON.stringify(fleet)).not.toContain(ACCESS_CODE);
+		expect(() => store.render("events", {}, { name: "a'b" })).toThrow("name");
+	});
+});
+
 test("unknown queries and bad filters are refused", async () => {
 	await expect(store.query("nope" as never)).rejects.toThrow("unknown query");
 	expect(() => store.render("overview", { dev: "fridge" as never })).toThrow("dev must be one of");

@@ -141,6 +141,79 @@ describe("queries over HTTP", () => {
 	});
 });
 
+type SqlAnswer = { columns: { name: string; type: string }[]; rows: unknown[][]; truncated: boolean; error?: string };
+const sql = async (query: string, limit?: number, headers: Record<string, string> = admin) => {
+	const r = await post("/v1/sql", { sql: query, ...(limit !== undefined ? { limit } : {}) }, headers);
+	return { status: r.status, body: (await r.json()) as SqlAnswer };
+};
+
+describe("ad-hoc SQL (POST /v1/sql)", () => {
+	test("admin only; today's live rows through a snapshot; columns, types, row cap", async () => {
+		expect((await sql("SELECT 1", undefined, {})).status).toBe(401);
+		expect((await sql("SELECT 1", undefined, { authorization: `Bearer ${INGEST}` })).status).toBe(401);
+		const count = await sql("SELECT COUNT(*) AS n, COUNT(DISTINCT pid) AS players FROM events");
+		expect(count.status).toBe(200);
+		expect(count.body.columns).toEqual([
+			{ name: "n", type: "BIGINT" },
+			{ name: "players", type: "BIGINT" },
+		]);
+		expect(count.body.rows[0][0]).toBe(events.length);
+		const recs = await sql("WITH r AS (SELECT * FROM recordings) SELECT COUNT(*) FROM r");
+		expect(recs.body.rows[0][0]).toBe(recordings.length);
+		const capped = await sql("SELECT t, kind, name FROM events ORDER BY t", 7);
+		expect(capped.body.rows.length).toBe(7);
+		expect(capped.body.truncated).toBe(true);
+		const all = await sql("SELECT kind, COUNT(*) AS n FROM events GROUP BY kind ORDER BY n DESC");
+		expect(all.body.truncated).toBe(false);
+		expect(all.body.rows.reduce((sum, r) => sum + Number(r[1]), 0)).toBe(events.length);
+	});
+
+	test("fleet rows show no props (a heartbeat can hold a private server's access code)", async () => {
+		const r = await sql("SELECT kind, props FROM events WHERE kind = 'fleet'");
+		expect(r.body.rows.length).toBeGreaterThan(0);
+		expect(r.body.rows.every((row) => row[1] === null)).toBe(true);
+		expect(JSON.stringify(await sql("SELECT * FROM events"))).not.toContain("SECRET-ACCESS-CODE");
+	});
+
+	test("refuses anything but one read-only SELECT over events, recordings and its own CTEs", async () => {
+		const refused = [
+			"ATTACH 'x.duckdb' AS x",
+			"COPY (SELECT 1) TO 'out.csv'",
+			"PRAGMA version",
+			"INSTALL httpfs",
+			"LOAD httpfs",
+			"SET enable_external_access = true",
+			"CREATE TABLE x AS SELECT 1",
+			"DELETE FROM events",
+			"SELECT 1; SELECT 2",
+			"SELECT 1; DROP TABLE events",
+			"SELECT * FROM read_parquet('data/events/*.parquet')",
+			"SELECT * FROM read_text('C:/Windows/win.ini')",
+			"SELECT * FROM glob('*')",
+			"SELECT * FROM query('SELECT 1')",
+			"SELECT * FROM 'data/events/2026-10-04.parquet'",
+			"SELECT * FROM live.events",
+			"SELECT * FROM main.events",
+			"SELECT * FROM duckdb_settings()",
+			"SELECT * FROM (WITH x AS (SELECT 1) SELECT 1), \"x.parquet\"",
+			"EXPLAIN SELECT 1",
+			"",
+			"SELECT 'unterminated",
+		];
+		for (const query of refused) {
+			const r = await sql(query);
+			if (r.status !== 400) throw new Error(`not refused: ${query} -> ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+			expect(typeof r.body.error).toBe("string");
+		}
+		// Words inside strings, quoted names and comments are fine.
+		const ok = await sql("SELECT 'set' AS \"load\", name FROM events WHERE name <> 'copy' -- attach\n LIMIT 1;");
+		expect(ok.status).toBe(200);
+		expect(ok.body.columns.map((c) => c.name)).toEqual(["load", "name"]);
+		expect((await sql("SELECT * FROM range(3)")).body.rows.length).toBe(3);
+		expect((await fetch(`${base}/v1/sql`, { headers: admin })).status).toBe(405);
+	});
+});
+
 describe("nightly export", () => {
 	let before: unknown;
 	test("finished days go to Parquet, queries read them the same", async () => {
@@ -182,6 +255,9 @@ describe("nightly export", () => {
 		expect(r.result.events.filter((e) => e.name === "late").reduce((sum, e) => sum + e.count, 0)).toBe(10);
 		const total = (await (await post("/v1/query/overview", { filters: { from: dayStart - DAY, to: NOW } }, admin)).json()) as { result: { events: number } };
 		expect(total.result.events).toBe(events.length + 10);
+		// Ad-hoc SQL reads the day files now (and no stale snapshot of the live rows).
+		const viaSql = await sql("SELECT COUNT(*) FROM events");
+		expect(viaSql.body.rows[0][0]).toBe(events.length + 10);
 	});
 });
 
@@ -246,6 +322,8 @@ describe("Right to Erasure", () => {
 		await app.warehouse?.rewriteErased();
 		const t = (await (await post("/v1/query/timeline", { filters: { from: dayStart - 30 * DAY, to: now }, options: { pid } }, admin)).json()) as { result: { events: unknown[] } };
 		expect(t.result.events).toEqual([]);
+		const viaSql = await sql(`SELECT COUNT(*) FROM events WHERE pid = '${pid}'`);
+		expect(viaSql.body.rows[0][0]).toBe(0);
 		expect((await post("/v1/erasure", { pid: "x'; DROP" }, admin)).status).toBe(400);
 	});
 });

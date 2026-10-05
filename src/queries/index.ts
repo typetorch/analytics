@@ -3,6 +3,7 @@ import { normalizeFilters, type Filters, type NormalizedFilters } from "../sql/f
 import { confusion } from "./confusion.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment } from "./experiment.ts";
+import { events, players, values } from "./explore.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { funnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
@@ -21,6 +22,9 @@ export const QUERIES = {
 	"top-events": topEvents,
 	servers,
 	deployReport,
+	players,
+	values,
+	events,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;

@@ -112,6 +112,10 @@ export class Warehouse {
 	private readonly free: DuckDBConnection[] = [];
 	private readonly waiters: ((c: DuckDBConnection) => void)[] = [];
 	private erased = new Set<string>();
+	/** Bumped whenever the live tables change (load, export, erasure): SQL snapshots older than it are stale. */
+	private liveVersion = 0;
+	private readonly snapshots = new Map<"events" | "recordings", { version: number; path: string }>();
+	private snapshotSeq = 0;
 	private readonly clock: () => number;
 	private readonly log: (line: string) => void;
 
@@ -202,6 +206,7 @@ export class Warehouse {
 			}
 			this.stats.loadedFiles += files;
 			this.stats.loadedRows += rows;
+			if (rows) this.liveVersion++;
 			this.stats.lastLoadMs = Math.round(performance.now() - started);
 			this.stats.lastLoadAt = this.clock();
 			return { files, rows };
@@ -307,6 +312,7 @@ export class Warehouse {
 			await this.writer.run(`DELETE FROM live.${table} WHERE ${where}`);
 			await this.writer.run(`INSERT INTO live.exports VALUES (${lit(target)}, ${lit(tmp)})`);
 			await this.writer.run("COMMIT");
+			this.liveVersion++;
 			renameSync(tmp, target);
 			await this.writer.run(`DELETE FROM live.exports WHERE target = ${lit(target)}`);
 		}
@@ -478,6 +484,46 @@ export class Warehouse {
 		return { events: Number(rows[0].events), recordings: Number(rows[0].recordings) };
 	}
 
+	/**
+	 * Parquet copies of today's live tables for the SQL sandbox (data/sql/live-<table>-*.parquet). A copy is reused until
+	 * the live tables change; older copies are deleted (best effort: Windows keeps a file a running query reads).
+	 */
+	snapshotLive(tables: ("events" | "recordings")[]): Promise<Partial<Record<"events" | "recordings", string>>> {
+		return this.lock.read(async () => {
+			const dir = join(this.layout.root, "sql");
+			mkdirSync(dir, { recursive: true });
+			const out: Partial<Record<"events" | "recordings", string>> = {};
+			for (const table of tables) {
+				const current = this.snapshots.get(table);
+				if (current && current.version === this.liveVersion && existsSync(current.path)) {
+					out[table] = current.path;
+					continue;
+				}
+				const version = this.liveVersion;
+				const path = join(dir, `live-${table}-${Date.now()}-${++this.snapshotSeq}.parquet`);
+				const c = await this.connection();
+				try {
+					await c.run(`COPY (SELECT * FROM live.${table}) TO ${pathLit(path)} (FORMAT parquet, COMPRESSION zstd)`);
+				} finally {
+					this.release(c);
+				}
+				this.snapshots.set(table, { version, path });
+				out[table] = path;
+			}
+			const keep = new Set([...this.snapshots.values()].map((s) => s.path));
+			for (const name of readdirSync(dir)) {
+				const path = join(dir, name);
+				if (!/^live-.*\.parquet$/.test(name) || keep.has(path)) continue;
+				try {
+					rmSync(path, { force: true });
+				} catch {
+					// still open in a running query (Windows); the next snapshot tries again
+				}
+			}
+			return out;
+		});
+	}
+
 	// Right to Erasure ------------------------------------------------------------------------------------------------
 
 	isErased(pid: string): boolean {
@@ -497,6 +543,18 @@ export class Warehouse {
 			let liveRows = 0;
 			for (const table of TABLES) liveRows += (await this.writer.run(`DELETE FROM live.${table} WHERE pid IN (${list})`)).rowsChanged;
 			for (const p of clean) this.erased.add(p);
+			this.liveVersion++;
+			// SQL snapshots of the live tables still hold their rows: drop them now (best effort, see snapshotLive).
+			const sqlDir = join(this.layout.root, "sql");
+			for (const name of existsSync(sqlDir) ? readdirSync(sqlDir) : []) {
+				if (!/^live-.*\.parquet$/.test(name)) continue;
+				try {
+					rmSync(join(sqlDir, name), { force: true });
+				} catch {
+					// still open in a running query (Windows); the next snapshot deletes it
+				}
+			}
+			this.snapshots.clear();
 			this.stats.erasedPids = this.erased.size;
 			return { liveRows };
 		});

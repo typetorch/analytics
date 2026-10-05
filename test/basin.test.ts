@@ -21,6 +21,8 @@ const OPTIONS: Partial<Record<QueryName, object>> = {
 	experiment: { experiment: "onboarding" },
 	servers: { maxAgeSeconds: 150 },
 	deployReport: { maxAgeSeconds: 150 },
+	players: { search: "p00" },
+	events: { kind: "zone", name: "enter", limit: 50 },
 };
 
 let instance: DuckDBInstance;
