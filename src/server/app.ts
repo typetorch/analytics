@@ -1,0 +1,360 @@
+/**
+ * The TypeTorch analytics server: the DuckDB analytics API and/or the SQLite fleet API in one process.
+ *
+ *   POST /v1/ingest                 game servers: gzip JSON { events, recordings }, ingest token -> 202 after the raw write
+ *   POST /v1/query/<name>           { filters, options } -> { result }       admin token
+ *   GET  /v1/queries                the query list                           admin token
+ *   GET  /v1/rollups/<daily|players|edges>?from=&to=&pid=&limit=             admin token
+ *   GET  /v1/settings               live dials from data/settings.json       ingest or admin token
+ *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
+ *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts
+ *   /v1/fleet/...                   the fleet API (fleet/http.ts)
+ */
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
+import { DAY_MS } from "../sql/dialect.ts";
+import { dayFiles, pathLit } from "../duckdb/layout.ts";
+import { openSqlite } from "../fleet/db.ts";
+import { FLEET_LIMITS, handleFleet } from "../fleet/http.ts";
+import { createNotifier, type Notifier } from "../fleet/notify.ts";
+import { FleetService } from "../fleet/service.ts";
+import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
+import { runtimeName, serve, type Served } from "../runtime.ts";
+import { validateSettings } from "../settings.ts";
+import { BatchShapeError, validateBatch } from "../validate.ts";
+import type { ServerConfig } from "./config.ts";
+import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
+import { RateLimiter, bearer, clientIp, json, readCapped, tokenIn, tooMany } from "./http.ts";
+import { Warehouse } from "./warehouse.ts";
+
+export interface AppOptions {
+	clock?: () => number;
+	log?: (line: string) => void;
+	/** Don't start the loader / nightly / sweep timers (tests drive them). */
+	manualJobs?: boolean;
+	fetch?: typeof fetch;
+	backend?: "bun" | "node";
+}
+
+export interface App {
+	readonly port: number;
+	readonly warehouse?: Warehouse;
+	readonly fleet?: FleetService;
+	readonly notifier?: Notifier;
+	handle(req: Request, ip?: string): Promise<Response>;
+	/** One loader tick. */
+	load(): Promise<{ files: number; rows: number }>;
+	nightly(): Promise<{ days: string[]; pruned: number; compacted: boolean }>;
+	stop(): Promise<void>;
+}
+
+const LIVE_DIALS = ["flushSeconds", "recordShare", "techEvery", "experiments"] as const;
+
+export async function startApp(config: ServerConfig, options: AppOptions = {}): Promise<App> {
+	const clock = options.clock ?? Date.now;
+	const log = options.log ?? ((line: string) => console.log(`[analytics] ${line}`));
+	const warehouse = config.parts.has("analytics")
+		? await Warehouse.open({
+				dataDir: config.dataDir,
+				memoryLimit: config.memoryLimit,
+				threads: config.threads,
+				keepDays: config.keepDays,
+				rawKeepDays: config.rawKeepDays,
+				compactMb: config.compactMb,
+				queryTimeoutSeconds: config.queryTimeoutSeconds,
+				queryConcurrency: config.queryConcurrency,
+				fsyncMs: config.fsyncMs,
+				clock,
+				log,
+			})
+		: undefined;
+	const notifier = config.fleetWebhookUrl
+		? createNotifier({ url: config.fleetWebhookUrl, ...(config.fleetWebhookFormat ? { format: config.fleetWebhookFormat } : {}), levels: config.fleetWebhookLevels, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}) })
+		: undefined;
+	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: await openSqlite(config.fleetDb), clock, log, ...(notifier ? { notifier } : {}) }) : undefined;
+
+	const ipLimiter = new RateLimiter(config.ipPerMinute, clock);
+	const jobLimiter = new RateLimiter(config.jobPerMinute, clock);
+	const fleetLimiters = Object.fromEntries(Object.entries(FLEET_LIMITS).map(([k, n]) => [k, new RateLimiter(n, clock)])) as Record<keyof typeof FLEET_LIMITS, RateLimiter>;
+	const isAdmin = (req: Request) => tokenIn(bearer(req), [config.adminToken]);
+	const isIngest = (req: Request) => tokenIn(bearer(req), config.ingestTokens);
+	const keepOpen = new WeakMap<Request, () => void>();
+
+	let settingsCache: { mtime: number; value: Record<string, unknown> } | undefined;
+	function liveDials(): Record<string, unknown> {
+		const file = join(config.dataDir, "settings.json");
+		if (!existsSync(file)) return {};
+		const mtime = statSync(file).mtimeMs;
+		if (settingsCache?.mtime === mtime) return settingsCache.value;
+		const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+		const picked = Object.fromEntries(LIVE_DIALS.filter((k) => raw[k] !== undefined).map((k) => [k, raw[k]]));
+		// Same checks as writeSettings (a dummy endpoint stands in for the fields that don't apply here).
+		const checked = validateSettings({ backend: "duckdb", events: "https://dials.invalid", ...picked }) as unknown as Record<string, unknown>;
+		const value = Object.fromEntries(LIVE_DIALS.filter((k) => checked[k] !== undefined).map((k) => [k, checked[k]]));
+		settingsCache = { mtime, value };
+		return value;
+	}
+
+	async function ingest(req: Request, ip: string): Promise<Response> {
+		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		if (!config.ingestTokens.length) return json(503, { error: "ingest is not configured (TT_ANALYTICS_INGEST_TOKENS)" });
+		if (!isIngest(req)) return json(401, { error: "ingest token required" });
+		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		const body = await readCapped(req, config.maxBodyBytes);
+		if (!body) return json(413, { error: `body over ${config.maxBodyBytes} bytes` });
+		let bytes: Uint8Array = body;
+		if (req.headers.get("content-encoding") === "gzip" || (body[0] === 0x1f && body[1] === 0x8b)) {
+			try {
+				bytes = gunzipSync(body, { maxOutputLength: config.maxInflateBytes });
+			} catch (error) {
+				if ((error as { code?: string }).code === "ERR_BUFFER_TOO_LARGE" || (error as Error).name === "RangeError") return json(413, { error: `inflated body over ${config.maxInflateBytes} bytes` });
+				return json(400, { error: "body is not valid gzip" });
+			}
+			if (bytes.length > config.maxInflateBytes) return json(413, { error: `inflated body over ${config.maxInflateBytes} bytes` });
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8"));
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		let batch;
+		try {
+			batch = validateBatch(parsed);
+		} catch (error) {
+			if (error instanceof BatchShapeError) return json(400, { error: error.message });
+			throw error;
+		}
+		const job = batch.events[0]?.job ?? batch.recordings[0]?.job;
+		if (job && !jobLimiter.take(`job:${job}`)) return tooMany(jobLimiter.retryAfter(`job:${job}`));
+		const rt = clock();
+		if (batch.events.length) await warehouse.raw.append("events", batch.events.map((r) => `${JSON.stringify({ ...r, rt })}\n`).join(""));
+		if (batch.recordings.length) await warehouse.raw.append("recordings", batch.recordings.map((r) => `${JSON.stringify({ ...r, rt })}\n`).join(""));
+		return json(202, { accepted: batch.events.length + batch.recordings.length, rejected: batch.rejected, ...(batch.errors.length ? { errors: batch.errors } : {}) });
+	}
+
+	async function query(req: Request, name: string): Promise<Response> {
+		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		if (!isQueryName(name)) return json(404, { error: `unknown query ${JSON.stringify(name)}` });
+		const raw = await readCapped(req, 64 * 1024);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: { filters?: object; options?: object } = {};
+		if (raw.length) {
+			try {
+				body = JSON.parse(Buffer.from(raw).toString("utf8"));
+			} catch {
+				return json(400, { error: "body is not JSON" });
+			}
+		}
+		try {
+			renderQuery(warehouse.context(), name, body.filters, body.options); // input errors -> 400
+		} catch (error) {
+			return json(400, { error: (error as Error).message });
+		}
+		try {
+			const started = performance.now();
+			const result = await warehouse.query(name, body.filters, body.options);
+			return json(200, { result, ms: Math.round(performance.now() - started) });
+		} catch (error) {
+			const message = (error as Error).message ?? String(error);
+			if (/interrupt/i.test(message)) return json(504, { error: `query took longer than ${config.queryTimeoutSeconds} s` });
+			log(`query ${name} failed: ${message.slice(0, 300)}`);
+			return json(500, { error: "query failed", detail: message.slice(0, 300) });
+		}
+	}
+
+	async function rollups(url: URL, kind: string): Promise<Response> {
+		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		const q = url.searchParams;
+		const limit = Math.min(10_000, Math.max(1, Number(q.get("limit") ?? 1000) || 1000));
+		const pid = q.get("pid");
+		if (pid && !/^[A-Za-z0-9_-]{1,64}$/.test(pid)) return json(400, { error: "bad pid" });
+		const dir = join(warehouse.layout.rollups, kind === "players" ? "" : kind);
+		let source: string;
+		if (kind === "players") {
+			const file = join(warehouse.layout.rollups, "players.parquet");
+			if (!existsSync(file)) return json(200, { rows: [] });
+			source = `read_parquet(${pathLit(file)})`;
+		} else {
+			const from = q.get("from") ? Math.floor(Date.parse(`${q.get("from")}T00:00:00Z`) / DAY_MS) : -Infinity;
+			const to = q.get("to") ? Math.floor(Date.parse(`${q.get("to")}T00:00:00Z`) / DAY_MS) : Infinity;
+			const files = dayFiles(dir).filter((f) => f.day >= from && f.day <= to);
+			if (!files.length) return json(200, { rows: [] });
+			source = `read_parquet([${files.map((f) => pathLit(f.path)).join(", ")}])`;
+		}
+		const where = pid && kind !== "daily" ? ` WHERE pid = '${pid}'` : "";
+		const rows = await warehouse.sql(`SELECT * FROM ${source}${where} LIMIT ${limit}`);
+		return json(200, { rows: rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v instanceof Date ? v.toISOString().slice(0, 10) : v]))) });
+	}
+
+	async function erasure(req: Request): Promise<Response> {
+		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		const raw = await readCapped(req, 64 * 1024);
+		if (!raw) return json(413, { error: "body too large" });
+		const text = Buffer.from(raw).toString("utf8");
+		let body: unknown;
+		try {
+			body = JSON.parse(text);
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		if (bearer(req) && isAdmin(req)) {
+			const b = body as { pid?: unknown; pids?: unknown };
+			const pids = (Array.isArray(b.pids) ? b.pids : [b.pid]).filter((p): p is string => typeof p === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(p));
+			if (!pids.length) return json(400, { error: "give pid or pids" });
+			const { liveRows } = await warehouse.erase(pids);
+			void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
+			logErasure(warehouse.layout.erasure, { source: "admin", pids: pids.length, liveRows });
+			return json(200, { erased: pids.length, liveRows, files: "rewriting in the background" });
+		}
+		if (!config.webhookSecret) return json(401, { error: "erasure webhook secret not configured" });
+		const check = verifyRobloxSignature(req.headers.get("roblox-signature"), text, config.webhookSecret, clock());
+		if (!check.ok) return json(401, { error: check.reason });
+		const request = parseErasureBody(body);
+		if (request.eventType === "SampleNotification") return json(200, { ok: true, sample: true });
+		if (request.eventType !== "RightToErasureRequest") return json(200, { ok: true, ignored: request.eventType });
+		if (config.universeId && request.gameIds.length && !request.gameIds.includes(config.universeId)) {
+			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "another game" });
+			return json(200, { ok: true, ignored: "another game" });
+		}
+		if (!request.userId) return json(400, { error: "no UserId in the payload" });
+		if (!config.openCloudKey || !config.universeId) {
+			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no Open Cloud key configured for the UserId -> pid lookup" });
+			return json(202, { ok: true, pending: "configure TT_ANALYTICS_OPENCLOUD_KEY and TT_ANALYTICS_UNIVERSE_ID, or erase by pid with the admin token" });
+		}
+		let pid: string | undefined;
+		try {
+			pid = await lookupPid({ apiKey: config.openCloudKey, universeId: config.universeId, deleteLink: config.erasureDeleteLink, ...(options.fetch ? { fetch: options.fetch } : {}) }, request.userId);
+		} catch (error) {
+			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: `lookup failed: ${(error as Error).message.slice(0, 200)}` });
+			return json(502, { error: "pid lookup failed; Roblox will retry" });
+		}
+		if (!pid) {
+			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no pid link (already anonymous)" });
+			return json(200, { ok: true, erased: 0 });
+		}
+		const { liveRows } = await warehouse.erase([pid]);
+		void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
+		logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "erased", pid, liveRows });
+		return json(200, { ok: true, erased: 1 });
+	}
+
+	async function health(req: Request): Promise<Response> {
+		if (!isAdmin(req)) return json(200, { ok: true });
+		const memory = process.memoryUsage();
+		const out: Record<string, unknown> = { ok: true, runtime: runtimeName(), uptimeSeconds: Math.round(process.uptime()), rssMb: Math.round(memory.rss / 1048576), heapMb: Math.round(memory.heapUsed / 1048576) };
+		if (warehouse) {
+			const oldest = warehouse.raw.oldestPending();
+			out.analytics = {
+				...warehouse.stats,
+				loaderLagSeconds: oldest === undefined ? 0 : Math.round((clock() - oldest) / 100) / 10,
+				pendingBytes: warehouse.raw.pendingBytes(),
+				live: await warehouse.liveRows(),
+			};
+		}
+		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier ? { webhook: notifier.stats } : {}) };
+		return json(200, out);
+	}
+
+	async function handle(req: Request, peer = ""): Promise<Response> {
+		const url = new URL(req.url);
+		const ip = clientIp(req, peer, config.trustProxy);
+		const path = url.pathname;
+		try {
+			if (path === "/healthz" && req.method === "GET") return await health(req);
+			if (path === "/v1/ingest") return req.method === "POST" ? await ingest(req, ip) : json(405, { error: "POST only" });
+			if (path.startsWith("/v1/fleet/")) {
+				if (!fleet) return json(404, { error: "the fleet part is off on this server" });
+				// Per-JobId limits only: many game servers can share one egress IP.
+				return (
+					(await handleFleet(req, url, { service: fleet, isAdmin, isIngest, limiters: fleetLimiters, keepOpen: (r) => keepOpen.get(r)?.() }, ip)) ?? json(404, { error: "not found" })
+				);
+			}
+			if (path === "/v1/erasure") return req.method === "POST" ? await erasure(req) : json(405, { error: "POST only" });
+			if (path === "/v1/settings" && req.method === "GET") {
+				if (!isAdmin(req) && !isIngest(req)) return json(401, { error: "token required" });
+				return json(200, liveDials());
+			}
+			if (!isAdmin(req)) return json(path.startsWith("/v1/") ? 401 : 404, { error: path.startsWith("/v1/") ? "admin token required" : "not found" });
+			if (path === "/v1/queries" && req.method === "GET") return json(200, { queries: describeQueries() });
+			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
+			if (q) return req.method === "POST" ? await query(req, q[1]) : json(405, { error: "POST only" });
+			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);
+			if (r && req.method === "GET") return await rollups(url, r[1]);
+			return json(404, { error: "not found" });
+		} catch (error) {
+			log(`${req.method} ${path} failed: ${((error as Error).message ?? String(error)).slice(0, 300)}`);
+			return json(500, { error: "internal error" });
+		}
+	}
+
+	const served: Served = await serve({
+		hostname: config.host,
+		port: config.port,
+		// Twice the ingest cap, so a body a bit over it gets a clear 413 from readCapped instead of a reset connection.
+		maxRequestBodySize: config.maxBodyBytes * 2 + 64 * 1024,
+		...(options.backend ? { backend: options.backend } : {}),
+		fetch: (req, ctx) => {
+			keepOpen.set(req, () => ctx.timeout(0));
+			return handle(req, ctx.ip);
+		},
+		error: () => json(500, { error: "internal error" }),
+	});
+
+	// Jobs: the loader every loadSeconds, the nightly export when the UTC day changes (and every 6 h for late rows), the
+	// fleet sweep every 10 s, the erasure rewrite after each erasure and at start.
+	const timers: ReturnType<typeof setInterval>[] = [];
+	let lastNightlyDay = -1;
+	let lastNightlyAt = 0;
+	if (!options.manualJobs) {
+		if (warehouse) {
+			let loading = false;
+			timers.push(
+				setInterval(() => {
+					if (loading) return;
+					loading = true;
+					warehouse
+						.load()
+						.catch((e) => log(`loader failed: ${(e as Error).message}`))
+						.finally(() => (loading = false));
+				}, config.loadSeconds * 1000),
+			);
+			const nightlyCheck = () => {
+				const now = clock();
+				const day = Math.floor(now / DAY_MS);
+				if (day === lastNightlyDay && now - lastNightlyAt < 6 * 3_600_000) return;
+				// Five minutes past midnight, so the day's last batches are in.
+				if (now - day * DAY_MS < 5 * 60_000 && lastNightlyDay !== -1) return;
+				lastNightlyDay = day;
+				lastNightlyAt = now;
+				warehouse.nightly().catch((e) => log(`nightly failed: ${(e as Error).message}`));
+			};
+			timers.push(setInterval(nightlyCheck, 60_000));
+			nightlyCheck();
+			void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
+		}
+		if (fleet) timers.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
+		for (const t of timers) t.unref?.();
+	}
+
+	return {
+		port: served.port,
+		...(warehouse ? { warehouse } : {}),
+		...(fleet ? { fleet } : {}),
+		...(notifier ? { notifier } : {}),
+		handle,
+		load: () => (warehouse ? warehouse.load() : Promise.resolve({ files: 0, rows: 0 })),
+		nightly: () => (warehouse ? warehouse.nightly() : Promise.resolve({ days: [], pruned: 0, compacted: false })),
+		async stop() {
+			for (const t of timers) clearInterval(t);
+			await served.stop();
+			if (warehouse) {
+				await warehouse.load().catch(() => {});
+				await warehouse.close();
+			}
+			await notifier?.flush();
+			await fleet?.close();
+		},
+	};
+}
