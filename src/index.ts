@@ -27,3 +27,5 @@ export * from "./graph.ts";
 export * from "./stats.ts";
 export * from "./recording.ts";
 export * from "./store/index.ts";
+export * from "./settings.ts";
+export * from "./opencloud.ts";
