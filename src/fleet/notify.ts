@@ -3,14 +3,14 @@
  * (code, branch, artifact) is sent at most once per 10 minutes, and at most `perMinute` posts go out per minute
  * (the rest are dropped and counted). The webhook URL is a secret: never logged.
  */
-import type { Alert } from "./service.ts";
+import type { Alert, AlertLevel } from "./service.ts";
 
 export type WebhookFormat = "discord" | "slack" | "json";
 
 export interface NotifierOptions {
 	url: string;
 	format?: WebhookFormat;
-	levels?: Set<"critical" | "warning">;
+	levels?: Set<AlertLevel>;
 	dedupMs?: number;
 	perMinute?: number;
 	fetch?: typeof fetch;
@@ -34,7 +34,7 @@ export function detectFormat(url: string): WebhookFormat {
 
 export function alertText(alert: Alert): string {
 	const where = [alert.branch, alert.artifact, alert.seq !== null ? `seq ${alert.seq}` : null, alert.job].filter(Boolean).join(", ");
-	return `${alert.level === "critical" ? "CRITICAL" : "Warning"}: ${alert.code}${where ? ` (${where})` : ""}: ${alert.message}`;
+	return `${alert.level === "critical" ? "CRITICAL" : alert.level === "warning" ? "Warning" : "Info"}: ${alert.code}${where ? ` (${where})` : ""}: ${alert.message}`;
 }
 
 export function webhookBody(alert: Alert, format: WebhookFormat): unknown {
@@ -49,7 +49,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
 	const parsed = new URL(url);
 	if (parsed.protocol !== "https:") throw new Error("the fleet webhook URL must be https");
 	const format = options.format ?? detectFormat(url);
-	const levels = options.levels ?? new Set(["critical"]);
+	const levels: Set<AlertLevel> = options.levels ?? new Set<AlertLevel>(["critical"]);
 	const dedupMs = options.dedupMs ?? 10 * 60_000;
 	const perMinute = options.perMinute ?? 20;
 	const clock = options.clock ?? Date.now;

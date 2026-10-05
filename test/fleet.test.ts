@@ -28,7 +28,8 @@ const hookFetch = (async (input: string | URL | Request, init?: RequestInit) => 
 const ingest = (path: string, body: unknown, headers: Record<string, string> = {}) =>
 	fetch(`${base}/v1/fleet/${path}`, { method: "POST", headers: { authorization: `Bearer ${INGEST}`, "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
-const hb = (j: string, over: Record<string, unknown> = {}) => ({ j, t: now, b: "prod", c: "prod", a: "art-41", n: 10, m: 20, s: T0 - 3_600_000, u: now, p: 1001, v: "0.3.2", q: 41, g: 3, h: "ok", sv: "640", ...over });
+/** The kernel's heartbeat (kernel Fleet.luau / fleetStatus): t = server type, s and u in unix seconds, sv = 2. */
+const hb = (j: string, over: Record<string, unknown> = {}) => ({ j, t: "public", b: "prod", c: "prod", a: "art-41", n: 10, m: 20, s: Math.floor((T0 - 3_600_000) / 1000), u: Math.floor(now / 1000), p: 1001, v: "0.3.2", q: 41, g: 3, h: "ok", sv: 2, ...over });
 
 let client: ReturnType<typeof createFleetClient>;
 
@@ -81,9 +82,10 @@ describe("ingest", () => {
 
 	test("rate limit per JobId", async () => {
 		let limited = 0;
-		for (let i = 0; i < 25; i++) if ((await ingest("heartbeat", hb("job-9"))).status === 429) limited++;
+		for (let i = 0; i < 45; i++) if ((await ingest("heartbeat", hb("job-9"))).status === 429) limited++;
 		expect(limited).toBeGreaterThan(0);
-		await ingest("closing", { j: "job-9", t: now });
+		const closing = await ingest("closing", { j: "job-9", t: now });
+		expect(closing.status).toBe(202);
 	});
 });
 
@@ -191,12 +193,43 @@ test("SSE stream: live changes and new alerts", async () => {
 	expect(seen).toEqual(["server", "alert"]);
 });
 
+describe("the kernel's and the CLI's shapes", () => {
+	test("servers: long names, seconds -> ISO, x -> experiment, sv -> serverVersion", async () => {
+		await ingest("heartbeat", hb("job-k", { x: 1, t: "reserved", b: "kernel-shape" }));
+		const [s] = (await client.servers({ branch: "kernel-shape" })).servers;
+		expect(s).toMatchObject({ job: "job-k", serverType: "reserved", experiment: true, serverVersion: 2, appliedSeq: 41, kernel: "0.3.2", health: "ok" });
+		expect(s.startedAt).toBe(new Date(Math.floor((T0 - 3_600_000) / 1000) * 1000).toISOString());
+	});
+
+	test("closing with the heartbeat body plus closing = true (BindToClose)", async () => {
+		expect((await ingest("closing", { ...hb("job-k", { b: "kernel-shape", n: 0 }), closing: true })).status).toBe(202);
+		expect((await client.servers({ branch: "kernel-shape" })).servers).toEqual([]);
+	});
+
+	test("GET reports carries { reports: [...] } rows; alerts carry at (ms) and acked", async () => {
+		const body = (await (await fetch(`${base}/v1/fleet/reports?seq=42`, { headers: { authorization: `Bearer ${ADMIN}` } })).json()) as { reports: { seq: number; job: string; result: string; at: number }[] };
+		expect(body.reports.map((r) => [r.seq, r.job, r.result])).toEqual([
+			[42, "job-1", "swapped"],
+			[42, "job-2", "failed"],
+		]);
+		expect(typeof body.reports[0].at).toBe("number");
+		const latest = (await (await fetch(`${base}/v1/fleet/reports?latest`, { headers: { authorization: `Bearer ${ADMIN}` } })).json()) as { seq: number };
+		expect(latest.seq).toBe(42);
+		const cli = await ingest("alert", { level: "warning", code: "server_stuck", message: "2 servers below #42 [job-3, job-4]", j: "cli", b: "prod", s: 42, t: Math.floor(now / 1000) });
+		expect(cli.status).toBe(202);
+		const alerts = (await (await fetch(`${base}/v1/fleet/alerts?since=0&level=warning`, { headers: { authorization: `Bearer ${ADMIN}` } })).json()) as { alerts: { code: string; at: number; acked: boolean; source: string; job: string | null }[] };
+		const stuck = alerts.alerts.find((a) => a.code === "server_stuck" && a.source === "cli");
+		expect(stuck).toMatchObject({ acked: false, job: null });
+		expect(typeof stuck?.at).toBe("number");
+	});
+});
+
 describe("notifier and storage units", () => {
 	test("formats", () => {
 		expect(detectFormat("https://discord.com/api/webhooks/1/x")).toBe("discord");
 		expect(detectFormat("https://hooks.slack.com/services/x")).toBe("slack");
 		expect(detectFormat("https://example.com/hook")).toBe("json");
-		const alert = { id: 1, level: "critical" as const, code: "server_lost", message: "3 servers ...", job: null, branch: "prod", artifact: "a", seq: null, generation: null, kernel: null, source: "server" as const, details: null, createdAt: "", ackedAt: null, ackedBy: null };
+		const alert = { id: 1, level: "critical" as const, code: "server_lost", message: "3 servers ...", job: null, branch: "prod", artifact: "a", seq: null, generation: null, kernel: null, source: "server" as const, details: null, createdAt: "", at: 0, acked: false, ackedAt: null, ackedBy: null };
 		expect(alertText(alert)).toBe("CRITICAL: server_lost (prod, a): 3 servers ...");
 		expect(webhookBody(alert, "slack")).toEqual({ text: "CRITICAL: server_lost (prod, a): 3 servers ..." });
 		expect(webhookBody(alert, "json")).toEqual({ alert });
@@ -206,7 +239,7 @@ describe("notifier and storage units", () => {
 	test("throttle", async () => {
 		const posts: unknown[] = [];
 		const n = createNotifier({ url: "https://example.com/h", perMinute: 2, fetch: (async (_u: unknown, init?: RequestInit) => (posts.push(init?.body), new Response(""))) as unknown as typeof fetch, clock: () => T0 });
-		for (let i = 0; i < 5; i++) n.notify({ id: i, level: "critical", code: `c${i}`, message: "m", job: null, branch: null, artifact: null, seq: null, generation: null, kernel: null, source: "game", details: null, createdAt: "", ackedAt: null, ackedBy: null });
+		for (let i = 0; i < 5; i++) n.notify({ id: i, level: "critical", code: `c${i}`, message: "m", job: null, branch: null, artifact: null, seq: null, generation: null, kernel: null, source: "game", details: null, createdAt: "", at: 0, acked: false, ackedAt: null, ackedBy: null });
 		await n.flush();
 		expect(posts.length).toBe(2);
 		expect(n.stats.throttled).toBe(3);

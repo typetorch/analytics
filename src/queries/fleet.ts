@@ -17,9 +17,12 @@ import { defineQuery, eventsTable, int, intOption, iso, num, numOrNull, round, s
 
 export const SERVERS_MAX_AGE_DEFAULT = { duckdb: 150, basin: 360 } as const;
 
-/** Heartbeat fields returned (props key -> column). `k` is deliberately missing. */
-const HEARTBEAT_TEXT = { b: "branch", c: "channel", a: "artifact", x: "experiment", v: "kernel", h: "health", e: "last_error", sv: "server_version" } as const;
-const HEARTBEAT_NUM = { n: "players", m: "max_players", s: "started_at", u: "last_write", p: "place_id", q: "applied_seq", g: "generation" } as const;
+/**
+ * Heartbeat fields returned (props key -> column), the kernel's fleet status (kernel src/server/Kernel.server.luau
+ * fleetStatus): t = server type, s and u = unix seconds, x = 1 during an A/B pin, sv = 2. `k` is deliberately missing.
+ */
+const HEARTBEAT_TEXT = { t: "server_type", b: "branch", c: "channel", a: "artifact", v: "kernel", h: "health", e: "last_error" } as const;
+const HEARTBEAT_NUM = { n: "players", m: "max_players", s: "started_at", u: "last_write", p: "place_id", q: "applied_seq", g: "generation", x: "experiment", sv: "server_version" } as const;
 
 function heartbeatColumns(d: Dialect): string {
 	return [
@@ -43,6 +46,8 @@ function latestHeartbeats(ctx: QueryContext, maxAgeSeconds: number, branch: stri
 
 export interface ServerInfo {
 	job: string;
+	/** public | private | reserved | studio (the heartbeat's `t`). */
+	serverType: string | null;
 	lastSeen: string;
 	ageSeconds: number;
 	branch: string | null;
@@ -53,20 +58,32 @@ export interface ServerInfo {
 	startedAt: string | null;
 	lastWrite: string | null;
 	placeId: number | null;
-	experiment: string | null;
+	/** Running an A/B experiment pin (`x = 1`). */
+	experiment: boolean;
 	kernel: string | null;
 	appliedSeq: number | null;
 	generation: number | null;
 	health: string | null;
 	lastError: string | null;
-	serverVersion: string | null;
+	/** The status format version (`sv`, 2 since kernel 0.3.2). */
+	serverVersion: number | null;
+}
+
+/** Unix seconds or ms -> ms (the kernel sends seconds). */
+export function toMs(value: number | null): number | null {
+	if (value === null) return null;
+	return value < 1e11 ? value * 1000 : value;
 }
 
 function serverInfo(r: Record<string, unknown>, now: number): ServerInfo {
 	const t = num(r.t);
-	const ms = (v: unknown) => (numOrNull(v) === null ? null : iso(num(v)));
+	const ms = (v: unknown) => {
+		const n = toMs(numOrNull(v));
+		return n === null ? null : iso(n);
+	};
 	return {
 		job: str(r.job),
+		serverType: strOrNull(r.server_type),
 		lastSeen: iso(t),
 		ageSeconds: Math.max(0, round((now - t) / 1000, 0)),
 		branch: strOrNull(r.branch),
@@ -77,13 +94,13 @@ function serverInfo(r: Record<string, unknown>, now: number): ServerInfo {
 		startedAt: ms(r.started_at),
 		lastWrite: ms(r.last_write),
 		placeId: numOrNull(r.place_id),
-		experiment: strOrNull(r.experiment),
+		experiment: num(r.experiment) === 1,
 		kernel: strOrNull(r.kernel),
 		appliedSeq: numOrNull(r.applied_seq),
 		generation: numOrNull(r.generation),
 		health: strOrNull(r.health),
 		lastError: strOrNull(r.last_error),
-		serverVersion: strOrNull(r.server_version),
+		serverVersion: numOrNull(r.server_version),
 	};
 }
 

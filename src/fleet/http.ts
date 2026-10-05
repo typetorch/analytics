@@ -9,12 +9,15 @@
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
  *   GET  /v1/fleet/stream?branch=&types=server,alert,...            Server-Sent Events
  */
-import { FleetInputError, type FleetEvent, type FleetService } from "./service.ts";
+import { FleetInputError, type AlertLevel, type FleetEvent, type FleetService } from "./service.ts";
 
 export const FLEET_BODY_LIMIT = 16 * 1024;
 
-/** Per-JobId limits per minute (heartbeats come every 30 s plus on change). */
-export const FLEET_LIMITS = { heartbeat: 20, report: 30, alert: 30, closing: 10, deploy: 30 } as const;
+/**
+ * Per-JobId limits per minute. The kernel sends at most 30 requests a minute in all (burst 10; Constants
+ * FLEET_RATE_PER_MINUTE), so these never bite a healthy server. CLI alerts all come as j = "cli".
+ */
+export const FLEET_LIMITS = { heartbeat: 40, report: 40, alert: 40, closing: 10, deploy: 30 } as const;
 
 export interface Limiter {
 	take(key: string): boolean;
@@ -79,7 +82,7 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 			if (!o.limiters[kind].take(key)) return json(429, { error: "rate limited" }, { "retry-after": String(o.limiters[kind].retryAfter(key)) });
 			if (kind === "heartbeat") await o.service.heartbeat(body, req.headers.get("x-tt-job"));
 			else if (kind === "report") await o.service.report(body);
-			else if (kind === "closing") await o.service.closing(body);
+			else if (kind === "closing") await o.service.closing(body, req.headers.get("x-tt-job"));
 			else if (kind === "deploy") await o.service.deploy(body);
 			else {
 				const alert = await o.service.alert(body);
@@ -113,13 +116,13 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 		}
 		if (route === "alerts") {
 			const level = q.get("level");
-			if (level && level !== "critical" && level !== "warning") throw new FleetInputError("level must be critical or warning");
+			if (level && !["critical", "warning", "info"].includes(level)) throw new FleetInputError("level must be critical, warning or info");
 			const since = timeParam(q.get("since"));
 			const limit = intParam(q.get("limit"), "limit");
 			return json(200, {
 				alerts: await o.service.alerts({
 					...(since !== undefined ? { since } : {}),
-					...(level ? { level: level as "critical" | "warning" } : {}),
+					...(level ? { level: level as AlertLevel } : {}),
 					unacked: q.get("unacked") === "1" || q.get("unacked") === "true",
 					...(limit !== undefined ? { limit } : {}),
 				}),

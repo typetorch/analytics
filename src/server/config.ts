@@ -45,7 +45,7 @@ export interface ServerConfig {
 	fleetDb: string;
 	fleetWebhookUrl?: string;
 	fleetWebhookFormat?: "discord" | "slack" | "json";
-	fleetWebhookLevels: Set<"critical" | "warning">;
+	fleetWebhookLevels: Set<"critical" | "warning" | "info">;
 }
 
 export function parseDotEnv(text: string): Record<string, string> {
@@ -114,7 +114,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 			.split(",")
 			.map((l) => l.trim())
 			.filter(Boolean),
-	) as Set<"critical" | "warning">;
+	) as Set<"critical" | "warning" | "info">;
 	const config: ServerConfig = {
 		dataDir,
 		host: env.TT_ANALYTICS_HOST ?? "127.0.0.1",

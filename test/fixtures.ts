@@ -126,7 +126,8 @@ export function generateFixture(seed = 7): Fixture {
 			art: q === 42 ? ART_NEW : ART_OLD,
 			branch: "prod",
 			src: "server",
-			props: JSON.stringify({ t, b: "prod", c: "prod", a: q === 42 ? ART_NEW : ART_OLD, n: 10, m: 20, s: NOW - 3_600_000, u: t, p: 1001, v: "0.3.2", q, g: 3, h: "ok", sv: "640", ...extra }),
+			// The kernel's fleet status: t = server type, s and u unix seconds, sv = 2 (k is what must never come back out).
+			props: JSON.stringify({ t: "public", b: "prod", c: "prod", a: q === 42 ? ART_NEW : ART_OLD, n: 10, m: 20, s: Math.floor((NOW - 3_600_000) / 1000), u: Math.floor(t / 1000), p: 1001, v: "0.3.2", q, g: 3, h: "ok", sv: 2, ...extra }),
 		});
 	for (let m = 10; m >= 0; m--) {
 		hb("job-1", NOW - m * 60_000, 42);

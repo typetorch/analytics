@@ -9,7 +9,7 @@
  * `k` in a heartbeat is a private server's access code: accepted, never stored, never returned.
  */
 import { DEPLOY_RESULTS } from "../schema.ts";
-import type { ServerInfo } from "../queries/fleet.ts";
+import { toMs, type ServerInfo } from "../queries/fleet.ts";
 import type { FleetDb, SqlValue } from "./db.ts";
 import type { Notifier } from "./notify.ts";
 
@@ -21,7 +21,9 @@ export const KEEP_REPORTS_MS = 30 * 86_400_000;
 export const KEEP_ALERTS_MS = 90 * 86_400_000;
 export const KEEP_GONE_SERVERS_MS = 86_400_000;
 
-export type AlertLevel = "critical" | "warning";
+/** The kernel sends critical and warning; the CLI may also post info. */
+export type AlertLevel = "critical" | "warning" | "info";
+export const ALERT_LEVELS: readonly AlertLevel[] = ["critical", "warning", "info"];
 
 export interface Alert {
 	id: number;
@@ -39,8 +41,27 @@ export interface Alert {
 	/** Extra data, e.g. { jobs: [...] } for server_lost / server_stuck. */
 	details: Record<string, unknown> | null;
 	createdAt: string;
+	/** createdAt as unix ms (what the CLI reads). */
+	at: number;
+	acked: boolean;
 	ackedAt: string | null;
 	ackedBy: string | null;
+}
+
+/** One deploy report as stored (long names; the CLI also reads the kernel's short ones). */
+export interface ReportItem {
+	seq: number;
+	branch: string | null;
+	artifact: string | null;
+	job: string;
+	result: string;
+	error: string | null;
+	seconds: number | null;
+	/** When the server sent it (unix ms; the kernel's `t`), else when it arrived. */
+	at: number;
+	generation: number | null;
+	kernel: string | null;
+	players: number | null;
 }
 
 export interface FleetReport {
@@ -58,6 +79,8 @@ export interface FleetReport {
 	behind: ServerInfo[];
 	/** JobIds below the seq with no report, 3+ minutes after the deploy started. */
 	stuck: string[];
+	/** Every report for the seq, oldest first (a retried swap may report twice; `results` counts each server's newest). */
+	reports: ReportItem[];
 }
 
 export type FleetEvent =
@@ -108,10 +131,20 @@ function int(b: Body, key: string, required = false): number | null {
 
 const JOB = 64;
 
+/** A number sent as a number or a numeric string (`sv`, `x`); anything else is null. */
+function loose(b: Body, key: string): number | null {
+	const v = b[key];
+	if (typeof v === "number" && Number.isFinite(v)) return v;
+	if (typeof v === "boolean") return v ? 1 : 0;
+	if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+	return null;
+}
+
 // Rows -> API shapes ------------------------------------------------------------------------------------------------------
 
 interface ServerRow {
 	job: string;
+	server_type: string | null;
 	branch: string | null;
 	channel: string | null;
 	artifact: string | null;
@@ -120,13 +153,13 @@ interface ServerRow {
 	started_at: number | null;
 	last_write: number | null;
 	place_id: number | null;
-	experiment: string | null;
+	experiment: number | null;
 	kernel: string | null;
 	applied_seq: number | null;
 	generation: number | null;
 	health: string | null;
 	last_error: string | null;
-	server_version: string | null;
+	server_version: number | null;
 	first_seen: number;
 	last_seen: number;
 	closed_at: number | null;
@@ -135,13 +168,14 @@ interface ServerRow {
 
 /** Columns read for servers. The access code is not among them because it is never stored. */
 const SERVER_COLUMNS =
-	"job, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, first_seen, last_seen, closed_at, lost_at";
+	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, first_seen, last_seen, closed_at, lost_at";
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
 
 function serverInfo(r: ServerRow, now: number): ServerInfo {
 	return {
 		job: r.job,
+		serverType: r.server_type,
 		lastSeen: new Date(r.last_seen).toISOString(),
 		ageSeconds: Math.max(0, Math.round((now - r.last_seen) / 1000)),
 		branch: r.branch,
@@ -152,7 +186,7 @@ function serverInfo(r: ServerRow, now: number): ServerInfo {
 		startedAt: iso(r.started_at),
 		lastWrite: iso(r.last_write),
 		placeId: r.place_id,
-		experiment: r.experiment,
+		experiment: r.experiment === 1,
 		kernel: r.kernel,
 		appliedSeq: r.applied_seq,
 		generation: r.generation,
@@ -201,6 +235,8 @@ function alertOf(r: AlertRow): Alert {
 		source: r.source,
 		details,
 		createdAt: new Date(r.created).toISOString(),
+		at: r.created,
+		acked: r.acked_at !== null,
 		ackedAt: iso(r.acked_at),
 		ackedBy: r.acked_by,
 	};
@@ -215,9 +251,9 @@ function median(values: number[]): number | null {
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS servers (
-	job TEXT PRIMARY KEY, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER,
-	last_write INTEGER, place_id INTEGER, experiment TEXT, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT,
-	last_error TEXT, server_version TEXT, sent_at INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+	job TEXT PRIMARY KEY, server_type TEXT, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER,
+	last_write INTEGER, place_id INTEGER, experiment INTEGER, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT,
+	last_error TEXT, server_version INTEGER, sent_at INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
 	closed_at INTEGER, lost_at INTEGER);
 CREATE INDEX IF NOT EXISTS servers_branch ON servers (branch, last_seen);
 CREATE INDEX IF NOT EXISTS servers_seen ON servers (last_seen);
@@ -282,37 +318,45 @@ export class FleetService {
 
 	// Ingest (game kernels; the CLI for deploy and auto_rollback) -------------------------------------------------------
 
-	/** `{j, t,b,c,a,n,m,s,u,p,k?,x?,v,q,g,h,e?,sv}`; the JobId may also come as `job` (the X-TT-Job header). */
+	/**
+	 * The kernel's fleet status plus j = JobId (kernel src/server/Fleet.luau): { t = server type, b, c?, a?, n, m,
+	 * s = start (unix s), u = now (unix s), p, x = 1?, v, q, g, h, e?, sv = 2 }. `k` (an access code) is ignored. The
+	 * JobId may also come in the X-TT-Job header.
+	 */
 	async heartbeat(raw: unknown, jobHeader?: string | null): Promise<void> {
 		const b = asBody(raw);
 		const job = text(b, "j", JOB) ?? (jobHeader ? text({ j: jobHeader }, "j", JOB) : null);
 		if (!job) throw new FleetInputError("j (the JobId) is required");
 		const now = this.clock();
+		// `t` is the server type (a string); a number there is taken as the send time.
+		const serverType = typeof b.t === "string" ? text(b, "t", 16) : null;
+		const sentAt = typeof b.t === "number" ? toMs(int(b, "t")) : null;
 		const row: SqlValue[] = [
 			job,
+			serverType,
 			text(b, "b", 64),
 			text(b, "c", 16),
 			text(b, "a", 64),
 			int(b, "n"),
 			int(b, "m"),
-			int(b, "s"),
-			int(b, "u"),
+			toMs(int(b, "s")),
+			toMs(int(b, "u")),
 			int(b, "p"),
-			text(b, "x", 128),
+			loose(b, "x") === 1 ? 1 : 0,
 			text(b, "v", 32),
 			int(b, "q"),
 			int(b, "g"),
 			text(b, "h", 16),
 			text(b, "e", 500),
-			text(b, "sv", 32),
-			int(b, "t"),
+			loose(b, "sv"),
+			sentAt,
 			now,
 			now,
 		];
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
 		await this.db.run(
-			`INSERT INTO servers (job, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, first_seen, last_seen) ` +
-				`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET branch = excluded.branch, channel = excluded.channel, ` +
+			`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, first_seen, last_seen) ` +
+				`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
 				`artifact = excluded.artifact, players = excluded.players, max_players = excluded.max_players, started_at = excluded.started_at, ` +
 				`last_write = excluded.last_write, place_id = excluded.place_id, experiment = excluded.experiment, kernel = excluded.kernel, ` +
 				`applied_seq = excluded.applied_seq, generation = excluded.generation, health = excluded.health, last_error = excluded.last_error, ` +
@@ -366,10 +410,15 @@ export class FleetService {
 		this.emit({ type: "deploy", seq, branch, artifact });
 	}
 
-	/** `{j, t}`: the server is shutting down (no "server lost" alert for it). */
-	async closing(raw: unknown): Promise<void> {
+	/**
+	 * The server is shutting down (no "server lost" alert for it). The kernel sends its heartbeat body plus
+	 * `closing = true` from BindToClose; `{ j, t }` alone works too.
+	 */
+	async closing(raw: unknown, jobHeader?: string | null): Promise<void> {
 		const b = asBody(raw);
-		const job = text(b, "j", JOB, true) as string;
+		const job = text(b, "j", JOB) ?? (jobHeader ? text({ j: jobHeader }, "j", JOB) : null);
+		if (!job) throw new FleetInputError("j (the JobId) is required");
+		if (Object.keys(b).some((k) => !["j", "t", "closing"].includes(k))) await this.heartbeat(b, jobHeader);
 		const now = this.clock();
 		await this.db.run("UPDATE servers SET closed_at = ?, last_seen = ? WHERE job = ?", [now, now, job]);
 		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
@@ -380,15 +429,16 @@ export class FleetService {
 	async alert(raw: unknown, source: "game" | "cli" = "game"): Promise<Alert> {
 		const b = asBody(raw);
 		const level = text(b, "level", 16, true);
-		if (level !== "critical" && level !== "warning") throw new FleetInputError("level must be critical or warning");
+		if (!(ALERT_LEVELS as readonly string[]).includes(level ?? "")) throw new FleetInputError("level must be critical, warning or info");
 		const code = text(b, "code", 64, true) as string;
 		if (!/^[a-z0-9_.-]+$/.test(code)) throw new FleetInputError("code must be lowercase letters, digits, _ . -");
-		const fromCli = source === "cli" || code === "auto_rollback";
+		// The CLI posts with j = "cli" (cli/src/fleet.ts alertBody); auto_rollback only ever comes from the CLI.
+		const fromCli = source === "cli" || code === "auto_rollback" || b.j === "cli";
 		return this.addAlert({
-			level,
+			level: level as AlertLevel,
 			code,
 			message: text(b, "message", 500, true) as string,
-			job: text(b, "j", JOB),
+			job: b.j === "cli" ? null : text(b, "j", JOB),
 			branch: text(b, "b", 64),
 			artifact: text(b, "a", 64),
 			seq: int(b, "s"),
@@ -400,7 +450,7 @@ export class FleetService {
 		});
 	}
 
-	private async addAlert(a: Omit<Alert, "id" | "createdAt" | "ackedAt" | "ackedBy" | "details"> & { t?: number | null; details: Record<string, unknown> | null }): Promise<Alert> {
+	private async addAlert(a: Omit<Alert, "id" | "createdAt" | "at" | "acked" | "ackedAt" | "ackedBy" | "details"> & { t?: number | null; details: Record<string, unknown> | null }): Promise<Alert> {
 		const now = this.clock();
 		const { lastId } = await this.db.run(
 			"INSERT INTO alerts (level, code, message, job, branch, artifact, seq, t, generation, kernel, source, details, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -454,7 +504,7 @@ export class FleetService {
 			seq =
 				(await this.db.first<{ s: number | null }>("SELECT MAX(seq) AS s FROM (SELECT seq, branch FROM reports UNION ALL SELECT seq, branch FROM deploys) WHERE ? IS NULL OR branch = ?", [branch, branch]))?.s ?? null;
 		}
-		const empty: FleetReport = { seq, branch: options.branch ?? null, artifact: null, startedAt: null, firstReport: null, lastReport: null, reported: 0, results: [], errors: [], behind: [], stuck: [] };
+		const empty: FleetReport = { seq, branch: options.branch ?? null, artifact: null, startedAt: null, firstReport: null, lastReport: null, reported: 0, results: [], errors: [], behind: [], stuck: [], reports: [] };
 		if (seq === null) return empty;
 		const deploy = await this.db.first<{ branch: string | null; artifact: string | null; received: number }>("SELECT branch, artifact, received FROM deploys WHERE seq = ?", [seq]);
 		const latest = await this.db.all<{ job: string; result: string; error: string | null; seconds: number | null; players: number | null; received: number; branch: string | null; artifact: string | null }>(
@@ -462,6 +512,10 @@ export class FleetService {
 			[seq],
 		);
 		const branch = options.branch ?? deploy?.branch ?? latest.find((r) => r.branch)?.branch ?? null;
+		const all = await this.db.all<{ seq: number; branch: string | null; artifact: string | null; job: string; result: string; error: string | null; seconds: number | null; t: number | null; received: number; generation: number | null; kernel: string | null; players: number | null }>(
+			"SELECT seq, branch, artifact, job, result, error, seconds, t, received, generation, kernel, players FROM reports WHERE seq = ? ORDER BY id",
+			[seq],
+		);
 		const groups = new Map<string, { servers: number; players: number; seconds: number[] }>();
 		const errors = new Map<string, { servers: number; exampleJob: string }>();
 		for (const r of latest) {
@@ -506,6 +560,19 @@ export class FleetService {
 			errors: [...errors].map(([error, e]) => ({ error, ...e })).sort((a, b) => b.servers - a.servers),
 			behind: behindRows.map((r) => serverInfo(r, now)),
 			stuck,
+			reports: all.map((r) => ({
+				seq: r.seq,
+				branch: r.branch,
+				artifact: r.artifact,
+				job: r.job,
+				result: r.result,
+				error: r.error,
+				seconds: r.seconds,
+				at: toMs(r.t) ?? r.received,
+				generation: r.generation,
+				kernel: r.kernel,
+				players: r.players,
+			})),
 		};
 	}
 

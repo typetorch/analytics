@@ -35,8 +35,6 @@ export interface AnalyticsSettings {
 	/** Seconds between tech-health samples. */
 	techEvery?: number;
 	experiments?: Record<string, ExperimentSetting>;
-	/** The fleet API's base URL (heartbeats, deploy reports, alerts), when the game uses it. */
-	fleet?: string;
 }
 
 function checkUrl(value: unknown, what: string): string {
@@ -72,7 +70,6 @@ export function validateSettings(input: unknown): AnalyticsSettings {
 	if (raw.flushSeconds !== undefined) out.flushSeconds = checkNumber(raw.flushSeconds, "flushSeconds", 2, 300);
 	if (raw.recordShare !== undefined) out.recordShare = checkNumber(raw.recordShare, "recordShare", 0, 1);
 	if (raw.techEvery !== undefined) out.techEvery = checkNumber(raw.techEvery, "techEvery", 5, 3600);
-	if (raw.fleet !== undefined) out.fleet = checkUrl(raw.fleet, "fleet");
 	if (raw.experiments !== undefined) {
 		if (typeof raw.experiments !== "object" || raw.experiments === null || Array.isArray(raw.experiments)) throw new Error("experiments must be an object");
 		out.experiments = {};
