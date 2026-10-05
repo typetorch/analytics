@@ -1,0 +1,104 @@
+{
+	"fields": [
+		{
+			"name": "v",
+			"type": "int32",
+			"required": true
+		},
+		{
+			"name": "t",
+			"type": "int64",
+			"required": true
+		},
+		{
+			"name": "kind",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "name",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "pid",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "sid",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "job",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "srv",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "place",
+			"type": "int64",
+			"required": false
+		},
+		{
+			"name": "art",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "seq",
+			"type": "int64",
+			"required": false
+		},
+		{
+			"name": "branch",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "channel",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "dev",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "newp",
+			"type": "bool",
+			"required": false
+		},
+		{
+			"name": "state",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "exp",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "sexp",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "src",
+			"type": "string",
+			"required": false
+		},
+		{
+			"name": "props",
+			"type": "string",
+			"required": false
+		}
+	]
+}

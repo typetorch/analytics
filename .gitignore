@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# secrets and local config
+.env
+.env.*
+!.env.example
+analytics.env
+
+# server data (raw batches, DuckDB files, Parquet) and load-test output
+data/
+.loadtest/
+
+# private working notes (not published)
+CHANGELOG.md
+*.log

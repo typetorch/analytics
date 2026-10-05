@@ -1,0 +1,44 @@
+{
+	"name": "@typetorch/analytics",
+	"version": "0.1.0",
+	"description": "TypeTorch analytics, read side: the shared event types, Basin and DuckDB storage adapters, the logical queries (retention, funnels, flow graphs, experiments, first-session signals) and a small DuckDB analytics server for a 1 GB VPS.",
+	"license": "MIT",
+	"private": true,
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/typetorch/analytics.git"
+	},
+	"keywords": ["roblox", "roblox-ts", "typetorch", "analytics", "duckdb", "cloudflare", "basin", "iceberg"],
+	"type": "module",
+	"bin": {
+		"typetorch-analytics-server": "dist/server/main.js"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"bun": "./src/index.ts",
+			"default": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": ["dist", "basin", "README.md", "LICENSE"],
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"server": "bun src/server/main.ts",
+		"build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit",
+		"basin:schemas": "bun scripts/gen-basin-schemas.ts",
+		"loadtest": "bun scripts/loadtest.ts"
+	},
+	"dependencies": {
+		"@duckdb/node-api": "^1.5.6-r.1"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.2",
+		"@types/node": "^26.6.4",
+		"typescript": "^5.9.0"
+	}
+}

@@ -1,0 +1,54 @@
+{
+	"fields": [
+		{
+			"name": "v",
+			"type": "int32",
+			"required": true
+		},
+		{
+			"name": "t",
+			"type": "int64",
+			"required": true
+		},
+		{
+			"name": "pid",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "sid",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "job",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "art",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "chunk",
+			"type": "int32",
+			"required": true
+		},
+		{
+			"name": "codec",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "data",
+			"type": "string",
+			"required": true
+		},
+		{
+			"name": "n",
+			"type": "int32",
+			"required": true
+		}
+	]
+}
