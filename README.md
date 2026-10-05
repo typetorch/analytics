@@ -26,12 +26,15 @@ Runs on Bun and on Node 20+ (the fleet part needs Node 22.5+ for `node:sqlite`, 
 
 ## Row format
 
-Two row kinds, flat JSON, one object per row. `src/schema.ts` is the source of truth; the validator and the Basin
-stream schemas are generated from it.
+Two row kinds, flat JSON, one object per row, as the framework writes them (`framework/src/analytics/SCHEMA.md`, the
+contract; `src/schema.ts` mirrors it and generates the validator and the Basin stream schemas). The framework sends
+every column on every row: a missing value is `""`, `0` or `false` (`pid` and `sid` are `""` on server rows,
+`exp` is `{}`). `null` or a left-out optional column is accepted too.
 
 **Events:** `v` (1), `t` (unix ms), `kind`, `name`, `pid` (random player id, never a UserId), `sid`, `job`, `srv`,
 `place`, `art`, `seq`, `branch`, `channel`, `dev` (`desktop` `phone` `tablet` `console` `vr` `unknown`), `newp`
-(first-ever session), `state` (`zone:Lobby|screen:Shop|activity:round`), `exp` (JSON of variants), `sexp`, `src`
+(first-ever session), `state` (after the event: `zone:Lobby|screen:Shop|activity:round`, empty parts left out), `exp`
+(JSON of variants), `sexp` (the artifact id of a kernel A/B pin, or `""`), `src`
 (`server` `client`), `props` (JSON, at most 4 KB). Required: `v`, `t`, `kind`, `name`, `job`, `art`.
 
 Kinds: `session` `tech` `zone` `funnel` `purchase` `currency` `state` `experiment` `custom` `recording_meta` `fleet`.
@@ -39,13 +42,13 @@ Kinds: `session` `tech` `zone` `funnel` `purchase` `currency` `state` `experimen
 **Recordings** (first sessions, packed): `v`, `t`, `pid`, `sid`, `job`, `art`, `chunk`, `codec` (`tt-rec-1`),
 `data` (base64), `n`.
 
-Props the queries read (each can be overridden by a query option):
+Props the queries read (SCHEMA.md "Event catalog"; each can be overridden by a query option):
 
 | Rows | Props |
 |---|---|
-| `funnel` (`name` = funnel id) | `step` (number), `label` |
-| `purchase` | `robux`, `product` |
-| `currency` (`name` = currency) | `amount` |
+| `funnel` (`name` = funnel id; `step(funnel, index, name?)`) | `i` (the index), `step` (the name) |
+| `purchase` (`name` = kind, default `product`) | `robux`, `product` |
+| `currency` (`name` = currency) | `delta` |
 | `experiment` (`name` = experiment) | `variant` |
 | `fleet` `heartbeat` (no pid; `job` = JobId) | the kernel's fleet status: `t` server type, `b` `c` `a` `n` `m`, `s` `u` (unix s), `p`, `x` (1 = A/B pin), `v`, `q`, `g`, `h`, `e`, `sv`. `k` is never read |
 | `fleet` `deploy_report` | `s` `b` `a` `j` `r` `e` `d` `t` `g` `k` `p` |
@@ -86,8 +89,9 @@ const { servers } = await fleet.servers({ branch: "prod" });
 - **writeSettings** is write-only: it PATCHes the InExperienceConfig draft with only `TypeTorchAnalytics`, then
   publishes. API keys can't read configs (universe:read is OAuth-only), so nothing reads back; `published: true` comes
   from the publish answer. The publish ships the whole draft, including someone else's unpublished edits to other
-  keys. Settings: `{ backend: "basin" | "duckdb", events, recordings?, token?, flushSeconds?, recordShare?,
-  techEvery?, experiments?: { name: { variants, split?, on? } } }`.
+  keys. Settings, as the framework reads them (SCHEMA.md "Sink settings"): `{ backend: "basin" | "duckdb", events,
+  recordings?, token?, flushSeconds? (5-300), recordShare? (0-1), techEvery? (15-3600), experiments?: { name: {
+  active?, weights?, variant? } } }`. URLs must be https here (the framework also takes http).
 
 ## Queries
 
@@ -100,13 +104,15 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `timeline` | one player's sessions and events (by `pid`) | 90 days |
 | `player-graph` | one player's node graph: states as nodes, moves as edges with counts and time | 90 days |
 | `flow` | the merged flow graph for a filter (where most go next, where they quit) | 7 days |
-| `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`) or per server (`sexp`) | 30 days |
-| `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from recordings idle spots, camera spins, repeated clicks | 14 days |
+| `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
+| `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
 | `top-events` | the most logged names per kind | 7 days |
 | `servers` | game servers from `fleet` heartbeat rows (history; the CLI's live view is the fleet API) | recent |
 | `deployReport` | a deploy's results, errors and servers still below its seq, from `fleet` rows | 2 days |
 
-Session length is the time between a session's first and last event. Graph options: `facet` (`all`, `zone`,
+Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
+once: the DuckDB server drops exact duplicate rows when it writes each day's Parquet file; today's numbers and Basin can
+count a resent batch twice (only after a hot swap during a request). Graph options: `facet` (`all`, `zone`,
 `screen`, `activity`), `minCount`, `maxEdges`. Retention, bounce and "left the game" ignore sessions and days that
 aren't over yet.
 
@@ -125,7 +131,7 @@ Example output (the test fixture: 300 players over 21 days; arrays cut to two it
 <details><summary>timeline, flow (Mermaid), experiment, confusion</summary>
 
 ```json
-{"pid":"p0003","sessions":[{"sid":"s6","start":"2026-09-26T13:30:23.565Z","end":"2026-09-26T13:58:27.755Z","minutes":28.1,"events":54,"firstSession":true,"art":"e4f5a6b-222222","dev":"console"},"..."],"events":[{"time":"2026-09-26T13:30:23.565Z","kind":"session","name":"start","sid":"s6","state":"zone:Lobby|screen:|activity:idle","props":{"from":"home"}},"..."],"truncated":true}
+{"pid":"p0003","sessions":[{"sid":"s6","start":"2026-09-26T13:30:23.565Z","end":"2026-09-26T13:58:27.755Z","minutes":28.1,"events":54,"firstSession":true,"art":"e4f5a6b-222222","dev":"console"},"..."],"events":[{"time":"2026-09-26T13:30:23.565Z","kind":"session","name":"join","sid":"s6","state":"zone:Lobby|activity:idle","props":{"from":"direct","age":"1-7d","prem":false,"friends":0,"ret":-1}},"..."],"truncated":true}
 ```
 
 ```mermaid
@@ -144,11 +150,11 @@ flowchart LR
 
 ```json
 {"experiment":"onboarding","scope":"player","control":"short","variants":[{"variant":"long","players":150,"returned":{"rate":0.96,"count":144},"payers":{"rate":0.1267,"count":19},"playtimeMinutes":63.89,"robuxPerPlayer":32.45,"sessionsPerPlayer":4.21},"..."],"comparisons":[{"variant":"long","metric":"returned","control":0.82,"value":0.96,"diff":0.14,"lift":0.1707,"sure":0.9999,"method":"two-proportion z-test","words":"long keeps more players: 99% sure"},"..."],"mixedPlayers":0}
-{"firstSessions":206,"players":206,"earlyLeave":[{"zone":"Lobby","sessions":83,"early":47,"share":0.5663},"..."],"screenLoops":[{"screen":"Shop","sessions":14,"loopSessions":14,"share":1,"opens":56}],"backAndForth":[{"a":"Arena","b":"Lobby","sessions":143,"flagged":98,"share":0.6853},"..."],"recordings":{"available":true,"sessions":6,"idle":[],"cameraSpin":[],"repeatedClicks":[{"button":"Shop/Buy/Coins100","count":6,"avgPresses":3}]}}
+{"firstSessions":206,"players":206,"earlyLeave":[{"zone":"Lobby","sessions":83,"early":47,"share":0.5663},"..."],"screenLoops":[{"screen":"Shop","sessions":14,"loopSessions":14,"share":1,"opens":56}],"backAndForth":[{"a":"Arena","b":"Lobby","sessions":143,"flagged":98,"share":0.6853},"..."],"recordings":{"available":true,"sessions":6,"failedSessions":0,"idle":[{"zone":"Lobby","count":6,"avgSeconds":12}],"cameraSpin":[],"repeatedClicks":[{"button":"Shop/Buy/Coins100","count":6,"avgPresses":3}]}}
 ```
 
-`recordings` above used a test decoder; with the real data it says `available: false` until the tt-rec-1 decoder is
-written (see [Open issues](#open-issues)).
+The recordings are real tt-rec-1 chunks (decoded by `src/recording.ts`; a test decodes a chunk written by the
+framework's own encoder, byte for byte).
 </details>
 
 <details><summary>top-events, servers, deployReport</summary>
@@ -386,10 +392,10 @@ No errors in any run. Queries right after on the 600,000 live rows (1 core): ove
 
 | Big day (1 core, DuckDB 400MB / 2 threads, synthetic rows) | 2 M events | 5 M events |
 |---|---|---|
-| Load raw files (0.7 / 1.8 GB) into live.duckdb | 17 s, 351 MB RSS | 40 s, 392 MB |
-| Nightly: Parquet export (sorted) + rollups | 12 s, 570 MB | 31 s, 565 MB |
-| overview / roblox / retention over Parquet | 1.1 / 0.8 / 0.3 s | 3.8 / 3.2 / 0.6 s |
-| flow graph / experiment | 4.9 / 6.8 s | 17.6 / 13.2 s |
+| Load raw files (0.7 / 1.8 GB) into live.duckdb | 17 s, 349 MB RSS | 37 s, 385 MB |
+| Nightly: Parquet export (duplicates dropped, sorted) + rollups | 13 s, 562 MB | 36 s, 564 MB |
+| overview / roblox / retention over Parquet | 0.7 / 0.7 / 0.3 s | 2.2 / 2.7 / 0.6 s |
+| flow graph / experiment | 4.9 / 6.3 s | 15.5 / 13.6 s |
 
 | Fleet: 2,500 servers, a heartbeat every 30 s (83/s), 90 s | Bun, 1 core | Node 22, 1 core |
 |---|---|---|
@@ -420,15 +426,14 @@ endpoints; nothing reaches a real service.
 
 ## Open issues
 
-- **tt-rec-1 decoder:** a marked TODO in `src/recording.ts` until the framework documents the format in
-  `framework/src/analytics/SCHEMA.md`. The detectors and the confusion query's recording phase are written and tested
-  with a test decoder.
 - **Basin, live:** the SQL API's response body, `json_get_*` on integer values, and the real ingest delay need a run
   against your account. The Basin docs disagree on JSON functions (the function reference lists `json_get_*`, the
   troubleshooting page says JSON functions aren't implemented); if they fail, extract the needed props into columns
-  in the pipeline SQL.
+  in the pipeline SQL. The stream schemas here mark only `v t kind name job art` required (the framework's suggested
+  ones mark every column required; both accept what the framework sends).
 - **Basin erasure** deletes only the DataStore link (anonymous rows stay); a DuckDB `iceberg` DELETE job is possible
   later.
-- **Dockerfile** not built here (Docker Desktop wasn't running); the systemd + Caddy path is the tested shape.
+- **Not run here:** the Dockerfile (Docker Desktop was off), the systemd unit and the Caddyfile (no VPS). The server
+  itself runs under Bun and Node 22 (tests, smoke test, load tests).
 - The CLI's own fleet client and this API agree on paths and fields (see the fleet table); `servers` rows carry no
   `hasAccessCode` (the kernel never sends `k`).

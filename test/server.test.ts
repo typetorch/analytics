@@ -170,8 +170,10 @@ describe("nightly export", () => {
 		expect(edges.rows.length).toBe(5);
 	});
 
-	test("late rows for an exported day are merged into its file, not duplicated", async () => {
+	test("late rows for an exported day are merged into its file; resent rows are kept once", async () => {
 		const late = events.filter((e) => e.t < dayStart).slice(0, 10).map((e) => ({ ...e, name: "late", t: e.t + 1 }));
+		expect((await post("/v1/ingest", null, ingestHeaders, gz({ events: late }))).status).toBe(202);
+		// The same batch again (delivery is at least once).
 		expect((await post("/v1/ingest", null, ingestHeaders, gz({ events: late }))).status).toBe(202);
 		await app.load();
 		now = NOW + DAY + 7 * 3_600_000;

@@ -8,8 +8,6 @@
 import {
 	decodeSessions,
 	detectSignals,
-	hasDecoder,
-	RecordingCodecUnavailable,
 	type ChunkRow,
 	type DetectorOptions,
 	type ZoneTimeline,
@@ -30,9 +28,11 @@ export interface ConfusionOptions extends DetectorOptions {
 
 export interface RecordingSignals {
 	available: boolean;
-	/** Why recordings weren't used (no decoder yet, nothing recorded). */
+	/** Why recordings weren't used (nothing recorded in the range). */
 	reason?: string;
 	sessions?: number;
+	/** Sessions whose chunks didn't decode (malformed or an unknown codec). */
+	failedSessions?: number;
 	idle?: { zone: string; count: number; avgSeconds: number }[];
 	cameraSpin?: { zone: string; count: number }[];
 	repeatedClicks?: { button: string; count: number; avgPresses: number }[];
@@ -111,9 +111,6 @@ export const confusion = defineQuery<ConfusionOptions, ConfusionResult>({
 	},
 	async finish(result, ctx, f, o, run) {
 		if (o.maxChunks === 0) return { ...result, recordings: { available: false, reason: "maxChunks is 0" } };
-		if (!hasDecoder("tt-rec-1")) {
-			return { ...result, recordings: { available: false, reason: "the tt-rec-1 decoder isn't written yet (TODO: framework/src/analytics/SCHEMA.md)" } };
-		}
 		const lim = ctx.dialect.limit;
 		const table = eventsTable(ctx, f);
 		const cond = playerRows(f, ctx, firstSession);
@@ -137,13 +134,7 @@ export const confusion = defineQuery<ConfusionOptions, ConfusionResult>({
 			list.push({ t: num(r.t), zone: strOrNull(r.zone) });
 			zones.set(str(r.sid), list);
 		}
-		let decoded;
-		try {
-			decoded = decodeSessions(chunks);
-		} catch (error) {
-			if (error instanceof RecordingCodecUnavailable) return { ...result, recordings: { available: false, reason: error.message } };
-			throw error;
-		}
+		const { recordings: decoded, failed } = decodeSessions(chunks);
 		const idle = new Map<string, { count: number; ms: number }>();
 		const spin = new Map<string, number>();
 		const clicks = new Map<string, { count: number; presses: number }>();
@@ -172,6 +163,7 @@ export const confusion = defineQuery<ConfusionOptions, ConfusionResult>({
 			recordings: {
 				available: true,
 				sessions: decoded.length,
+				failedSessions: failed,
 				idle: [...idle].map(([zone, e]) => ({ zone, count: e.count, avgSeconds: round(e.ms / e.count / 1000, 1) })).sort(byCount),
 				cameraSpin: [...spin].map(([zone, count]) => ({ zone, count })).sort(byCount),
 				repeatedClicks: [...clicks].map(([button, e]) => ({ button, count: e.count, avgPresses: round(e.presses / e.count, 1) })).sort(byCount),

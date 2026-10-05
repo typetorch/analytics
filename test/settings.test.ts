@@ -9,7 +9,7 @@ const good = {
 	recordings: "https://def456.ingest.cloudflare.com",
 	token: "send-only-token-0123456789",
 	recordShare: 0.5,
-	experiments: { onboarding: { variants: ["short", "long"], split: [50, 50] } },
+	experiments: { onboarding: { active: true, weights: [1, 1] }, shop: { variant: "big" } },
 };
 
 function recorder(responses: { status: number; body?: unknown }[]) {
@@ -34,9 +34,12 @@ describe("validateSettings", () => {
 		[{ recordings: undefined }, "recordings stream"],
 		[{ recordShare: 2 }, "recordShare"],
 		[{ token: "short" }, "token"],
-		[{ experiments: { onboarding: { variants: ["a"] } } }, "2-10"],
-		[{ experiments: { onboarding: { variants: ["a", "b"], split: [50, 40] } } }, "add up to 100"],
-		[{ experiments: { "bad name": { variants: ["a", "b"] } } }, "experiment name"],
+		[{ experiments: { onboarding: { weights: [0, 0] } } }, "weights"],
+		[{ experiments: { onboarding: { active: "yes" } } }, "active"],
+		[{ experiments: { onboarding: { variant: "a b" } } }, "variant"],
+		[{ experiments: { "bad name": {} } }, "experiment name"],
+		[{ flushSeconds: 2 }, "flushSeconds"],
+		[{ techEvery: 5 }, "techEvery"],
 	])("refuses %p", (over, message) => {
 		expect(() => validateSettings({ ...good, ...over })).toThrow(message);
 	});

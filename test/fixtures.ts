@@ -7,6 +7,7 @@ import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { createTableSql, fieldsOf } from "../src/duckdb/layout.ts";
 import type { EventRow, RecordingRow } from "../src/schema.ts";
 import { prng } from "../src/stats.ts";
+import { RecWriter } from "./recwriter.ts";
 
 export const DAY = 86_400_000;
 /** 2026-10-05 12:00 UTC */
@@ -24,8 +25,9 @@ export interface Fixture {
 
 const ZONES = ["Lobby", "Shop", "Arena", "Forest"];
 
+/** The framework leaves empty parts out: `zone:Lobby|activity:idle`, `zone:Lobby|screen:Shop|activity:idle`. */
 function state(zone: string, screen = "", activity = "idle"): string {
-	return `zone:${zone}|screen:${screen}|activity:${activity}`;
+	return [`zone:${zone}`, screen ? `screen:${screen}` : "", `activity:${activity}`].filter(Boolean).join("|");
 }
 
 export function generateFixture(seed = 7): Fixture {
@@ -55,13 +57,15 @@ export function generateFixture(seed = 7): Fixture {
 			const minutes = bounce ? 0.5 : 2 + rnd() * 28;
 			// Today's sessions happen in the morning, so they're over by NOW.
 			let t = day * DAY + Math.floor((day === TODAY ? 2 : 8 + rnd() * 10) * 3_600_000);
+			const sessionStart = t;
 			const end = t + Math.floor(minutes * 60_000);
-			const base = { v: 1 as const, pid, sid, job, srv: "public", place: 1001, art, seq: art === ART_OLD ? 41 : 42, branch: "prod", channel: "prod", dev, newp: first, exp, src: "server" as const };
+			// Every 5th player is on servers running a kernel experiment pin (sexp = the pinned artifact id; "" = none).
+			const base = { v: 1 as const, pid, sid, job, srv: "public", place: 1001, art, seq: art === ART_OLD ? 41 : 42, branch: "prod", channel: "prod", dev, newp: first, exp, sexp: i % 5 === 0 ? "pin-art-1" : "", src: "server" as const };
 			let zone = "Lobby";
 			let screen = "";
 			const push = (kind: EventRow["kind"], name: string, props?: object, at = t) =>
 				events.push({ ...base, t: at, kind, name, state: state(zone, screen), ...(props ? { props: JSON.stringify(props) } : {}) });
-			push("session", "start", { from: "home" });
+			push("session", "join", { from: "direct", age: "1-7d", prem: false, friends: 0, ret: first ? -1 : 1 });
 			if (first) push("experiment", "onboarding", { variant });
 			// Onboarding funnel in the first session.
 			if (first) {
@@ -69,7 +73,8 @@ export function generateFixture(seed = 7): Fixture {
 				for (let step = 1; step <= 5; step++) {
 					t += 5_000;
 					if (t >= end) break;
-					push("funnel", "onboarding", { step, label: ["spawned", "moved", "opened_shop", "bought_item", "joined_round"][step - 1] });
+					// step(funnel, index, name): props i (index) and step (name), as the framework writes them.
+					push("funnel", "onboarding", { i: step, step: ["spawned", "moved", "opened_shop", "bought_item", "joined_round"][step - 1] });
 					if (rnd() > go) break;
 				}
 			}
@@ -107,11 +112,18 @@ export function generateFixture(seed = 7): Fixture {
 				}
 			}
 			if (payer && sessionIndex === 1) push("purchase", "product", { product: 555, robux: 199, where: "shop" });
-			push("session", "end", { reason: "left" }, end);
+			push("session", "leave", { secs: Math.round((end - (day * DAY)) / 1000), why: "left" }, end);
 			if (first && i % 25 === 0) {
-				// A recording: JSON in base64 (the test decoder reads it); 3 presses of Shop/Buy within a second.
-				const payload = { samples: [], inputs: [0, 300, 600].map((dt) => ({ t: day * DAY + 9 * 3_600_000 + dt, type: "button", target: "Shop/Buy/Coins100" })) };
-				recordings.push({ v: 1, t: end, pid, sid, job, art, chunk: 0, codec: "tt-rec-1", data: Buffer.from(JSON.stringify(payload)).toString("base64"), n: 3 });
+				// A real tt-rec-1 recording in two chunks: 12 s standing still in the Lobby, then 3 presses of the same
+				// button within a second.
+				const start = sessionStart;
+				const a = new RecWriter();
+				for (let ms = 0; ms <= 12_000; ms += 100) a.sample(ms, 10, 3, -20, 0, 10, 8, -30, 0, -0.2);
+				const b = new RecWriter();
+				b.key(0, 1, 119);
+				for (const dt of [100, 400, 700]) b.event(dt, 1, "Shop/Buy/Coins100");
+				recordings.push({ v: 1, t: start, pid, sid, job, art, chunk: 0, codec: "tt-rec-1", data: a.finish(false), n: a.samples });
+				recordings.push({ v: 1, t: start + 13_000, pid, sid, job, art, chunk: 1, codec: "tt-rec-1", data: b.finish(true), n: 0 });
 			}
 		});
 	}

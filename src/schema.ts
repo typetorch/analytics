@@ -174,20 +174,20 @@ export function duckdbType(type: FieldType): string {
 }
 
 /**
- * Prop keys the logical queries read (the framework writes them). Documented in plans/16 section 6a and the README.
- * A query option can override each one.
+ * Prop keys the logical queries read, as the framework writes them (framework/src/analytics/SCHEMA.md "Event
+ * catalog"). A query option can override each one.
  */
 export const PROP_KEYS = {
-	/** funnel rows (`kind = funnel`, `name` = funnel id): the step number. */
-	funnelStep: "step",
-	/** funnel rows: the step's label, e.g. "opened_shop". */
-	funnelLabel: "label",
+	/** funnel rows (`kind = funnel`, `name` = funnel id), from `step(funnel, index, name?)`: the step index. */
+	funnelStep: "i",
+	/** funnel rows: the step's name, e.g. "opened_shop". */
+	funnelLabel: "step",
 	/** purchase rows: Robux spent. */
 	purchaseRobux: "robux",
 	/** purchase rows: the product id. */
 	purchaseProduct: "product",
 	/** currency rows (`name` = currency): the signed amount. */
-	currencyAmount: "amount",
+	currencyAmount: "delta",
 	/** experiment rows (`name` = experiment): the variant the player got. */
 	experimentVariant: "variant",
 } as const;

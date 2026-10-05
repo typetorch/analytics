@@ -11,13 +11,17 @@ export const SETTINGS_KEY = "TypeTorchAnalytics";
 /** The configs API limits a value to 10,000 characters. */
 export const MAX_SETTINGS_CHARS = 9_500;
 
+/**
+ * One experiment's live dials, as the framework reads them (framework/src/analytics/SCHEMA.md "Sink settings"). The
+ * variants themselves are the game's (`analytics.experiment("onboarding", ["short", "long"])`).
+ */
 export interface ExperimentSetting {
-	/** Variant names, e.g. ["short", "long"]. */
-	variants: string[];
-	/** Percent per variant (same order, sums to 100). Default: equal. */
-	split?: number[];
-	/** false stops assigning (everyone gets the first variant). Default true. */
-	on?: boolean;
+	/** false: everyone gets the first variant, not stamped. Default true. */
+	active?: boolean;
+	/** A weight per variant, in the game's order (e.g. [1, 1]; [3, 1] = 75% / 25%). */
+	weights?: number[];
+	/** Force this variant for everyone. */
+	variant?: string;
 }
 
 export interface AnalyticsSettings {
@@ -67,31 +71,31 @@ export function validateSettings(input: unknown): AnalyticsSettings {
 		if (typeof raw.token !== "string" || raw.token.length < 16 || raw.token.length > 512 || /\s/.test(raw.token)) throw new Error("token must be 16-512 characters without spaces");
 		out.token = raw.token;
 	}
-	if (raw.flushSeconds !== undefined) out.flushSeconds = checkNumber(raw.flushSeconds, "flushSeconds", 2, 300);
+	if (raw.flushSeconds !== undefined) out.flushSeconds = checkNumber(raw.flushSeconds, "flushSeconds", 5, 300);
 	if (raw.recordShare !== undefined) out.recordShare = checkNumber(raw.recordShare, "recordShare", 0, 1);
-	if (raw.techEvery !== undefined) out.techEvery = checkNumber(raw.techEvery, "techEvery", 5, 3600);
+	if (raw.techEvery !== undefined) out.techEvery = checkNumber(raw.techEvery, "techEvery", 15, 3600);
 	if (raw.experiments !== undefined) {
 		if (typeof raw.experiments !== "object" || raw.experiments === null || Array.isArray(raw.experiments)) throw new Error("experiments must be an object");
 		out.experiments = {};
 		for (const [name, value] of Object.entries(raw.experiments as Record<string, unknown>)) {
 			if (!SAFE_KEY.test(name)) throw new Error(`experiment name ${JSON.stringify(name)}: letters, digits, _ - . only`);
+			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`experiment ${name}: must be an object`);
 			const e = value as Record<string, unknown>;
-			if (!Array.isArray(e?.variants) || e.variants.length < 2 || e.variants.length > 10 || e.variants.some((v) => typeof v !== "string" || !SAFE_KEY.test(v))) {
-				throw new Error(`experiment ${name}: variants must be 2-10 names (letters, digits, _ - .)`);
+			const setting: ExperimentSetting = {};
+			if (e.active !== undefined) {
+				if (typeof e.active !== "boolean") throw new Error(`experiment ${name}: active must be true or false`);
+				setting.active = e.active;
 			}
-			if (new Set(e.variants).size !== e.variants.length) throw new Error(`experiment ${name}: variant names must differ`);
-			const setting: ExperimentSetting = { variants: [...(e.variants as string[])] };
-			if (e.split !== undefined) {
-				if (!Array.isArray(e.split) || e.split.length !== setting.variants.length || e.split.some((p) => typeof p !== "number" || p < 0)) {
-					throw new Error(`experiment ${name}: split needs one percent per variant`);
+			if (e.weights !== undefined) {
+				const w = e.weights;
+				if (!Array.isArray(w) || w.length < 1 || w.length > 20 || w.some((x) => typeof x !== "number" || !Number.isFinite(x) || x < 0) || !w.some((x) => (x as number) > 0)) {
+					throw new Error(`experiment ${name}: weights must be 1-20 numbers >= 0, at least one above 0`);
 				}
-				const sum = (e.split as number[]).reduce((s, p) => s + p, 0);
-				if (Math.abs(sum - 100) > 1e-9) throw new Error(`experiment ${name}: split must add up to 100`);
-				setting.split = [...(e.split as number[])];
+				setting.weights = [...(w as number[])];
 			}
-			if (e.on !== undefined) {
-				if (typeof e.on !== "boolean") throw new Error(`experiment ${name}: on must be true or false`);
-				setting.on = e.on;
+			if (e.variant !== undefined) {
+				if (typeof e.variant !== "string" || !SAFE_KEY.test(e.variant)) throw new Error(`experiment ${name}: variant must be a variant name`);
+				setting.variant = e.variant;
 			}
 			out.experiments[name] = setting;
 		}

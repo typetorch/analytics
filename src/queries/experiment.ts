@@ -7,12 +7,21 @@ import { assertSafeKey, lit } from "../sql/dialect.ts";
 import { bootstrapMeans, twoProportion, verdict, welch, type TestResult } from "../stats.ts";
 import { dayOf, defineQuery, eventsTable, intOption, num, playerRows, ratio, round, str, where } from "./core.ts";
 
+/** The group of servers that run no experiment pin (`sexp` = ""). */
+export const SERVER_CONTROL = "(unpinned)";
+
 export interface ExperimentOptions {
-	/** The experiment (a key of `exp`). Without it (scope player), the query lists experiments it finds. */
+	/**
+	 * Scope player: the experiment (a key of `exp`); without it, the query lists the experiments it finds.
+	 * Scope server: the pinned artifact id to compare with unpinned servers; without it, every pin.
+	 */
 	experiment?: string;
-	/** "player": variants from `exp` (default); "server": groups from `sexp` (per-server A/B). */
+	/**
+	 * "player": variants from `exp` (default). "server": per-server A/B from `sexp` (the artifact id of a kernel
+	 * experiment pin; servers without a pin are the "(unpinned)" group).
+	 */
 	scope: "player" | "server";
-	/** The variant the others are compared with (default: the first one alphabetically, or "control" when present). */
+	/** The variant the others are compared with (default: "control", or "(unpinned)" for servers, else the first alphabetically). */
 	control?: string;
 	/** Most per-player values to pull for the bootstrap (beyond it: Welch's test from the aggregates). */
 	maxValues: number;
@@ -84,8 +93,9 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 					`FROM ${table} e WHERE ${where(f, ctx)} AND e.kind = 'experiment') x GROUP BY experiment, variant ORDER BY experiment, variant ${lim(1000)}`,
 			};
 		}
-		const variantExpr = o.scope === "server" ? "NULLIF(e.sexp, '')" : d.jsonText("e.exp", o.experiment as string);
-		const serverPrefix = o.scope === "server" && o.experiment ? ` AND (e.sexp = ${lit(o.experiment)} OR e.sexp LIKE ${lit(`${o.experiment}:%`)})` : "";
+		const variantExpr =
+			o.scope === "server" ? `CASE WHEN e.sexp IS NULL OR e.sexp = '' THEN ${lit(SERVER_CONTROL)} ELSE e.sexp END` : d.jsonText("e.exp", o.experiment as string);
+		const serverPrefix = o.scope === "server" && o.experiment ? ` AND (e.sexp IS NULL OR e.sexp = '' OR e.sexp = ${lit(o.experiment)})` : "";
 		const base =
 			`ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.kind AS kind, e.props AS props, ${variantExpr} AS variant FROM ${table} e WHERE ${playerRows(f, ctx)}${serverPrefix}), ` +
 			`pe AS (SELECT pid, sid, t, kind, props, variant FROM ev WHERE variant IS NOT NULL AND variant <> ''), ` +
@@ -124,7 +134,8 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 			} satisfies VariantStats,
 		}));
 		const names = variants.map((v) => v.stats.variant);
-		const control = o.control && names.includes(o.control) ? o.control : names.includes("control") ? "control" : (names[0] ?? null);
+		const control =
+			o.control && names.includes(o.control) ? o.control : names.includes("control") ? "control" : names.includes(SERVER_CONTROL) ? SERVER_CONTROL : (names[0] ?? null);
 		// Per-player values for the bootstrap, when we got all of them.
 		const totalPlayers = variants.reduce((s, v) => s + v.stats.players, 0);
 		const values = rows.values && rows.values.length === totalPlayers ? rows.values : undefined;

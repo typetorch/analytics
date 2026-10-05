@@ -148,7 +148,7 @@ describe("funnel", () => {
 		const r = await store.query("funnel", {}, { funnel: "onboarding" });
 		if (r.funnel === null) throw new Error("expected steps");
 		const max = new Map<string, number>();
-		for (const e of inRange(30).filter((e) => e.kind === "funnel")) max.set(e.pid as string, Math.max(max.get(e.pid as string) ?? 0, JSON.parse(e.props as string).step));
+		for (const e of inRange(30).filter((e) => e.kind === "funnel")) max.set(e.pid as string, Math.max(max.get(e.pid as string) ?? 0, JSON.parse(e.props as string).i));
 		for (const step of r.steps) expect(step.reached).toBe([...max.values()].filter((m) => m >= step.step).length);
 		expect(r.steps.map((s) => s.label)).toEqual(["spawned", "moved", "opened_shop", "bought_item", "joined_round"]);
 		expect(r.steps[0].ofStart).toBe(1);
@@ -245,6 +245,18 @@ describe("experiments", () => {
 	});
 });
 
+test("experiments per server: pinned artifacts vs unpinned servers", async () => {
+	const r = await store.query("experiment", {}, { scope: "server" });
+	if (r.experiment === null) throw new Error("expected results");
+	expect(r.control).toBe("(unpinned)");
+	expect(r.variants.map((v) => v.variant)).toEqual(["(unpinned)", "pin-art-1"]);
+	expect(r.variants.find((v) => v.variant === "pin-art-1")?.players).toBe(60);
+	expect(r.comparisons.every((c) => c.variant === "pin-art-1")).toBe(true);
+	const one = await store.query("experiment", {}, { scope: "server", experiment: "pin-art-1" });
+	if (one.experiment === null) throw new Error("expected results");
+	expect(one.variants.length).toBe(2);
+});
+
 describe("first-session confusion", () => {
 	test("signals from events", async () => {
 		const r = await store.query("confusion");
@@ -266,25 +278,31 @@ describe("first-session confusion", () => {
 		const bounced = [...sessions(firsts).values()].filter((s) => s.t1 - s.t0 < 120_000).length;
 		expect(lobby?.early).toBe(bounced);
 		expect(r.backAndForth[0].flagged).toBeGreaterThan(0);
-		expect(r.recordings.available).toBe(false);
-		expect(r.recordings.reason).toContain("tt-rec-1");
 	});
 
-	test("signals from recordings, with a decoder", async () => {
+	test("signals from tt-rec-1 recordings: idle in the Lobby, repeated clicks on one button", async () => {
+		const r = await store.query("confusion");
+		const firstSids = new Set(playerEvents(inRange(14)).filter((e) => e.newp).map((e) => e.sid));
+		const recorded = new Set(fx.recordings.filter((x) => x.t >= NOW - 14 * DAY && firstSids.has(x.sid)).map((x) => x.sid));
+		expect(recorded.size).toBeGreaterThan(0);
+		expect(r.recordings).toMatchObject({ available: true, sessions: recorded.size, failedSessions: 0 });
+		expect(r.recordings.repeatedClicks).toEqual([{ button: "Shop/Buy/Coins100", count: recorded.size, avgPresses: 3 }]);
+		expect(r.recordings.idle).toEqual([{ zone: "Lobby", count: recorded.size, avgSeconds: 12 }]);
+		expect(r.recordings.cameraSpin).toEqual([]);
+	});
+
+	test("a malformed chunk is counted, not fatal", async () => {
 		const restore = registerDecoder({
 			codec: "tt-rec-1",
-			decode(chunks): DecodedRecording {
-				const body = JSON.parse(Buffer.from(chunks[0].data, "base64").toString("utf8"));
-				return { pid: chunks[0].pid, sid: chunks[0].sid, samples: body.samples, inputs: body.inputs };
+			decode(): DecodedRecording {
+				throw new Error("bad chunk");
 			},
 		});
 		try {
 			const r = await store.query("confusion");
-			const firstSids = new Set(playerEvents(inRange(14)).filter((e) => e.newp).map((e) => e.sid));
-			const recorded = fx.recordings.filter((x) => x.t >= NOW - 14 * DAY && firstSids.has(x.sid));
 			expect(r.recordings.available).toBe(true);
-			expect(r.recordings.sessions).toBe(recorded.length);
-			expect(r.recordings.repeatedClicks).toEqual([{ button: "Shop/Buy/Coins100", count: recorded.length, avgPresses: 3 }]);
+			expect(r.recordings.sessions).toBe(0);
+			expect(r.recordings.failedSessions).toBeGreaterThan(0);
 		} finally {
 			restore();
 		}

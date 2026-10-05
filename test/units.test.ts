@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Graph, buildGraph, formatDuration } from "../src/graph.ts";
-import { detectSignals, decodeSessions, hasDecoder, RecordingCodecUnavailable, type RecordingSample } from "../src/recording.ts";
+import { decodeSessions, decodeTtRec1, decodeTtRec1Chunk, detectSignals, hasDecoder, lookVector, type RecordingSample } from "../src/recording.ts";
+import { RecWriter } from "./recwriter.ts";
 import { bootstrapMeans, normalCdf, percentSure, prng, twoProportion, verdict, welch } from "../src/stats.ts";
 
 describe("stats", () => {
@@ -98,9 +99,74 @@ describe("graph", () => {
 });
 
 describe("recordings", () => {
-	test("tt-rec-1 is a stub until SCHEMA.md exists", () => {
-		expect(hasDecoder("tt-rec-1")).toBe(false);
-		expect(() => decodeSessions([{ pid: "p", sid: "s", chunk: 0, codec: "tt-rec-1", data: "", n: 0 }])).toThrow(RecordingCodecUnavailable);
+	// Written by the framework's own encoder (framework/out/analytics/codec.luau under Lune) with the same calls as its
+	// scripts/test-analytics.luau codec test; the checks below are that test's checks.
+	const FRAMEWORK_VECTOR =
+		"AQFkAAEAAJqZyEIzM6NAzcwiwgIAAAAAAAAAAJSAAHIAqgCY6AJkAAgAAAAAAAaAAHIAqgD+YQNkAB4DZwGmAKmHBDIAAXcABTIAgwAAAED/vwYKAAAAEVNob3AvQnV5L0NvaW5zMTAwBwAAAQAABwoAAgAABwoACP//AP//AXERAECcRTMzo0AAAAAAAgAAAAAAAAAAgAAAAACgAIAA";
+	const near = (a: number | undefined, b: number, tolerance: number) => a !== undefined && Math.abs(a - b) <= tolerance;
+
+	test("tt-rec-1: decodes the framework's encoder output", () => {
+		expect(hasDecoder("tt-rec-1")).toBe(true);
+		const chunk = decodeTtRec1Chunk(Uint8Array.from(Buffer.from(FRAMEWORK_VECTOR, "base64")));
+		expect([chunk.version, chunk.last, chunk.intervalMs]).toEqual([1, true, 100]);
+		const r = chunk.records;
+		expect(r.map((x) => x.tag).join(",")).toBe("1,2,2,3,4,5,6,7,7,7,0,1,2");
+		const s1 = r[1].values as number[];
+		expect(r[1].at).toBe(0);
+		expect(near(s1[0], 100.3, 0.07) && near(s1[1], 5.1, 0.07) && near(s1[2], -40.7, 0.07)).toBe(true);
+		expect(near(s1[3], 0.5, 0.025) && near(s1[7], 0.6, 0.025) && near(s1[8], -0.3, 0.013)).toBe(true);
+		expect(near(s1[4], 108.3, 0.1) && near(s1[5], 12.2, 0.1) && near(s1[6], -30.1, 0.1)).toBe(true);
+		const s2 = r[2].values as number[];
+		expect(r[2].at).toBe(100);
+		expect(near(s2[3], -3.0, 0.025) && (near(s2[7], 3.1, 0.025) || near(s2[7], 3.1 - 2 * Math.PI, 0.025))).toBe(true);
+		const cam = r[3].values as number[];
+		expect(near(cam[0], 200, 0.07) && near(cam[1], 50, 0.07) && near(cam[2], -20, 0.07) && near(cam[4], -1.5, 0.013)).toBe(true);
+		expect(r[4]).toMatchObject({ kind: 1, code: 119, processed: false, at: 250 });
+		expect(r[5]).toMatchObject({ kind: 3, processed: true });
+		expect(near(r[5].x, 0.25, 0.0001) && near(r[5].y, 0.75, 0.0001)).toBe(true);
+		expect([r[6].text, r[7].text, r[8].text]).toEqual(["Shop/Buy/Coins100", "Shop/Buy/Coins100", "Shop/Buy/Coins100"]);
+		expect([r[7].kind, r[8].kind, r[9].kind, r[9].text]).toEqual([1, 2, 8, undefined]);
+		expect(r[10].at).toBe(330 + 65535);
+		expect(r[11].tag).toBe(1);
+		expect(near((r[12].values as number[])[0], 5000, 0.07) && r[12].at === 70330).toBe(true);
+	});
+
+	test("tt-rec-1: a session's chunks as samples and inputs at absolute times", () => {
+		const a = new RecWriter();
+		a.sample(0, 1, 2, 3, 0, 1, 7, 13, Math.PI / 2, 0);
+		a.key(50, 1, 119);
+		a.key(60, 2, 119); // key up: not an input of its own
+		const b = new RecWriter();
+		b.event(10, 1, "HUD/Play");
+		b.event(20, 3, "Shop");
+		const rec = decodeTtRec1([
+			{ pid: "p", sid: "s", chunk: 0, codec: "tt-rec-1", data: a.finish(false), n: 1, t: 1000 },
+			{ pid: "p", sid: "s", chunk: 2, codec: "tt-rec-1", data: b.finish(true), n: 0, t: 5000 },
+		]);
+		expect(rec.samples.length).toBe(1);
+		expect(rec.samples[0].t).toBe(1000);
+		expect(near(rec.samples[0].pos?.[2], 3, 0.07)).toBe(true);
+		const look = rec.samples[0].look as number[];
+		const expected = lookVector(Math.PI / 2, 0);
+		expect(near(look[0], expected[0], 0.03) && near(look[2], expected[2], 0.03)).toBe(true);
+		expect(rec.inputs).toEqual([
+			{ t: 1050, type: "key", code: 119, processed: false },
+			{ t: 5010, type: "button", target: "HUD/Play" },
+			{ t: 5020, type: "screen_open", target: "Shop" },
+		]);
+		expect(rec.gaps).toBe(1);
+	});
+
+	test("tt-rec-1: malformed chunks", () => {
+		expect(() => decodeTtRec1Chunk(Uint8Array.from([2, 0, 100, 0]))).toThrow("version");
+		expect(() => decodeTtRec1Chunk(Uint8Array.from([1, 0, 100, 0, 2, 0, 0, 1]))).toThrow("past the end");
+		const out = decodeSessions([
+			{ pid: "p", sid: "bad", chunk: 0, codec: "tt-rec-1", data: Buffer.from([9, 9, 9, 9]).toString("base64"), n: 0 },
+			{ pid: "p", sid: "other", chunk: 0, codec: "tt-rec-9" as never, data: "", n: 0 },
+		]);
+		expect(out.recordings).toEqual([]);
+		expect(out.failed).toBe(2);
+		expect(out.errors[1]).toContain("no decoder");
 	});
 
 	const T = 1_000_000;

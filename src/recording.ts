@@ -1,12 +1,11 @@
 /**
- * First-session recordings: decoding the packed chunks and finding confusion signals in them.
+ * First-session recordings: decoding the packed chunks (tt-rec-1) and finding confusion signals in them.
  *
- * The packing format (`tt-rec-1`) is defined by the framework's recorder and documented in
- * framework/src/analytics/SCHEMA.md. TODO(tt-rec-1): that document doesn't exist yet (2026-10-05), so the decoder below
- * is a stub that throws RecordingCodecUnavailable; the confusion query then reports recordings as unavailable and
- * still returns the signals it gets from events. Everything after decoding (the DecodedRecording shape and the
- * detectors) is ready and tested with synthetic decoded recordings: when SCHEMA.md lands, only `decodeTtRec1` needs
- * writing.
+ * tt-rec-1 is the framework's format (framework/src/analytics/SCHEMA.md "tt-rec-1"; reference decoder `decodeChunk` in
+ * framework/src/analytics/codec.ts). Little-endian; a 4-byte header (u8 version 1, u8 flags (bit 0: last chunk), u16
+ * sample interval ms), then records, each `u8 tag, u16 dt` (ms since the previous record; the first since the row's
+ * `t`) and a payload by tag. Each chunk decodes on its own (own anchor, own string table). A test decodes a chunk the
+ * framework's encoder wrote (under Lune) byte for byte.
  */
 import type { RecordingRow } from "./schema.ts";
 
@@ -15,8 +14,10 @@ export type Vec3 = [number, number, number];
 /** About 10 per second: where the character and the camera were. */
 export interface RecordingSample {
 	t: number;
-	/** Character root position (studs); absent while there is no character. */
+	/** Character root position (studs); absent while there is no character (a Camera record). */
 	pos?: Vec3;
+	/** Character facing yaw (radians, 0 = facing -Z). */
+	yaw?: number;
 	/** Camera position and look direction (unit vector). */
 	cam?: Vec3;
 	look?: Vec3;
@@ -26,6 +27,8 @@ export type RecordingInputType =
 	| "key"
 	| "click"
 	| "tap"
+	| "pad"
+	| "scroll"
 	| "stick_start"
 	| "stick_stop"
 	| "button"
@@ -33,15 +36,23 @@ export type RecordingInputType =
 	| "screen_open"
 	| "screen_close"
 	| "prompt_shown"
+	| "prompt_hidden"
 	| "prompt_used"
 	| "death"
+	| "spawn"
+	| "textbox"
 	| "custom";
 
 /** Something that happened once: an input, a button press (target = its path, e.g. Shop/Buy/Coins100), a screen. */
 export interface RecordingInput {
 	t: number;
 	type: RecordingInputType;
+	/** Button/screen/prompt path, or the game's event name. */
 	target?: string;
+	/** Key or input code (Enum.KeyCode / UserInputType value). */
+	code?: number;
+	/** The game processed the input (e.g. a click on UI). */
+	processed?: boolean;
 }
 
 export interface DecodedRecording {
@@ -49,6 +60,8 @@ export interface DecodedRecording {
 	sid: string;
 	samples: RecordingSample[];
 	inputs: RecordingInput[];
+	/** Chunks missing between the ones decoded (a lost batch). */
+	gaps?: number;
 }
 
 export class RecordingCodecUnavailable extends Error {
@@ -63,14 +76,193 @@ export interface RecordingDecoder {
 	decode(chunks: ChunkRow[]): DecodedRecording;
 }
 
-/** TODO(tt-rec-1): fill in from framework/src/analytics/SCHEMA.md once the framework agent writes it. */
-function decodeTtRec1(_chunks: ChunkRow[]): DecodedRecording {
-	throw new RecordingCodecUnavailable("the tt-rec-1 decoder isn't written yet (waiting for framework/src/analytics/SCHEMA.md)");
+// tt-rec-1 ---------------------------------------------------------------------------------------------------------------
+
+export const TT_REC_TAGS = { wait: 0, anchor: 1, sample: 2, camera: 3, key: 4, pointer: 5, string: 6, event: 7 } as const;
+const POSITION_SCALE = 8;
+const CAMERA_SCALE = 16;
+const NO_STRING = 65535;
+
+export interface DecodedRecord {
+	tag: number;
+	/** ms since the chunk start. */
+	at: number;
+	values?: number[];
+	kind?: number;
+	processed?: boolean;
+	code?: number;
+	x?: number;
+	y?: number;
+	id?: number;
+	text?: string;
 }
 
-const decoders = new Map<string, RecordingDecoder & { stub?: boolean }>([["tt-rec-1", { codec: "tt-rec-1", decode: decodeTtRec1, stub: true }]]);
+export interface DecodedChunk {
+	version: number;
+	last: boolean;
+	intervalMs: number;
+	records: DecodedRecord[];
+}
 
-/** Replaces or adds a decoder (tests, or a newer codec). */
+function unwrapYaw(byte: number): number {
+	return (byte / 256) * Math.PI * 2 - Math.PI;
+}
+
+/** Decodes one tt-rec-1 chunk, like the framework's `decodeChunk`. Throws on a malformed chunk. */
+export function decodeTtRec1Chunk(bytes: Uint8Array): DecodedChunk {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const size = bytes.byteLength;
+	if (size < 4) throw new Error("tt-rec-1: chunk too short");
+	const version = view.getUint8(0);
+	if (version !== 1) throw new Error(`tt-rec-1: unknown version ${version}`);
+	const result: DecodedChunk = { version, last: (view.getUint8(1) & 1) === 1, intervalMs: view.getUint16(2, true), records: [] };
+	const strings = new Map<number, string>();
+	const utf8 = new TextDecoder();
+	let anchor: Vec3 = [0, 0, 0];
+	let at = 0;
+	let offset = 4;
+	const need = (n: number) => {
+		if (offset + n > size) throw new Error("tt-rec-1: record runs past the end of the chunk");
+	};
+	while (offset < size) {
+		need(3);
+		const tag = view.getUint8(offset);
+		at += view.getUint16(offset + 1, true);
+		offset += 3;
+		const record: DecodedRecord = { tag, at };
+		if (tag === TT_REC_TAGS.wait) {
+			// time only
+		} else if (tag === TT_REC_TAGS.anchor) {
+			need(12);
+			anchor = [view.getFloat32(offset, true), view.getFloat32(offset + 4, true), view.getFloat32(offset + 8, true)];
+			record.values = [...anchor];
+			offset += 12;
+		} else if (tag === TT_REC_TAGS.sample) {
+			need(15);
+			const cx = anchor[0] + view.getInt16(offset, true) / POSITION_SCALE;
+			const cy = anchor[1] + view.getInt16(offset + 2, true) / POSITION_SCALE;
+			const cz = anchor[2] + view.getInt16(offset + 4, true) / POSITION_SCALE;
+			record.values = [
+				cx,
+				cy,
+				cz,
+				unwrapYaw(view.getUint8(offset + 6)),
+				cx + view.getInt16(offset + 7, true) / CAMERA_SCALE,
+				cy + view.getInt16(offset + 9, true) / CAMERA_SCALE,
+				cz + view.getInt16(offset + 11, true) / CAMERA_SCALE,
+				unwrapYaw(view.getUint8(offset + 13)),
+				(view.getInt8(offset + 14) / 127) * (Math.PI / 2),
+			];
+			offset += 15;
+		} else if (tag === TT_REC_TAGS.camera) {
+			need(8);
+			record.values = [
+				anchor[0] + view.getInt16(offset, true) / POSITION_SCALE,
+				anchor[1] + view.getInt16(offset + 2, true) / POSITION_SCALE,
+				anchor[2] + view.getInt16(offset + 4, true) / POSITION_SCALE,
+				unwrapYaw(view.getUint8(offset + 6)),
+				(view.getInt8(offset + 7) / 127) * (Math.PI / 2),
+			];
+			offset += 8;
+		} else if (tag === TT_REC_TAGS.key || tag === TT_REC_TAGS.pointer) {
+			need(tag === TT_REC_TAGS.pointer ? 7 : 3);
+			const kind = view.getUint8(offset);
+			record.kind = kind & 0x7f;
+			record.processed = kind >= 0x80;
+			record.code = view.getUint16(offset + 1, true);
+			offset += 3;
+			if (tag === TT_REC_TAGS.pointer) {
+				record.x = view.getUint16(offset, true) / 65535;
+				record.y = view.getUint16(offset + 2, true) / 65535;
+				offset += 4;
+			}
+		} else if (tag === TT_REC_TAGS.string) {
+			need(3);
+			const id = view.getUint16(offset, true);
+			const length = view.getUint8(offset + 2);
+			need(3 + length);
+			const text = utf8.decode(bytes.subarray(offset + 3, offset + 3 + length));
+			strings.set(id, text);
+			record.id = id;
+			record.text = text;
+			offset += 3 + length;
+		} else if (tag === TT_REC_TAGS.event) {
+			need(3);
+			record.kind = view.getUint8(offset);
+			const id = view.getUint16(offset + 1, true);
+			record.id = id;
+			if (id !== NO_STRING) record.text = strings.get(id);
+			offset += 3;
+		} else {
+			throw new Error(`tt-rec-1: unknown record tag ${tag} at byte ${offset - 3}`);
+		}
+		result.records.push(record);
+	}
+	return result;
+}
+
+/** A camera look direction from yaw (0 = facing -Z) and pitch (up positive). */
+export function lookVector(yaw: number, pitch: number): Vec3 {
+	const c = Math.cos(pitch);
+	return [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c];
+}
+
+/** Key/Pointer kinds that count as an input (2, 4, 6, 8: key/mouse/touch/pad up, not inputs of their own). */
+const INPUT_KINDS: Record<number, RecordingInputType | undefined> = {
+	1: "key",
+	3: "click",
+	5: "tap",
+	7: "pad",
+	9: "stick_start",
+	10: "stick_stop",
+	11: "scroll",
+};
+
+const EVENT_KINDS: Record<number, RecordingInputType | undefined> = {
+	1: "button",
+	2: "hover",
+	3: "screen_open",
+	4: "screen_close",
+	5: "prompt_shown",
+	6: "prompt_hidden",
+	7: "prompt_used",
+	8: "death",
+	9: "spawn",
+	10: "textbox",
+	11: "custom",
+};
+
+/** Decodes a session's tt-rec-1 chunks (sorted by chunk) into absolute-time samples and inputs. */
+export function decodeTtRec1(chunks: ChunkRow[]): DecodedRecording {
+	const out: DecodedRecording = { pid: chunks[0]?.pid ?? "", sid: chunks[0]?.sid ?? "", samples: [], inputs: [], gaps: 0 };
+	let expected = chunks[0]?.chunk ?? 0;
+	for (const row of chunks) {
+		if (row.chunk > expected) out.gaps = (out.gaps ?? 0) + (row.chunk - expected);
+		expected = row.chunk + 1;
+		const start = row.t ?? 0;
+		const chunk = decodeTtRec1Chunk(Uint8Array.from(Buffer.from(row.data, "base64")));
+		for (const r of chunk.records) {
+			const t = start + r.at;
+			const v = r.values;
+			if (r.tag === TT_REC_TAGS.sample && v) {
+				out.samples.push({ t, pos: [v[0], v[1], v[2]], yaw: v[3], cam: [v[4], v[5], v[6]], look: lookVector(v[7], v[8]) });
+			} else if (r.tag === TT_REC_TAGS.camera && v) {
+				out.samples.push({ t, cam: [v[0], v[1], v[2]], look: lookVector(v[3], v[4]) });
+			} else if ((r.tag === TT_REC_TAGS.key || r.tag === TT_REC_TAGS.pointer) && r.kind !== undefined) {
+				const type = INPUT_KINDS[r.kind];
+				if (type) out.inputs.push({ t, type, ...(r.code !== undefined ? { code: r.code } : {}), processed: r.processed === true });
+			} else if (r.tag === TT_REC_TAGS.event && r.kind !== undefined) {
+				const type = EVENT_KINDS[r.kind];
+				if (type) out.inputs.push({ t, type, ...(r.text !== undefined ? { target: r.text } : {}) });
+			}
+		}
+	}
+	return out;
+}
+
+const decoders = new Map<string, RecordingDecoder>([["tt-rec-1", { codec: "tt-rec-1", decode: decodeTtRec1 }]]);
+
+/** Replaces or adds a decoder (tests, or a newer codec). Returns a function that puts the previous one back. */
 export function registerDecoder(decoder: RecordingDecoder): () => void {
 	const previous = decoders.get(decoder.codec);
 	decoders.set(decoder.codec, decoder);
@@ -80,31 +272,44 @@ export function registerDecoder(decoder: RecordingDecoder): () => void {
 	};
 }
 
-/** True when a real (non-stub) decoder exists for the codec. */
 export function hasDecoder(codec: string): boolean {
-	const decoder = decoders.get(codec);
-	return decoder !== undefined && !decoder.stub;
+	return decoders.has(codec);
 }
 
-/** Groups chunk rows by session and decodes each session. Throws RecordingCodecUnavailable when a codec can't decode. */
-export function decodeSessions(rows: ChunkRow[]): DecodedRecording[] {
+export interface DecodedSessions {
+	recordings: DecodedRecording[];
+	/** Sessions that failed to decode (malformed chunk, unknown codec), with the first reasons. */
+	failed: number;
+	errors: string[];
+}
+
+/** Groups chunk rows by session and decodes each one; a session that fails is counted, not fatal. */
+export function decodeSessions(rows: ChunkRow[]): DecodedSessions {
 	const bySession = new Map<string, ChunkRow[]>();
 	for (const row of rows) {
 		const list = bySession.get(row.sid) ?? [];
 		list.push(row);
 		bySession.set(row.sid, list);
 	}
-	const out: DecodedRecording[] = [];
+	const out: DecodedSessions = { recordings: [], failed: 0, errors: [] };
 	for (const chunks of bySession.values()) {
 		chunks.sort((a, b) => a.chunk - b.chunk);
 		const decoder = decoders.get(chunks[0].codec);
-		if (!decoder) throw new RecordingCodecUnavailable(`no decoder for codec ${chunks[0].codec}`);
-		out.push(decoder.decode(chunks));
+		try {
+			if (!decoder) throw new RecordingCodecUnavailable(`no decoder for codec ${chunks[0].codec}`);
+			out.recordings.push(decoder.decode(chunks));
+		} catch (error) {
+			out.failed++;
+			if (out.errors.length < 3) out.errors.push(`${chunks[0].sid}: ${(error as Error).message}`);
+		}
 	}
 	return out;
 }
 
 // Confusion detectors ---------------------------------------------------------------------------------------------
+
+/** What the player did themselves (hovers, prompts appearing, deaths and spawns don't end an idle stretch). */
+const ACTIVE_INPUTS = new Set<RecordingInputType>(["key", "click", "tap", "pad", "scroll", "stick_start", "stick_stop", "button", "textbox", "prompt_used"]);
 
 export interface DetectorOptions {
 	/** Idle: at least this long with no input and (almost) no movement. Default 10 s. */
@@ -188,7 +393,7 @@ export function detectSignals(rec: DecodedRecording, zones?: ZoneTimeline, optio
 	const inputs = [...rec.inputs].sort((a, b) => a.t - b.t);
 
 	// Idle: a stretch with no input and the character within `still` studs of where the stretch began.
-	const activeInputs = inputs.filter((i) => i.type !== "hover" && i.type !== "prompt_shown");
+	const activeInputs = inputs.filter((i) => ACTIVE_INPUTS.has(i.type));
 	let inputIndex = 0;
 	let idleStart: RecordingSample | undefined;
 	let idleEnd = 0;

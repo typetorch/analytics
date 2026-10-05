@@ -11,8 +11,9 @@ import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { createGunzip, createGzip } from "node:zlib";
-import { createTableSql, dataLayout, dayFiles, dayString, pathLit, readJsonColumns, storedColumns, tableExpression, type DataLayout } from "../duckdb/layout.ts";
+import { createTableSql, dataLayout, dayFiles, dayString, fieldsOf, pathLit, readJsonColumns, storedColumns, tableExpression, type DataLayout } from "../duckdb/layout.ts";
 import { runQuery } from "../queries/index.ts";
+import { PROP_KEYS } from "../schema.ts";
 import type { QueryContext } from "../queries/core.ts";
 import { DAY_MS, duckdb, lit } from "../sql/dialect.ts";
 import type { Filters } from "../sql/filters.ts";
@@ -292,7 +293,14 @@ export class Warehouse {
 			const source = existsSync(target)
 				? `SELECT ${cols} FROM read_parquet(${pathLit(target)}) UNION ALL SELECT ${cols} FROM live.${table} WHERE ${where}`
 				: `SELECT ${cols} FROM live.${table} WHERE ${where}`;
-			await this.writer.run(`COPY (SELECT * FROM (${source}) x ORDER BY pid, t) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)`);
+			// Delivery is at least once (a hot swap during a request resends its rows): exact duplicates collapse here,
+			// keeping the first receive time.
+			const contract = fieldsOf(table)
+				.map((field) => `"${field.name}"`)
+				.join(", ");
+			await this.writer.run(
+				`COPY (SELECT ${contract}, MIN(rt) AS rt FROM (${source}) x GROUP BY ALL ORDER BY pid, t) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)`,
+			);
 			// The rows leave the live file and the export is recorded in one transaction; a crash after it is finished
 			// by recover() (rename tmp -> target), so no row is lost or written twice.
 			await this.writer.run("BEGIN TRANSACTION");
@@ -310,8 +318,8 @@ export class Warehouse {
 		const events = join(this.layout.events, `${date}.parquet`);
 		if (!existsSync(events)) return;
 		const src = `read_parquet(${pathLit(events)})`;
-		const robux = duckdb.jsonNumber("props", "robux");
-		const step = duckdb.jsonNumber("props", "step");
+		const robux = duckdb.jsonNumber("props", PROP_KEYS.purchaseRobux);
+		const step = duckdb.jsonNumber("props", PROP_KEYS.funnelStep);
 		const sessions =
 			`s AS (SELECT sid, MIN(pid) AS pid, MIN(t) AS t0, MAX(t) AS t1, MIN(art) AS art, MIN(branch) AS branch, MIN(dev) AS dev, MIN(exp) AS exp, ` +
 			`MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew FROM ${src} WHERE pid IS NOT NULL AND pid <> '' AND sid IS NOT NULL AND sid <> '' GROUP BY sid)`;
