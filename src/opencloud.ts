@@ -1,8 +1,7 @@
 /**
  * The few Roblox Open Cloud calls this package makes (fetch only; the API key goes only into `x-api-key` and is never
- * logged or put in an error message):
- *   - configs (ConfigService), write only: PATCH the draft with one key, then publish. Scope universe:write.
- *     Reading back is impossible for API keys (universe:read is OAuth-only), so nothing here reads configs.
+ * logged or put in an error message). The game's analytics and fleet settings are written by the game's TypeTorch CLI
+ * (the signed settings record, kernel 0.3.8; settings.ts), not here.
  *   - DataStore entries (v2): read `TypeTorchAnalytics` / `p/<UserId>` to map an erasure request's UserId to a pid.
  *     Scope universe-datastores.objects:read (and :delete to remove the link).
  */
@@ -69,36 +68,6 @@ function fail(method: string, path: string, status: number, text: string, scope:
 
 function record(value: unknown): Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-// ConfigService (configs API) -------------------------------------------------------------------------------------------
-
-export const CONFIG_REPOSITORY = "InExperienceConfig";
-
-export interface PublishResult {
-	/** True once the publish call succeeded. */
-	published: true;
-	configVersion?: number;
-}
-
-/**
- * Sets ONE key in the experience's ConfigService and publishes it. PATCHes the draft with only that key (never
- * `draft:overwrite`, which would wipe the game's other keys), then publishes the draft. Needs universe:write only.
- * Note: the publish ships the whole draft; unpublished edits someone else made to other keys go live with it (an
- * API key can't read the draft to check).
- */
-export async function publishConfigKey(options: OpenCloudOptions & { universeId: number; key: string; value: unknown; message: string }): Promise<PublishResult> {
-	if (!Number.isSafeInteger(options.universeId) || options.universeId <= 0) throw new Error("universeId must be a positive integer");
-	const base = `/creator-configs-public-api/v1/configs/universes/${options.universeId}/repositories/${CONFIG_REPOSITORY}`;
-	const patch = await call(options, "PATCH", `${base}/draft`, { entries: { [options.key]: options.value } });
-	if (patch.status < 200 || patch.status >= 300) fail("PATCH", `${base}/draft`, patch.status, patch.text, "universe:write");
-	const draftHash = record(patch.body).draftHash;
-	const body: Record<string, unknown> = { message: options.message.slice(0, 200), deploymentStrategy: "Immediate" };
-	if (typeof draftHash === "string" && draftHash) body.draftHash = draftHash;
-	const publish = await call(options, "POST", `${base}/publish`, body);
-	if (publish.status < 200 || publish.status >= 300) fail("POST", `${base}/publish`, publish.status, publish.text, "universe:write");
-	const version = record(publish.body).configVersion;
-	return typeof version === "number" ? { published: true, configVersion: version } : { published: true };
 }
 
 // DataStore entries (v2) ------------------------------------------------------------------------------------------------

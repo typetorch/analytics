@@ -21,7 +21,7 @@ export const FLEET_LIMITS = { heartbeat: 40, report: 40, alert: 40, closing: 10,
 
 /**
  * Never-seen JobIds (no servers row) accepted per minute, across all senders. Anyone with the ingest token (any code
- * in the universe that reads TypeTorchFleet) could otherwise grow the servers table and the per-JobId limiters with
+ * in the universe that reads the settings record) could otherwise grow the servers table and the per-JobId limiters with
  * made-up JobIds. 2,000 covers a 1,250-server fleet (50k CCU) restarting within one minute. Known JobIds never count.
  */
 export const FLEET_NEW_JOBS_PER_MINUTE = 2000;

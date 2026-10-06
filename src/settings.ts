@@ -1,14 +1,16 @@
 /**
- * The game's analytics settings: the server-only ConfigService key `TypeTorchAnalytics` (repository
- * InExperienceConfig), read in-engine by game servers (no scope needed there) and written by `writeSettings` through
- * Open Cloud (universe:write). Updating it needs no place publish. Read tokens (Basin SQL, the server's admin token)
- * never go here: only the write-only ingest/send token.
+ * The game's analytics settings: the `analytics` field of the game's signed settings record (kernel 0.3.8, TypeTorch
+ * plans/20; DataStore TypeTorch / settings), read by game servers and written by `writeSettings` through the game's own
+ * TypeTorch CLI (`typetorch settings set analytics -`), which signs it with the game's two prod keys. Updating it
+ * needs no place publish: servers re-read it within seconds (ping) or a minute. Read tokens (Basin SQL, the server's
+ * admin token) never go here: only the write-only ingest/send token.
  */
-import { publishConfigKey, type OpenCloudOptions, type PublishResult } from "./opencloud.ts";
 import { SAFE_KEY } from "./sql/dialect.ts";
+import { runTypeTorch, type TypeTorchCliOptions } from "./typetorch-cli.ts";
 
-export const SETTINGS_KEY = "TypeTorchAnalytics";
-/** The configs API limits a value to 10,000 characters. */
+/** The settings record's field that holds these settings. */
+export const SETTINGS_FIELD = "analytics";
+/** Keeps the analytics field well inside the settings record (32 KB for every field together). */
 export const MAX_SETTINGS_CHARS = 9_500;
 
 /**
@@ -101,33 +103,61 @@ export function validateSettings(input: unknown): AnalyticsSettings {
 		}
 	}
 	const size = JSON.stringify(out).length;
-	if (size > MAX_SETTINGS_CHARS) throw new Error(`settings are ${size} characters; ConfigService allows about ${MAX_SETTINGS_CHARS}`);
+	if (size > MAX_SETTINGS_CHARS) throw new Error(`settings are ${size} characters; keep them under ${MAX_SETTINGS_CHARS} (the settings record holds every field in 32 KB)`);
 	return out;
 }
 
-export interface WriteSettingsOptions extends OpenCloudOptions {
-	universeId: number;
+export interface WriteSettingsOptions extends TypeTorchCliOptions {
 	settings: AnalyticsSettings;
-	/** The publish message (shown in Creator Hub's config history). */
-	message?: string;
-	/** Validate and return the value without calling Open Cloud. */
+	/** Validate and return the value without running the CLI. */
 	dryRun?: boolean;
+	/** Don't ping servers (they still read the record within about a minute). */
+	noPing?: boolean;
 }
 
 export interface WriteSettingsResult {
 	value: AnalyticsSettings;
-	/** True when the publish call succeeded (false on a dry run). Nothing is read back: API keys can't read configs. */
-	published: boolean;
-	configVersion?: number;
+	/** True when the CLI wrote the record (false on a dry run, or when it already held these settings). */
+	written: boolean;
+	/** The settings record's seq after the call. */
+	seq?: number;
+	/** True when the CLI pinged running servers. */
+	pinged?: boolean;
 }
 
 /**
- * Writes the `TypeTorchAnalytics` key and publishes it (Open Cloud, universe:write). Write-only by design: the draft
- * gets only this key, then the draft is published.
+ * Sets the game's `analytics` settings: validates them, then runs `typetorch settings set analytics -` in the game
+ * folder (the value on stdin, so the token never sits in a command line). The CLI reads the record, checks it was
+ * signed by the game's keys, signs the change with both prod keys, writes it and pings servers. Needs the game's
+ * signing keys (`typetorch keys init`) and its Open Cloud key with DataStore read/create/update + messaging scopes.
  */
 export async function writeSettings(options: WriteSettingsOptions): Promise<WriteSettingsResult> {
 	const value = validateSettings(options.settings);
-	if (options.dryRun) return { value, published: false };
-	const result: PublishResult = await publishConfigKey({ ...options, key: SETTINGS_KEY, value, message: options.message ?? "TypeTorch analytics settings" });
-	return { value, published: true, ...(result.configVersion !== undefined ? { configVersion: result.configVersion } : {}) };
+	if (options.dryRun) return { value, written: false };
+	const args = ["settings", "set", SETTINGS_FIELD, "-", ...(options.noPing ? ["--no-ping"] : [])];
+	const out = await runTypeTorch(options, args, { stdin: JSON.stringify(value) });
+	const result: WriteSettingsResult = { value, written: out.outcome === "written" };
+	if (typeof out.seq === "number") result.seq = out.seq;
+	if (out.pinged === true) result.pinged = true;
+	return result;
+}
+
+export interface WriteFleetSettingsOptions extends TypeTorchCliOptions {
+	/** The fleet API's https base URL (this server). */
+	url: string;
+	/** The server's write-only ingest token (game servers post with it). Goes to the CLI through its environment. */
+	ingestToken: string;
+	noPing?: boolean;
+}
+
+/**
+ * Points the game's servers at a fleet API: runs `typetorch fleet setup --url <url>` in the game folder with the
+ * ingest token in the CLI's environment (TYPETORCH_FLEET_INGEST_TOKEN, never argv). The CLI writes the signed
+ * record's `fleet` field ({url, token}) and sets typetorch.json `fleet.url`.
+ */
+export async function writeFleetSettings(options: WriteFleetSettingsOptions): Promise<{ written: boolean; seq?: number }> {
+	if (!/^https:\/\//.test(options.url)) throw new Error("the fleet URL must be https");
+	const args = ["fleet", "setup", "--url", options.url, ...(options.noPing ? ["--no-ping"] : [])];
+	const out = await runTypeTorch(options, args, { env: { TYPETORCH_FLEET_INGEST_TOKEN: options.ingestToken } });
+	return { written: out.outcome === "written", ...(typeof out.settingsSeq === "number" ? { seq: out.settingsSeq } : {}) };
 }

@@ -7,19 +7,21 @@
  * 1. starts the server (`src/server/main.ts --env-file ...`), or reuses one already answering on that port;
  * 2. opens a quick tunnel (cloudflared, with an empty --config so a ~/.cloudflared/config.yml can't override --url);
  * 3. waits until the tunnel answers;
- * 4. writes the game's server-only ConfigService keys `TypeTorchFleet` ({url, token}) and `TypeTorchAnalytics`
- *    (DuckDB ingest at <url>/v1/ingest), with the Open Cloud key from the game's env (universe:write), and sets
- *    `fleet.url` in the game's typetorch.json (local edit: the tunnel URL changes every run, don't commit it);
+ * 4. points the game at it through the game's own TypeTorch CLI (0.8+, kernel 0.3.8's signed settings record):
+ *    `typetorch fleet setup --url <tunnel>` (settings.fleet = {url, token}; also sets typetorch.json `fleet.url`, a
+ *    local edit: the tunnel URL changes every run, don't commit it) and `typetorch settings set analytics -` (DuckDB
+ *    ingest at <url>/v1/ingest). The CLI signs with the game's keys (`typetorch keys init`) and uses the game's Open
+ *    Cloud key (DataStore read/create/update + messaging), then pings servers so they switch within seconds;
  * 5. keeps running; Ctrl+C stops the tunnel and the server it started.
  *
- * `--no-settings` skips step 4. Prints no tokens or keys.
+ * `--no-settings` skips step 4; `--cli <entry>` runs that CLI entry file instead of the game's
+ * node_modules/@typetorch/cli. Prints no tokens or keys (the token reaches the CLI through its environment).
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { publishConfigKey } from "../src/opencloud.ts";
-import { writeSettings } from "../src/settings.ts";
+import { join, resolve } from "node:path";
+import { writeFleetSettings, writeSettings } from "../src/settings.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => {
@@ -29,8 +31,9 @@ const flag = (name: string) => {
 const envFile = flag("--env-file");
 const gameDir = flag("--game") ? resolve(flag("--game")!) : undefined;
 const writeGameSettings = !args.includes("--no-settings");
+const cliEntry = flag("--cli") ? resolve(flag("--cli")!) : undefined;
 if (!envFile) {
-	console.error("usage: bun run local -- --env-file <server env file> [--game <game repo>] [--no-settings] [--cloudflared <path>]");
+	console.error("usage: bun run local -- --env-file <server env file> [--game <game repo>] [--no-settings] [--cli <cli entry>] [--cloudflared <path>]");
 	process.exit(2);
 }
 
@@ -52,26 +55,6 @@ const port = serverEnv.get("TT_ANALYTICS_PORT") ?? "8787";
 const local = `http://${host}:${port}`;
 const ingestToken = serverEnv.get("TT_ANALYTICS_INGEST_TOKENS")?.split(",")[0]?.trim();
 if (!ingestToken) throw new Error(`TT_ANALYTICS_INGEST_TOKENS is missing from ${envFile}`);
-
-/** The game's Open Cloud key: the environment, then TYPETORCH_ENV_FILE, then .env files from the game folder up. */
-function openCloudKey(start: string): string | undefined {
-	const names = ["OPENCLOUD_DEPLOY_KEY", "TYPETORCH_API_KEY", "OPENCLOUD_API_KEY", "ROBLOX_API_KEY"];
-	for (const name of names) if (process.env[name]) return process.env[name];
-	const files: string[] = [];
-	if (process.env.TYPETORCH_ENV_FILE) files.push(process.env.TYPETORCH_ENV_FILE);
-	for (let dir = start; ; dir = dirname(dir)) {
-		const candidate = join(dir, ".env");
-		if (existsSync(candidate)) files.push(candidate);
-		if (dirname(dir) === dir) break;
-	}
-	for (const file of files) {
-		const env = readEnv(file);
-		const pointer = env.get("TYPETORCH_ENV_FILE");
-		if (pointer && existsSync(pointer)) files.push(pointer);
-		for (const name of names) if (env.get(name)) return env.get(name);
-	}
-	return undefined;
-}
 
 async function answers(url: string): Promise<boolean> {
 	try {
@@ -143,25 +126,15 @@ log(`tunnel answering after ${Math.round((Date.now() - waitStart) / 1000)} s`);
 if (writeGameSettings) {
 	if (!gameDir) log("no --game: skipped the game's settings and typetorch.json (pass --game <game repo>)");
 	else {
-		const configPath = join(gameDir, "typetorch.json");
-		const raw = readFileSync(configPath, "utf8");
-		const config = JSON.parse(raw) as { universeId: number; fleet?: { url: string } };
-		const apiKey = openCloudKey(gameDir);
-		if (!apiKey) throw new Error("no Open Cloud key found (environment, TYPETORCH_ENV_FILE or a .env from the game folder up)");
-		const fleet = await publishConfigKey({ apiKey, universeId: config.universeId, key: "TypeTorchFleet", value: { url, token: ingestToken }, message: "TypeTorch fleet API (local quick tunnel)" });
-		log(`TypeTorchFleet published${fleet.configVersion !== undefined ? ` (config v${fleet.configVersion})` : ""}`);
+		const cli = { gameDir, ...(cliEntry ? { cli: [process.execPath, cliEntry] } : {}) };
+		const fleet = await writeFleetSettings({ ...cli, url, ingestToken });
+		log(`settings.fleet ${fleet.written ? "written" : "already set"}${fleet.seq !== undefined ? ` (settings #${fleet.seq})` : ""}; typetorch.json fleet.url = ${url} (local edit; don't commit it)`);
 		const analytics = await writeSettings({
-			apiKey,
-			universeId: config.universeId,
+			...cli,
 			settings: { backend: "duckdb", events: `${url}/v1/ingest`, token: ingestToken, flushSeconds: 15, recordShare: 1 },
-			message: "TypeTorch analytics: DuckDB (local quick tunnel)",
 		});
-		log(`TypeTorchAnalytics published${analytics.configVersion !== undefined ? ` (config v${analytics.configVersion})` : ""}`);
-		config.fleet = { url };
-		const indent = raw.match(/^(\s+)"/m)?.[1] ?? "\t";
-		writeFileSync(configPath, JSON.stringify(config, null, indent) + "\n");
-		log(`${configPath}: fleet.url = ${url} (local edit; don't commit it)`);
+		log(`settings.analytics ${analytics.written ? "written" : "already set"}${analytics.seq !== undefined ? ` (settings #${analytics.seq})` : ""}`);
 	}
 }
-log("ready: game servers pick up the new URL when ConfigService pushes the update (new servers at once). Ctrl+C stops.");
+log("ready: running servers (kernel 0.3.8+) switch within seconds of the ping, new servers at once. Ctrl+C stops.");
 await new Promise(() => {});
