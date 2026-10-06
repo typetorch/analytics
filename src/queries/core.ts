@@ -118,9 +118,10 @@ export const SESSIONS_CTE =
 export const ENDED_AFTER_MS = 10 * 60 * 1000;
 
 /**
- * Revenue counts server-sent purchase rows only. The framework lets a client send `purchase` events (src = client),
- * so an exploiter could otherwise inflate payers and Robux. Rows from before `src` existed (NULL) count. The CTE must
- * expose `e.src AS esrc` (the name `src` is taken by the join source in some queries).
+ * Revenue counts server-sent purchase rows only. Older framework engines let a client send `purchase` events
+ * (src = client), so an exploiter could inflate payers and Robux; clients can't send them now and ingest refuses them
+ * (SERVER_ONLY_KINDS), but rows already stored or sent to Basin may hold some. Rows from before `src` existed (NULL)
+ * count. The CTE must expose `e.src AS esrc` (the name `src` is taken by the join source in some queries).
  */
 export const SERVER_PURCHASE = "(esrc IS NULL OR esrc <> 'client')";
 

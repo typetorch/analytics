@@ -7,6 +7,7 @@ import {
 	EVENT_FIELDS,
 	RECORDING_FIELDS,
 	ROW_VERSION,
+	SERVER_ONLY_KINDS,
 	type EventRow,
 	type FieldSpec,
 	type IngestBatch,
@@ -79,6 +80,9 @@ function validateRow<T>(raw: unknown, fields: readonly FieldSpec[]): Validation<
 /** Checks one event row; returns a copy holding only the known fields. */
 export function validateEvent(raw: unknown): Validation<EventRow> {
 	const result = validateRow<EventRow>(raw, EVENT_FIELDS);
+	if (result.ok && result.row.src === "client" && SERVER_ONLY_KINDS.includes(result.row.kind)) {
+		return { ok: false, error: `${result.row.kind} rows come from the game server only (src client refused)` };
+	}
 	if (result.ok && result.row.exp !== undefined) {
 		// exp is a map of experiment name -> variant name.
 		const parsed = JSON.parse(result.row.exp) as Record<string, unknown>;

@@ -81,6 +81,23 @@ describe("validateEvent", () => {
 		if (!result.ok) expect(result.error).toContain(message);
 	});
 
+	test("purchase and currency rows come from the server only", () => {
+		const purchase = { kind: "purchase", name: "product", props: '{"product":1234,"robux":99}' };
+		const currency = { kind: "currency", name: "coins", props: '{"delta":50,"reason":"x"}' };
+		for (const over of [purchase, currency]) {
+			const client = validateEvent(event({ ...over, src: "client" }));
+			expect(client.ok).toBe(false);
+			if (!client.ok) expect(client.error).toContain("game server only");
+			expect(validateEvent(event({ ...over, src: "server" })).ok).toBe(true);
+			expect(validateEvent(event({ ...over, src: undefined })).ok).toBe(true); // rows from before src existed
+		}
+		// Other client kinds still pass.
+		expect(validateEvent(event({ src: "client" })).ok).toBe(true);
+		const batch = validateBatch({ events: [event(), event({ ...purchase, src: "client" }), event({ ...purchase, src: "server" })] });
+		expect(batch.events.map((e) => e.kind)).toEqual(["custom", "purchase"]);
+		expect(batch.rejected).toBe(1);
+	});
+
 	test("null fields count as missing", () => {
 		const result = validateEvent(event({ sexp: null, props: null }));
 		expect(result.ok).toBe(true);

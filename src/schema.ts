@@ -31,6 +31,12 @@ export type Device = (typeof DEVICES)[number];
 export const SOURCES = ["server", "client"] as const;
 export type Source = (typeof SOURCES)[number];
 
+/**
+ * Kinds only a game server may send: revenue and the economy are server-authoritative. Framework clients can't send
+ * them; ingest refuses a row of these kinds marked `src = client` (older engines let clients send them).
+ */
+export const SERVER_ONLY_KINDS: readonly EventKind[] = ["purchase", "currency"];
+
 /** The only recording codec so far (documented by the framework in framework/src/analytics/SCHEMA.md). */
 export const RECORDING_CODECS = ["tt-rec-1"] as const;
 export type RecordingCodec = (typeof RECORDING_CODECS)[number];

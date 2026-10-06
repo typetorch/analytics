@@ -39,6 +39,9 @@ every column on every row: a missing value is `""`, `0` or `false` (`pid` and `s
 (`server` `client`), `props` (JSON, at most 4 KB). Required: `v`, `t`, `kind`, `name`, `job`, `art`.
 
 Kinds: `session` `tech` `zone` `funnel` `purchase` `currency` `state` `experiment` `custom` `recording_meta` `fleet`.
+`purchase` and `currency` come from the game server only (`SERVER_ONLY_KINDS`): the validator refuses them with `src`
+`client` (older framework engines let clients send them), and revenue queries count server-sent `purchase` rows only
+(rows without `src` count too).
 
 **Recordings** (first sessions, packed): `v`, `t`, `pid`, `sid`, `job`, `art`, `chunk`, `codec` (`tt-rec-1`),
 `data` (base64), `n`.
