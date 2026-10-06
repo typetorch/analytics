@@ -55,6 +55,10 @@ export function wrapSync(db: SyncDatabase): FleetDb {
 		async close() {
 			for (const s of cache.values()) s.finalize?.();
 			cache.clear();
+			// Fold the write-ahead log back into the database and empty it, so a stopped server leaves a small file.
+			try {
+				db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+			} catch {}
 			db.close();
 		},
 	};
@@ -77,6 +81,15 @@ export async function openSqlite(path: string): Promise<FleetDb> {
 		}
 		db = new mod.DatabaseSync(path);
 	}
-	db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = OFF;");
+	// WAL: every heartbeat is a write. SQLite only checkpoints at 1000 pages (~4 MB) by default and then keeps the WAL file
+	// at that size, so a tiny fleet showed ~4 MB on disk. Checkpoint at ~1 MB and truncate the WAL back to 1 MB after.
+	db.exec(
+		"PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = OFF; " +
+			"PRAGMA wal_autocheckpoint = 256; PRAGMA journal_size_limit = 1048576;",
+	);
+	// A WAL left large by an older server (or a crash): fold it in now.
+	try {
+		db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+	} catch {}
 	return wrapSync(db);
 }
