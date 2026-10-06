@@ -6,8 +6,9 @@
  * with TT_ANALYTICS_URL + TT_ANALYTICS_ADMIN_TOKEN. The token stays in this process; it is never printed.
  * Runs on Node: Vite's restart after a config change hangs under Bun (2026-10, Bun 1.3).
  */
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { createServer, preview } from "vite";
 
 const [mode, ...args] = process.argv.slice(2);
@@ -21,14 +22,34 @@ if (mode !== "dev" && mode !== "preview") {
 	process.exit(2);
 }
 
-const envFile = flag("--env-file");
+// The env file: --env-file (remembered in .explorer.local, git-ignored: the path only, never the token), else
+// TT_ANALYTICS_ENV_FILE, else the remembered path, else the usual local server's file (~/.config/typetorch/fleet).
+const REMEMBERED = ".explorer.local";
+const DEFAULT_ENV = join(homedir(), ".config", "typetorch", "fleet", "fleet.env");
+let envFile = flag("--env-file");
 if (envFile) {
 	if (!existsSync(envFile)) {
 		console.error(`env file not found: ${envFile}`);
 		process.exit(2);
 	}
-	process.env.TT_ANALYTICS_ENV_FILE = resolve(envFile);
+	envFile = resolve(envFile);
+	try {
+		writeFileSync(REMEMBERED, JSON.stringify({ envFile }, null, "\t") + "\n");
+	} catch {}
+} else if (!process.env.TT_ANALYTICS_ENV_FILE) {
+	let remembered;
+	try {
+		remembered = JSON.parse(readFileSync(REMEMBERED, "utf8")).envFile;
+	} catch {}
+	if (typeof remembered === "string" && existsSync(remembered)) {
+		envFile = remembered;
+		console.log(`env file ${envFile} (remembered; pass --env-file to change)`);
+	} else if (existsSync(DEFAULT_ENV)) {
+		envFile = DEFAULT_ENV;
+		console.log(`env file ${envFile} (default; pass --env-file to change)`);
+	}
 }
+if (envFile) process.env.TT_ANALYTICS_ENV_FILE = envFile;
 const port = flag("--port") ? Number(flag("--port")) : undefined;
 
 if (mode === "dev") {

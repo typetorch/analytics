@@ -17,6 +17,8 @@ bun run local -- --env-file <same file>                                      # b
 bun run preview -- --env-file <same file>                                    # serve an existing dist/
 ```
 
+`--env-file` is needed once: the path (never the token) is remembered in `.explorer.local` (git-ignored), and without any, `~/.config/typetorch/fleet/fleet.env` (the `bun run local` server's file) is used when it exists. So after the first run, `bun run dev` is enough.
+
 `--env-file` is the analytics server's own env file: the explorer reads `TT_ANALYTICS_HOST`, `TT_ANALYTICS_PORT`
 (0.0.0.0 means this machine) and `TT_ANALYTICS_ADMIN_TOKEN` from it. For a remote server, use a file (or environment
 variables) with `TT_ANALYTICS_URL=https://...` and `TT_ANALYTICS_ADMIN_TOKEN`. Instead of the flag you can set
