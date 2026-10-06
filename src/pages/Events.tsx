@@ -3,6 +3,7 @@ import { cn } from "cn";
 import { EventList } from "@/components/EventList";
 import { EmptyState, PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { FILTER_KEYS } from "@/lib/filters";
@@ -26,11 +27,19 @@ function PlayerLink({ pid }: { pid: string }) {
 	);
 }
 
-function RecentRows({ kind, name }: { kind: string; name: string }) {
-	const q = useAnalytics("events", { kind, name, limit: 100 });
+function RecentRows({ kind, name, pid, onClearPid }: { kind?: string; name?: string; pid?: string; onClearPid(): void }) {
+	const q = useAnalytics("events", { ...(kind ? { kind } : {}), ...(name ? { name } : {}), ...(pid ? { pid } : {}), limit: 100 });
+	const what = kind && name ? `${kind} / ${name} rows` : "rows";
 	return (
 		<Section
-			title={`Newest ${kind} / ${name} rows`}
+			title={pid ? <>Newest {what} of player <span className="font-mono text-sm">{shortId(pid)}</span></> : `Newest ${what}`}
+			actions={
+				pid ? (
+					<Button variant="ghost" size="sm" onClick={onClearPid}>
+						all players
+					</Button>
+				) : null
+			}
 			description="Up to 100, newest first. Fleet rows never show props (they can hold a private server's access code)."
 		>
 			<QueryState query={q} isEmpty={(d) => d.events.length === 0} empty="No rows of this event in this range.">
@@ -62,6 +71,7 @@ export default function Events() {
 	const top = useAnalytics("top-events", { limit: 500 });
 	const [kindFilter, setKindFilter] = useParam("kind", ALL);
 	const [picked, setPicked] = useParam("event");
+	const [pid, setPid] = useParam("pid");
 	const events = top.data?.events ?? [];
 	const kinds = [...new Set(events.map((e) => e.kind))].sort();
 	const shown = kindFilter === ALL ? events : events.filter((e) => e.kind === kindFilter);
@@ -124,7 +134,11 @@ export default function Events() {
 							</Table>
 						</Section>
 						<div className="min-w-0 flex-1">
-							{pick ? <RecentRows kind={pick.kind} name={pick.name} /> : <EmptyState>Pick an event on the left.</EmptyState>}
+							{pick || pid ? (
+								<RecentRows {...(pick ?? {})} {...(pid ? { pid } : {})} onClearPid={() => setPid("")} />
+							) : (
+								<EmptyState>Pick an event on the left.</EmptyState>
+							)}
 						</div>
 					</div>
 				)}

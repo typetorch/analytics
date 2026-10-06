@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { edgeWidth, exits, LEFT, START, stateLines, toFlow, toMermaid } from "./graph";
+import { edgeWidth, eventsLine, exits, LEFT, moveOrder, nodeKind, realStates, START, stateLines, stepsLine, toFlow, toMermaid } from "./graph";
 import type { GraphData } from "./types";
 
 /** The live server's player graph for its one test player (2026-10-05), plus a (left) edge. */
@@ -83,5 +83,81 @@ describe("graph adapter", () => {
 		expect(text).toContain('-->|"3 · 0s"|');
 		expect(text).toContain("linkStyle 0 stroke-width:6px");
 		expect(exits(graph)).toEqual([{ state: "screen:TargetRush|activity:lobby", count: 1, share: 1 }]);
+	});
+
+	/** A one-session graph with key moments, as player-graph answers with sid and moments. */
+	const session: GraphData = {
+		kind: "player",
+		facet: "all",
+		pid: "p1",
+		sid: "s1",
+		moments: true,
+		nodes: [
+			{ id: START, visits: 1, dwellMs: 0 },
+			{
+				id: "activity:lobby",
+				visits: 2,
+				dwellMs: 90_000,
+				players: 1,
+				events: [
+					{ kind: "custom", name: "coin_pickup", count: 6 },
+					{ kind: "custom", name: "pad_start", count: 1 },
+				],
+				steps: [{ funnel: "onboarding", step: "spawned", index: 1, count: 1, players: 1 }],
+			},
+			{ id: "activity:round", visits: 1, dwellMs: 120_000, players: 1, events: [{ kind: "custom", name: "target_hit", count: 34 }], steps: [] },
+			{ id: "@onboarding: first_hit", visits: 1, dwellMs: 5_000, players: 1 },
+			{ id: LEFT, visits: 1, dwellMs: 0 },
+		],
+		edges: [
+			{ from: START, to: "activity:lobby", count: 1, dwellMs: 0, share: 1 },
+			{ from: "activity:lobby", to: "activity:round", count: 1, dwellMs: 60_000, share: 0.5 },
+			{ from: "activity:round", to: "@onboarding: first_hit", count: 1, dwellMs: 10_000, share: 1 },
+			{ from: "@onboarding: first_hit", to: "activity:lobby", count: 1, dwellMs: 5_000, share: 1 },
+			{ from: "activity:lobby", to: LEFT, count: 1, dwellMs: 30_000, share: 0.5 },
+		],
+		hiddenEdges: 0,
+		path: [
+			{ step: 1, state: "activity:lobby", at: "2026-10-06T10:00:00.000Z", ms: 60_000 },
+			{ step: 2, state: "activity:round", at: "2026-10-06T10:01:00.000Z", ms: 10_000 },
+			{ step: 3, state: "@onboarding: first_hit", at: "2026-10-06T10:01:10.000Z", ms: 5_000 },
+			{ step: 4, state: "activity:lobby", at: "2026-10-06T10:01:15.000Z", ms: 30_000 },
+		],
+		ended: true,
+	};
+
+	it("one session: edges numbered in the order the player moved, nodes carry the time spent", () => {
+		const order = moveOrder(session);
+		expect(order.get(`${START}>activity:lobby`)).toEqual([1]);
+		expect(order.get("activity:lobby>activity:round")).toEqual([2]);
+		expect(order.get("@onboarding: first_hit>activity:lobby")).toEqual([4]);
+		expect(order.get(`activity:lobby>${LEFT}`)).toEqual([5]);
+		const flow = toFlow(session);
+		expect(flow.edges.map((e) => e.label).sort()).toEqual(["#1", "#2", "#3", "#4", "#5"]);
+		const lobby = flow.nodes.find((n) => n.data.state === "activity:lobby");
+		expect(lobby?.data.timeMs).toBe(90_000);
+		expect(toMermaid(session)).toContain('-->|"#2"|');
+		// A path that revisits the same move lists every number.
+		const twice = moveOrder({ ...session, path: [...(session.path ?? []), { step: 5, state: "activity:round", at: "", ms: 1 }], ended: false });
+		expect(twice.get("activity:lobby>activity:round")).toEqual([2, 5]);
+		expect(twice.has(`activity:lobby>${LEFT}`)).toBe(false);
+	});
+
+	it("nodes say what happened there; moments are small pills; sparse graphs are counted", () => {
+		const flow = toFlow(session);
+		const lobby = flow.nodes.find((n) => n.data.state === "activity:lobby");
+		expect(lobby?.data.eventsLine).toBe("coin_pickup 6 · pad_start 1");
+		expect(lobby?.data.stepsLine).toBe("onboarding: spawned");
+		const moment = flow.nodes.find((n) => n.data.state === "@onboarding: first_hit");
+		expect(moment?.data.kind).toBe("moment");
+		expect(moment?.data.lines).toEqual(["onboarding: first_hit"]);
+		expect(moment?.height).toBe(28);
+		expect((lobby?.height ?? 0) > 52).toBe(true); // room for the events and steps lines
+		expect(nodeKind("@round_end")).toBe("moment");
+		expect(eventsLine({ events: [] })).toBe("");
+		expect(stepsLine({ steps: [1, 2, 3, 4].map((i) => ({ funnel: "round", step: `s${i}`, index: i, count: 1, players: 1 })) })).toBe("round: s1, round: s2, round: s3, +1");
+		expect(realStates(session)).toBe(2);
+		expect(realStates(graph)).toBe(2);
+		expect(toMermaid(session)).toContain('(["onboarding: first_hit"])');
 	});
 });

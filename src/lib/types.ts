@@ -127,7 +127,20 @@ export interface GraphNode {
 	id: string;
 	visits: number;
 	players?: number;
+	/** Total time in this state before moving on, ms (one session: all the time in it). */
 	dwellMs: number;
+	/** Top 5 custom / purchase / currency event names logged in this state. */
+	events?: { kind: string; name: string; count: number }[];
+	/** Funnel steps logged in this state. */
+	steps?: { funnel: string; step: string; index: number | null; count: number; players: number }[];
+}
+
+/** One visit of a one-session graph, in order. */
+export interface PathStep {
+	step: number;
+	state: string;
+	at: string;
+	ms: number;
 }
 
 export interface GraphEdge {
@@ -143,9 +156,16 @@ export interface GraphData {
 	kind: "player" | "flow";
 	facet: string;
 	pid?: string;
+	/** One session's graph. */
+	sid?: string;
+	/** Key moments are nodes too (ids starting with "@"). */
+	moments?: boolean;
 	nodes: GraphNode[];
 	edges: GraphEdge[];
 	hiddenEdges: number;
+	/** One session: the visits in order; ended = it's over (the path ends in left). */
+	path?: PathStep[];
+	ended?: boolean;
 }
 
 export type Facet = "all" | "zone" | "screen" | "activity";

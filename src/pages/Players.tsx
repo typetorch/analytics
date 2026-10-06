@@ -1,13 +1,15 @@
-import { Search } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Search, Workflow } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import { cn } from "cn";
-import { FacetToggle, isFacet, LazyGraph } from "@/components/LazyGraph";
+import { FacetToggle, isFacet, LazyGraph, MomentsToggle, PathStrip, SparseNote } from "@/components/LazyGraph";
 import { EventList } from "@/components/EventList";
 import { MermaidButton } from "@/components/MermaidButton";
 import { EmptyState, KeyValue, PageHeader, QueryState, Section } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { fmtAgo, fmtInt, fmtMinutes, fmtTime, plural, shortId } from "@/lib/format";
 import { useAnalytics, useParam } from "@/lib/hooks";
 import type { PlayerSummary, TimelineEvent, TimelineResult } from "@/lib/types";
@@ -70,7 +72,7 @@ function PlayerRow({ player: p, active, onPick }: { player: PlayerSummary; activ
 	);
 }
 
-function Timeline({ data }: { data: TimelineResult }) {
+function Timeline({ data, onGraph }: { data: TimelineResult; onGraph(sid: string): void }) {
 	const bySession = new Map<string, TimelineEvent[]>();
 	for (const e of data.events) bySession.set(e.sid, [...(bySession.get(e.sid) ?? []), e]);
 	return (
@@ -88,6 +90,12 @@ function Timeline({ data }: { data: TimelineResult }) {
 						</span>
 					}
 					description={`${fmtMinutes(s.minutes)} · ${plural(s.events, "event")} · ${s.dev ?? "unknown device"} · artifact ${s.art} · sid ${shortId(s.sid)}`}
+					actions={
+						<Button variant="outline" size="sm" onClick={() => onGraph(s.sid)}>
+							<Workflow />
+							View graph
+						</Button>
+					}
 				>
 					{bySession.get(s.sid)?.length ? <EventList events={bySession.get(s.sid) ?? []} /> : <EmptyState>No events of this session in the list.</EmptyState>}
 				</Section>
@@ -96,11 +104,23 @@ function Timeline({ data }: { data: TimelineResult }) {
 	);
 }
 
+const ALL_SESSIONS = "__all";
+
 function PlayerDetail({ pid }: { pid: string }) {
 	const [facetParam, setFacet] = useParam("facet", "all");
+	const [sid, setSid] = useParam("sid");
+	const [momentsParam, setMoments] = useParam("moments");
 	const facet = isFacet(facetParam) ? facetParam : "all";
+	const moments = momentsParam === "1";
+	const graphRef = useRef<HTMLDivElement>(null);
 	const timeline = useAnalytics("timeline", { pid, limit: 2000 });
-	const graph = useAnalytics("player-graph", { pid, facet });
+	const sessions = timeline.data?.sessions ?? [];
+	const session = sessions.find((s) => s.sid === sid);
+	const graph = useAnalytics("player-graph", { pid, facet, ...(sid ? { sid } : {}), ...(moments ? { moments: true } : {}) });
+	const showSession = (next: string) => {
+		setSid(next);
+		graphRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+	};
 	return (
 		<div className="min-w-0 flex-1 space-y-4">
 			<Section
@@ -120,24 +140,65 @@ function PlayerDetail({ pid }: { pid: string }) {
 					</div>
 				) : null}
 			</Section>
-			<Section title="Node graph" description="States are nodes, moves are edges." actions={<FacetToggle value={facet} onChange={setFacet} />}>
-				<QueryState
-					query={graph}
-					isEmpty={(g) => g.nodes.length === 0}
-					empty={facet === "all" ? "No states logged for this player in this range." : `None of this player's states has a ${facet} part (try all).`}
+			<div ref={graphRef} className="scroll-mt-28">
+				<Section
+					title={session ? `Session ${fmtTime(session.start)}` : "Node graph, all sessions"}
+					description={session ? `${fmtMinutes(session.minutes)}, ${plural(session.events, "event")}: the moves in order, and the time in each state.` : "States are nodes, moves are edges."}
+					actions={
+						<>
+							<Select value={sid || ALL_SESSIONS} onValueChange={(v) => setSid(v === ALL_SESSIONS ? "" : v)}>
+								<SelectTrigger size="sm" className="w-52" aria-label="Session">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value={ALL_SESSIONS}>All sessions</SelectItem>
+									{sid && !session ? <SelectItem value={sid}>session {shortId(sid)}</SelectItem> : null}
+									{[...sessions].reverse().map((s) => (
+										<SelectItem key={s.sid} value={s.sid}>
+											{fmtTime(s.start).slice(5, 16)} ({fmtMinutes(s.minutes)})
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+							<FacetToggle value={facet} onChange={setFacet} />
+							<MomentsToggle value={moments} onChange={(on) => setMoments(on ? "1" : "")} />
+						</>
+					}
+					contentClassName="space-y-2"
 				>
-					{(g) => <LazyGraph graph={g} />}
-				</QueryState>
-			</Section>
+					<QueryState
+						query={graph}
+						isEmpty={(g) => g.nodes.length === 0}
+						empty={facet === "all" ? "No states logged for this player here." : `None of this player's states has a ${facet} part (try all).`}
+					>
+						{(g) => (
+							<>
+								<SparseNote graph={g} pid={pid} />
+								<LazyGraph graph={g} />
+								<PathStrip graph={g} />
+							</>
+						)}
+					</QueryState>
+				</Section>
+			</div>
 			<QueryState query={timeline} isEmpty={(t) => t.sessions.length === 0} empty="This player has no events in this range: widen the date range.">
-				{(t) => <Timeline data={t} />}
+				{(t) => <Timeline data={t} onGraph={showSession} />}
 			</QueryState>
 		</div>
 	);
 }
 
 export default function Players() {
-	const [pid, setPid] = useParam("pid");
+	const [params, setParams] = useSearchParams();
+	const pid = params.get("pid") ?? "";
+	// Another player: their own sessions, so the session pick goes.
+	const setPid = (next: string) =>
+		setParams((current) => {
+			const copy = new URLSearchParams(current);
+			copy.set("pid", next);
+			copy.delete("sid");
+			return copy;
+		});
 	return (
 		<>
 			<PageHeader title="Players" description="Find a player by pid (random ids, never a UserId), then read their timeline and graph." />

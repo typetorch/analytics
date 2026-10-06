@@ -1,10 +1,11 @@
-import { FacetToggle, isFacet, LazyGraph } from "@/components/LazyGraph";
+import { FacetToggle, isFacet, LazyGraph, MomentsToggle, SparseNote } from "@/components/LazyGraph";
+import { realStates } from "@/lib/graph-text";
 import { MermaidButton } from "@/components/MermaidButton";
 import { PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fmtDuration, fmtInt, fmtPct } from "@/lib/format";
+import { fmtDuration, fmtInt, fmtPct, plural } from "@/lib/format";
 import { exits, stateLines, topEdges } from "@/lib/graph-text";
 import { useAnalytics, useParam } from "@/lib/hooks";
 import type { GraphData } from "@/lib/types";
@@ -76,9 +77,11 @@ function Tables({ graph }: { graph: GraphData }) {
 export default function Flow() {
 	const [facetParam, setFacet] = useParam("facet", "all");
 	const [minParam, setMin] = useParam("minCount", "1");
+	const [momentsParam, setMoments] = useParam("moments");
+	const moments = momentsParam === "1";
 	const facet = isFacet(facetParam) ? facetParam : "all";
 	const minCount = Math.max(1, Math.min(1_000_000, Number.parseInt(minParam, 10) || 1));
-	const q = useAnalytics("flow", { facet, minCount, maxEdges: 200 });
+	const q = useAnalytics("flow", { facet, minCount, maxEdges: 200, ...(moments ? { moments: true } : {}) });
 	return (
 		<>
 			<PageHeader
@@ -87,6 +90,7 @@ export default function Flow() {
 				actions={
 					<>
 						<FacetToggle value={facet} onChange={setFacet} />
+						<MomentsToggle value={moments} onChange={(on) => setMoments(on ? "1" : "")} />
 						<Label className="text-xs text-muted-foreground">
 							Min moves
 							<Input type="number" min={1} className="h-8 w-20" value={minCount} onChange={(e) => setMin(String(Math.max(1, Number(e.target.value) || 1)))} />
@@ -102,7 +106,8 @@ export default function Flow() {
 			>
 				{(graph) => (
 					<>
-						<Section title={`${fmtInt(graph.nodes.filter((n) => !n.id.startsWith("(")).length)} states, ${fmtInt(graph.edges.length)} moves`}>
+						<Section title={`${plural(realStates(graph), "state")}, ${plural(graph.edges.length, "move")}`} contentClassName="space-y-2">
+							<SparseNote graph={graph} />
 							<LazyGraph graph={graph} />
 						</Section>
 						<Tables graph={graph} />

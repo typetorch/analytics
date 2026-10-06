@@ -43,7 +43,7 @@ it lives in the URL, so a view can be bookmarked.
 | Roblox | first-play bounce, qualified plays, D1/D7, playtime and play days per user, payer conversion, Robux per user / payer, one-line definitions | `roblox` |
 | Retention | join-day cohorts x day 1/3/7/14/30 heatmap, weighted average, days not over shown as – | `retention` |
 | Funnels | funnel picker, step bars (reached, of start, from previous, median time), biggest drop highlighted | `funnel` |
-| Players | recent players + pid search, the player's node graph (facet all/zone/screen/activity), sessions with every event, state and props | `players`, `player-graph`, `timeline` |
+| Players | recent players + pid search; the node graph for all sessions or one (session picker, or "View graph" on a session): one session numbers its moves in order, shows the time in each state and the path; sessions with every event, state and props | `players`, `player-graph`, `timeline` |
 | Flow | the merged node graph for the filters, where sessions end, busiest moves, "Copy Mermaid" | `flow` |
 | Experiments | per-variant numbers and the plain "how sure" sentences, per player or per server (A/B pins) | `experiment` |
 | First session | early leaves per zone, screen loops, back-and-forth, idle / camera spins / repeated clicks from recordings | `confusion` |
@@ -52,7 +52,10 @@ it lives in the URL, so a view can be bookmarked.
 | Query | any named query with JSON filters/options (raw JSON), and read-only SQL over `events` / `recordings` | `/v1/query/*`, `/v1/sql` |
 
 Graphs are drawn with React Flow and laid out by dagre (left to right; top to bottom in a narrow column), edges labelled
-"count · average time before the move", width by count, moves back to an earlier state routed around the side.
+"count · average time before the move" (one session: #1, #2, ... in order), width by count, moves back to an earlier
+state routed around the side. Each state shows what happened there (its top events and funnel steps; click it for the
+list). "moments" adds key moments (funnel steps, purchases, personal_best, round_end) as small nodes on the path. A
+graph with fewer than 3 states says so in one dim line, with a link to the player's events.
 
 ## Development
 
