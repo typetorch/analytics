@@ -21,6 +21,7 @@ import { Suspense } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
 import { cn } from "cn";
 import { FilterBar } from "@/components/FilterBar";
+import { FindPlayer } from "@/components/Identity";
 import { LoadingBlock } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -163,6 +164,7 @@ export function AppShell() {
 						</nav>
 						<div className="hidden text-sm font-medium md:block">{current?.label}</div>
 						<div className="flex items-center gap-3">
+							<FindPlayer />
 							<ServerStatus />
 							<ThemeToggle />
 						</div>

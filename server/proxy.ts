@@ -59,6 +59,9 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	{ method: "GET", path: /^\/healthz$/ },
 	{ method: "GET", path: /^\/v1\/queries$/ },
 	{ method: "GET", path: /^\/v1\/storage$/ },
+	{ method: "GET", path: /^\/v1\/identity$/ },
+	// Fills pid <-> UserId from the game's DataStore links (the server's own Open Cloud key); writes nothing else.
+	{ method: "POST", path: /^\/v1\/identity\/backfill$/ },
 	{ method: "POST", path: /^\/v1\/query\/[A-Za-z-]{1,64}$/ },
 	{ method: "POST", path: /^\/v1\/sql$/ },
 	{ method: "GET", path: /^\/v1\/rollups\/(daily|players|player_days|edges)$/ },

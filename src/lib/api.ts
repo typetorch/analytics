@@ -2,7 +2,7 @@
  * The analytics API, through the local proxy (`/api` -> the analytics server, admin token added by the proxy).
  * Every call answers parsed JSON or throws an ApiError carrying the server's own message.
  */
-import type { Filters, FleetAlert, FleetReports, FleetServers, Health, QueryInfo, QueryName, QueryResults, SqlResult, StorageReport } from "./types";
+import type { BackfillResult, Filters, FleetAlert, FleetReports, FleetServers, Health, Identity, QueryInfo, QueryName, QueryResults, SqlResult, StorageReport } from "./types";
 
 export class ApiError extends Error {
 	override name = "ApiError";
@@ -104,6 +104,12 @@ export function createApi(options: ApiOptions = {}) {
 		health: (signal?: AbortSignal) => get<Health>("/healthz", signal),
 		/** What the server keeps on disk (measured at most every 30 s). */
 		storage: (signal?: AbortSignal) => get<StorageReport>("/v1/storage", signal),
+		/** pid <-> UserId: the identities of a pid or a UserId (most recently seen first). */
+		identity: (who: { pid: string } | { uid: number | string }, signal?: AbortSignal) =>
+			get<{ identities: Identity[] }>(`/v1/identity${qs("pid" in who ? { pid: who.pid } : { uid: String(who.uid) })}`, signal).then((r) => r.identities),
+		/** How many pids are mapped, and whether the server can backfill older ones from the DataStore. */
+		identitySummary: (signal?: AbortSignal) => get<{ count: number; backfill: boolean }>("/v1/identity", signal),
+		backfillIdentities: (pageToken?: string, signal?: AbortSignal) => post<BackfillResult>("/v1/identity/backfill", pageToken ? { pageToken } : {}, signal),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		fleetAlerts: (params: { since?: number; level?: string; unacked?: boolean; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ alerts: FleetAlert[] }>(`/v1/fleet/alerts${qs(params)}`, signal).then((r) => r.alerts),

@@ -118,6 +118,8 @@ export interface TimelineSession {
 
 export interface TimelineResult {
 	pid: string;
+	/** The UserId, when the server knows it. */
+	uid?: number;
 	sessions: TimelineSession[];
 	events: TimelineEvent[];
 	truncated: boolean;
@@ -233,6 +235,8 @@ export interface PlayerSummary {
 	events: number;
 	playtimeMinutes: number;
 	newInRange: boolean;
+	/** The UserId, when the server knows it (identity rows). */
+	uid?: number;
 }
 
 export interface PlayersResult {
@@ -431,6 +435,21 @@ export interface Health {
 	rssMb?: number;
 	analytics?: { loaderLagSeconds: number; live: { events: number; recordings: number }; loadedRows: number };
 	fleet?: { servers: number; alerts: number; unacked: number; streams: number };
+}
+
+/** pid <-> UserId on the analytics server (identity rows). */
+export interface Identity {
+	pid: string;
+	uid: number;
+	firstSeen: string;
+	lastSeen: string;
+}
+
+export interface BackfillResult {
+	scanned: number;
+	added: number;
+	known: number;
+	nextPageToken?: string;
 }
 
 export interface SqlResult {

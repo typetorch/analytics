@@ -20,6 +20,9 @@ describe("explorer proxy", () => {
 		expect(guardRequest({ method: "GET", url: "/v1/fleet/stream?branch=dev", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/sql", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/storage", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/identity?uid=1", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "POST", url: "/v1/identity/backfill", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "POST", url: "/v1/identity", headers: same }, true)).toMatchObject({ ok: false, status: 403 }); // the game's ingest route
 		expect(guardRequest({ method: "GET", url: "/healthz", headers: { host: "localhost:5173", "sec-fetch-site": "none" } }, true)).toEqual({ ok: true });
 		for (const [method, url] of [
 			["POST", "/v1/erasure"],

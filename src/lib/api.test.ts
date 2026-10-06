@@ -86,6 +86,24 @@ describe("api client", () => {
 		expect(api.streamUrl({ branch: "dev" })).toBe("/api/v1/fleet/stream?branch=dev");
 	});
 
+	it("looks up pid <-> UserId and backfills through the proxy", async () => {
+		const { fetch, calls } = fakeFetch((call) =>
+			call.url.includes("backfill") ? json(200, { scanned: 2, added: 1, known: 1 }) : call.url.endsWith("/v1/identity") ? json(200, { count: 3, backfill: false }) : json(200, { identities: [{ pid: "abc", uid: 42 }] }),
+		);
+		const api = createApi({ fetch });
+		expect(await api.identity({ uid: 42 })).toEqual([{ pid: "abc", uid: 42 }]);
+		await api.identity({ pid: "abc" });
+		expect(await api.identitySummary()).toEqual({ count: 3, backfill: false });
+		expect((await api.backfillIdentities("next")).added).toBe(1);
+		expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+			"GET /api/v1/identity?uid=42",
+			"GET /api/v1/identity?pid=abc",
+			"GET /api/v1/identity",
+			"POST /api/v1/identity/backfill",
+		]);
+		expect(calls[3].body).toEqual({ pageToken: "next" });
+	});
+
 	it("cleanFilters keeps set values only", () => {
 		expect(cleanFilters({ from: "2026-10-01", to: "", dev: "phone", branch: [], variant: { experiment: "e", variant: "b" } })).toEqual({
 			from: "2026-10-01",
