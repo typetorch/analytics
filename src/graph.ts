@@ -15,6 +15,21 @@ export interface GraphNode {
 	players?: number;
 	/** Total time spent in this state before moving on, ms. */
 	dwellMs: number;
+	/** What happened in this state: the busiest custom / purchase / currency event names (top 5). */
+	events?: { kind: string; name: string; count: number }[];
+	/** Funnel steps logged in this state. */
+	steps?: { funnel: string; step: string; index: number | null; count: number; players: number }[];
+}
+
+/** One visit of a one-session graph, in order. */
+export interface PathStep {
+	/** 1, 2, 3, ... */
+	step: number;
+	state: string;
+	/** When the session entered the state, ISO. */
+	at: string;
+	/** Time in it before the next visit (or the session's last event), ms. */
+	ms: number;
 }
 
 export interface GraphEdge {
@@ -33,10 +48,17 @@ export interface GraphData {
 	/** Which part of the state the nodes are: all of it, or only zone / screen / activity. */
 	facet: string;
 	pid?: string;
+	/** One session's graph (player-graph with sid). */
+	sid?: string;
+	/** Key moments are nodes too (ids starting with "@"). */
+	moments?: boolean;
 	nodes: GraphNode[];
 	edges: GraphEdge[];
 	/** Edges left out by minCount / maxEdges. */
 	hiddenEdges: number;
+	/** One session: its visits in order; `ended` = the session is over (the path ends in (left)). */
+	path?: PathStep[];
+	ended?: boolean;
 }
 
 export interface MermaidOptions {
@@ -69,14 +91,22 @@ export class Graph implements GraphData {
 	kind: "player" | "flow";
 	facet: string;
 	pid?: string;
+	sid?: string;
+	moments?: boolean;
 	nodes: GraphNode[];
 	edges: GraphEdge[];
 	hiddenEdges: number;
+	path?: PathStep[];
+	ended?: boolean;
 
 	constructor(data: GraphData) {
 		this.kind = data.kind;
 		this.facet = data.facet;
 		if (data.pid !== undefined) this.pid = data.pid;
+		if (data.sid !== undefined) this.sid = data.sid;
+		if (data.moments) this.moments = true;
+		if (data.path !== undefined) this.path = data.path;
+		if (data.ended !== undefined) this.ended = data.ended;
 		this.nodes = data.nodes;
 		this.edges = data.edges;
 		this.hiddenEdges = data.hiddenEdges ?? 0;
@@ -90,6 +120,10 @@ export class Graph implements GraphData {
 	toJSON(): GraphData {
 		const out: GraphData = { kind: this.kind, facet: this.facet, nodes: this.nodes, edges: this.edges, hiddenEdges: this.hiddenEdges };
 		if (this.pid !== undefined) out.pid = this.pid;
+		if (this.sid !== undefined) out.sid = this.sid;
+		if (this.moments) out.moments = true;
+		if (this.path !== undefined) out.path = this.path;
+		if (this.ended !== undefined) out.ended = this.ended;
 		return out;
 	}
 
@@ -122,6 +156,8 @@ export class Graph implements GraphData {
 			ids.set(node.id, key);
 			if (node.id === START || node.id === LEFT) {
 				lines.push(`  ${key}(["${node.id === START ? "start" : "left"}"])`);
+			} else if (node.id.startsWith("@")) {
+				lines.push(`  ${key}(["${escapeLabel(node.id.slice(1))}"])`); // a key moment
 			} else {
 				const who = node.players !== undefined ? `, ${node.players} player${node.players === 1 ? "" : "s"}` : "";
 				lines.push(`  ${key}["${nodeLabel(node.id)}<br/><small>${node.visits} visit${node.visits === 1 ? "" : "s"}${who}</small>"]`);
@@ -158,13 +194,48 @@ export interface NodeRow {
 	players?: number;
 }
 
-/** Builds a Graph from the graph query's edge and node rows. */
+/** Events per state (the graph query's nodeEvents rows). */
+export interface NodeEventRow {
+	st: string;
+	kind: string;
+	name: string;
+	n: number;
+}
+
+/** Funnel steps per state (nodeSteps rows). */
+export interface NodeStepRow {
+	st: string;
+	funnel: string;
+	label: string | null;
+	i: number | null;
+	n: number;
+	players: number;
+}
+
+/** One session's visits in order (path rows): enter and leave times, and whether the session ended after it. */
+export interface PathRow {
+	rn: number;
+	st: string;
+	t0: number;
+	t1: number;
+	left: boolean;
+}
+
+/** Most event names kept per node. */
+export const NODE_TOP_EVENTS = 5;
+
+/** Builds a Graph from the graph query's rows. */
 export function buildGraph(input: {
 	kind: "player" | "flow";
 	facet: string;
 	pid?: string;
+	sid?: string;
+	moments?: boolean;
 	edges: EdgeRow[];
 	nodes: NodeRow[];
+	nodeEvents?: NodeEventRow[];
+	nodeSteps?: NodeStepRow[];
+	path?: PathRow[];
 	minCount?: number;
 	maxEdges?: number;
 }): Graph {
@@ -175,6 +246,11 @@ export function buildGraph(input: {
 		out.set(e.src, (out.get(e.src) ?? 0) + e.n);
 		dwell.set(e.src, (dwell.get(e.src) ?? 0) + e.dwell_ms);
 	}
+	// One session: time per state from the path, which also counts the visit still going on.
+	if (input.path) {
+		dwell.clear();
+		for (const p of input.path) dwell.set(p.st, (dwell.get(p.st) ?? 0) + Math.max(0, p.t1 - p.t0));
+	}
 	const all = input.edges
 		.map<GraphEdge>((e) => {
 			const edge: GraphEdge = { from: e.src, to: e.dst, count: e.n, dwellMs: e.dwell_ms, share: (out.get(e.src) ?? 0) ? e.n / (out.get(e.src) ?? 1) : 0 };
@@ -183,10 +259,23 @@ export function buildGraph(input: {
 		})
 		.sort((a, b) => b.count - a.count || a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
 	const kept = all.filter((e) => e.count >= minCount).slice(0, input.maxEdges ?? Number.POSITIVE_INFINITY);
+	const events = new Map<string, { kind: string; name: string; count: number }[]>();
+	for (const r of input.nodeEvents ?? []) events.set(r.st, [...(events.get(r.st) ?? []), { kind: r.kind, name: r.name, count: r.n }]);
+	const steps = new Map<string, NonNullable<GraphNode["steps"]>>();
+	for (const r of input.nodeSteps ?? []) {
+		const step = r.label ?? (r.i !== null ? `step ${r.i}` : "?");
+		steps.set(r.st, [...(steps.get(r.st) ?? []), { funnel: r.funnel, step, index: r.i, count: r.n, players: r.players }]);
+	}
 	const nodes: GraphNode[] = input.nodes
 		.map((n) => {
 			const node: GraphNode = { id: n.st, visits: n.visits, dwellMs: dwell.get(n.st) ?? 0 };
 			if (n.players !== undefined) node.players = n.players;
+			if (input.nodeEvents) {
+				node.events = (events.get(n.st) ?? []).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)).slice(0, NODE_TOP_EVENTS);
+			}
+			if (input.nodeSteps) {
+				node.steps = (steps.get(n.st) ?? []).sort((a, b) => a.funnel.localeCompare(b.funnel) || (a.index ?? 0) - (b.index ?? 0));
+			}
 			return node;
 		})
 		.sort((a, b) => b.visits - a.visits || a.id.localeCompare(b.id));
@@ -196,5 +285,12 @@ export function buildGraph(input: {
 	if (lefts) nodes.push({ id: LEFT, visits: lefts, dwellMs: 0 });
 	const data: GraphData = { kind: input.kind, facet: input.facet, nodes, edges: kept, hiddenEdges: all.length - kept.length };
 	if (input.pid !== undefined) data.pid = input.pid;
+	if (input.sid !== undefined) data.sid = input.sid;
+	if (input.moments) data.moments = true;
+	if (input.path) {
+		const path = [...input.path].sort((a, b) => a.rn - b.rn);
+		data.path = path.map((p) => ({ step: p.rn, state: p.st, at: new Date(p.t0).toISOString(), ms: Math.max(0, p.t1 - p.t0) }));
+		data.ended = path.at(-1)?.left ?? false;
+	}
 	return new Graph(data);
 }

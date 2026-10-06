@@ -91,6 +91,19 @@ describe("Basin results equal DuckDB results (Basin SQL run on DuckDB through sh
 		expect(JSON.parse(JSON.stringify(got))).toEqual(JSON.parse(JSON.stringify(expected)));
 	});
 
+	test("one-session graph with moments and node details", async () => {
+		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
+		const timeline = await duck.query("timeline", {}, { pid: "p0003" });
+		const options = { pid: "p0003", sid: timeline.sessions[0].sid, facet: "zone", moments: true };
+		const expected = await duck.query("player-graph", {}, options);
+		expect(expected.path?.length).toBeGreaterThan(0);
+		const got = await basinStore().query("player-graph", {}, options);
+		expect(JSON.parse(JSON.stringify(got))).toEqual(JSON.parse(JSON.stringify(expected)));
+		const sql = Object.values(basinStore().render("player-graph", {}, options).statements).join("\n");
+		expect(sql).toContain("json_get_str(e.props, 'step')");
+		expect(sql).not.toContain("json_extract");
+	});
+
 	test("requests carry the bearer token and hit the documented endpoint", () => {
 		expect(requests.length).toBeGreaterThan(0);
 		expect(requests[0].url).toBe(`https://api.sql.cloudflarestorage.com/api/v1/accounts/${ACCOUNT}/basin-sql/query/typetorch-analytics`);

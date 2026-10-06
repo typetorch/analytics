@@ -211,6 +211,75 @@ describe("player timeline and graph", () => {
 		const json = JSON.parse(JSON.stringify(full));
 		expect(Graph.fromJSON(json).toMermaid()).toBe(full.toMermaid());
 	});
+
+	/** The node of an event as the graph query sees it (zone facet; with moments, key moments are "@..." nodes). */
+	const nodeOf = (e: EventRow, moments: boolean): string | null => {
+		const props = e.props ? (JSON.parse(e.props) as Record<string, unknown>) : {};
+		if (moments && e.kind === "funnel") return `@${e.name}: ${String(props.step ?? props.i)}`;
+		if (moments && e.kind === "purchase") return `@purchase: ${String(props.product ?? e.name)}`;
+		if (moments && ["personal_best", "round_end"].includes(e.name)) return `@${e.name}`;
+		return zoneOf(e.state);
+	};
+	const visitsOf = (rows: EventRow[], moments: boolean) => {
+		const seq: string[] = [];
+		for (const e of [...rows].sort((a, b) => a.t - b.t)) {
+			const n = nodeOf(e, moments);
+			if (n && seq.at(-1) !== n) seq.push(n);
+		}
+		return seq;
+	};
+
+	test("one session (sid): only its moves, and the path in order with the time in each state", async () => {
+		const sid = mine[0].sid as string;
+		const rows = mine.filter((e) => e.sid === sid);
+		const g = await store.query("player-graph", {}, { pid, sid, facet: "zone" });
+		expect(g.sid).toBe(sid);
+		const seq = visitsOf(rows, false);
+		expect(g.path?.map((p) => p.state)).toEqual(seq);
+		expect(g.path?.map((p) => p.step)).toEqual(seq.map((_, i) => i + 1));
+		expect(g.ended).toBe(true);
+		const moves = seq.length + 1; // (start) -> first, each next, last -> (left)
+		expect(g.edges.reduce((s, e) => s + e.count, 0)).toBe(moves);
+		// Time per state = the path's time in it; all of it adds up to the session (first zone event to last event).
+		const total = (g.path ?? []).reduce((s, p) => s + p.ms, 0);
+		const first = rows.filter((e) => zoneOf(e.state)).reduce((m, e) => Math.min(m, e.t), Infinity);
+		expect(total).toBe(Math.max(...rows.map((e) => e.t)) - first);
+		expect(g.nodes.filter((n) => !n.id.startsWith("(")).reduce((s, n) => s + n.dwellMs, 0)).toBe(total);
+		const all = await store.query("player-graph", {}, { pid, facet: "zone" });
+		expect(all.path).toBeUndefined();
+		expect(all.edges.reduce((s, e) => s + e.count, 0)).toBeGreaterThan(moves);
+		expect(() => store.render("player-graph", {}, { pid, sid: "x' --" })).toThrow("sid");
+	});
+
+	test("nodes say what happened there: top events and funnel steps", async () => {
+		const g = await store.query("flow", {}, { facet: "zone", minCount: 1 });
+		const rows = playerEvents(inRange(7));
+		const shop = g.nodes.find((n) => n.id === "Shop");
+		const bought = rows.filter((e) => e.kind === "purchase" && zoneOf(e.state) === "Shop").length;
+		expect(bought).toBeGreaterThan(0);
+		expect(shop?.events).toEqual([{ kind: "purchase", name: "product", count: bought }]);
+		const lobby = g.nodes.find((n) => n.id === "Lobby");
+		const funnelRows = rows.filter((e) => e.kind === "funnel" && zoneOf(e.state) === "Lobby");
+		const spawned = funnelRows.filter((e) => JSON.parse(e.props as string).step === "spawned");
+		expect(lobby?.steps?.[0]).toEqual({ funnel: "onboarding", step: "spawned", index: 1, count: spawned.length, players: new Set(spawned.map((e) => e.pid)).size });
+		expect(lobby?.steps?.map((s) => s.index)).toEqual([...(lobby?.steps ?? [])].map((s) => s.index).sort((a, b) => (a ?? 0) - (b ?? 0)));
+		expect(g.nodes.every((n) => n.id.startsWith("(") || (n.events?.length ?? 0) <= 5)).toBe(true);
+		const plain = await store.query("flow", {}, { facet: "zone", details: false });
+		expect(plain.nodes.some((n) => n.events !== undefined)).toBe(false);
+	});
+
+	test("moments: funnel steps and purchases become small nodes on the path", async () => {
+		const payer = [...new Set(fx.events.filter((e) => e.kind === "purchase" && e.pid).map((e) => e.pid as string))][0];
+		const rows = fx.events.filter((e) => e.pid === payer && e.sid);
+		const sid = rows.find((e) => e.kind === "funnel")?.sid as string;
+		const g = await store.query("player-graph", {}, { pid: payer, sid, facet: "zone", moments: true });
+		const seq = visitsOf(rows.filter((e) => e.sid === sid), true);
+		expect(g.moments).toBe(true);
+		expect(g.path?.map((p) => p.state)).toEqual(seq);
+		expect(seq.some((s) => s.startsWith("@onboarding: "))).toBe(true);
+		expect(g.nodes.some((n) => n.id === "@onboarding: spawned")).toBe(true);
+		expect(g.toMermaid()).toContain('(["onboarding: spawned"])');
+	});
 });
 
 describe("experiments", () => {

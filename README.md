@@ -102,7 +102,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `retention` | retention by join-day cohort (day 1, 3, 7, 14, 30; days not over are `null`) | 30 days |
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
 | `timeline` | one player's sessions and events (by `pid`) | 90 days |
-| `player-graph` | one player's node graph: states as nodes, moves as edges with counts and time | 90 days |
+| `player-graph` | one player's node graph (all sessions, or one with `sid`): states as nodes with what happened in them, moves as edges with counts and time | 90 days |
 | `flow` | the merged flow graph for a filter (where most go next, where they quit) | 7 days |
 | `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
 | `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
@@ -116,8 +116,11 @@ const { servers } = await fleet.servers({ branch: "prod" });
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
 once: the DuckDB server drops exact duplicate rows when it writes each day's Parquet file; today's numbers and Basin can
 count a resent batch twice (only after a hot swap during a request). Graph options: `facet` (`all`, `zone`,
-`screen`, `activity`), `minCount`, `maxEdges`. Retention, bounce and "left the game" ignore sessions and days that
-aren't over yet.
+`screen`, `activity`), `minCount`, `maxEdges`, `moments` (key moments as small nodes on the path, ids starting with
+`@`: funnel steps, purchases and the `momentNames` events, default `personal_best`, `round_end`), `details` (default
+true: each node's `events`, its top 5 custom / purchase / currency names, and `steps`, the funnel steps logged in it).
+`player-graph` takes `sid` for one session; it then also returns `path` (the visits in order with the time in each)
+and `ended`. Retention, bounce and "left the game" ignore sessions and days that aren't over yet.
 
 Example output (the test fixture: 300 players over 21 days; arrays cut to two items):
 
