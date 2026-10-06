@@ -22,7 +22,7 @@ import { DAY_MS } from "../sql/dialect.ts";
 import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { openSqlite } from "../fleet/db.ts";
 import { IdentityStore, parseIdentities, parseUid, PID_PATTERN } from "../fleet/identity.ts";
-import { FLEET_LIMITS, handleFleet } from "../fleet/http.ts";
+import { FLEET_LIMITS, handleFleet, NewJobLimiter } from "../fleet/http.ts";
 import { createNotifier, type Notifier } from "../fleet/notify.ts";
 import { FleetService } from "../fleet/service.ts";
 import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
@@ -89,6 +89,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const ipLimiter = new RateLimiter(config.ipPerMinute, clock);
 	const jobLimiter = new RateLimiter(config.jobPerMinute, clock);
 	const fleetLimiters = Object.fromEntries(Object.entries(FLEET_LIMITS).map(([k, n]) => [k, new RateLimiter(n, clock)])) as Record<keyof typeof FLEET_LIMITS, RateLimiter>;
+	const newFleetJobs = new NewJobLimiter(config.fleetNewJobsPerMinute, clock);
 	const isAdmin = (req: Request) => tokenIn(bearer(req), [config.adminToken]);
 	const isIngest = (req: Request) => tokenIn(bearer(req), config.ingestTokens);
 	const keepOpen = new WeakMap<Request, () => void>();
@@ -453,9 +454,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (path === "/v1/identity" && req.method === "POST") return await postIdentity(req, ip);
 			if (path.startsWith("/v1/fleet/")) {
 				if (!fleet) return json(404, { error: "the fleet part is off on this server" });
-				// Per-JobId limits only: many game servers can share one egress IP.
+				// Per-JobId limits and a cap on never-seen JobIds, no per-IP limit: many game servers can share one egress IP.
 				return (
-					(await handleFleet(req, url, { service: fleet, isAdmin, isIngest, limiters: fleetLimiters, keepOpen: (r) => keepOpen.get(r)?.() }, ip)) ?? json(404, { error: "not found" })
+					(await handleFleet(req, url, { service: fleet, isAdmin, isIngest, limiters: fleetLimiters, newJobs: newFleetJobs, keepOpen: (r) => keepOpen.get(r)?.() }, ip)) ??
+					json(404, { error: "not found" })
 				);
 			}
 			if (path === "/v1/erasure") return req.method === "POST" ? await erasure(req) : json(405, { error: "POST only" });

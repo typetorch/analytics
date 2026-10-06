@@ -4,6 +4,7 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { FLEET_NEW_JOBS_PER_MINUTE } from "../fleet/http.ts";
 
 export type ServerPart = "analytics" | "fleet";
 
@@ -50,6 +51,8 @@ export interface ServerConfig {
 	fleetWebhookUrl?: string;
 	fleetWebhookFormat?: "discord" | "slack" | "json";
 	fleetWebhookLevels: Set<"critical" | "warning" | "info">;
+	/** Never-seen JobIds the fleet API accepts per minute (429 and one fleet_flood alert past it). */
+	fleetNewJobsPerMinute: number;
 }
 
 export function parseDotEnv(text: string): Record<string, string> {
@@ -144,6 +147,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		erasureDeleteLink: flag(env, "TT_ANALYTICS_ERASURE_DELETE_LINK"),
 		fleetDb: resolve(env.TT_FLEET_DB ?? resolve(dataDir, "fleet.sqlite")),
 		fleetWebhookLevels: levels,
+		fleetNewJobsPerMinute: num(env, "TT_FLEET_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),
 	};
 	const admin = token(env, "TT_ANALYTICS_ADMIN_TOKEN");
 	if (admin) config.adminToken = admin;

@@ -364,6 +364,16 @@ only by default (`TT_FLEET_WEBHOOK_LEVELS`), the same (code, branch, artifact) a
 20 posts a minute. Reports are kept 30 days, alerts 90 days. Per-JobId limits (40 a minute) sit above the kernel's
 own 30.
 
+**New JobIds** (`TT_FLEET_NEW_JOBS_PER_MINUTE`, 2,000): JobIds without a `servers` row are let in at most 2,000 per
+clock minute across all senders, enough for a 1,250-server fleet (50k CCU) restarting within one minute. Past that,
+ingest requests from never-seen JobIds get 429 (`retry-after`: the rest of the minute) and the first refusal of the
+minute raises one `fleet_flood` alert (critical, source `server`, `details: { limit, windowSeconds, example }`), which
+reaches the webhook (deduped like any alert) and the SSE stream. Known JobIds (a `servers` row: live, closed or lost
+in the last day) and the CLI's `j = "cli"` are never limited by it. Why: anyone with the ingest token (any code in the
+universe that reads `TypeTorchFleet`) could otherwise grow the `servers` table and the per-JobId limiters with
+made-up JobIds. The limiter holds at most that many JobIds and forgets them each minute; a JobId over 64 characters
+gets 400 before any limiter sees it.
+
 The fleet core (`src/fleet/service.ts`, `http.ts`) uses no Node APIs (async SQLite interface, Web Request/Response),
 so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durable Object.
 

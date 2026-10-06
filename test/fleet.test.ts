@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFleetClient, FleetApiError } from "../src/fleet/client.ts";
 import { openSqlite } from "../src/fleet/db.ts";
+import { FLEET_NEW_JOBS_PER_MINUTE, handleFleet, NewJobLimiter } from "../src/fleet/http.ts";
 import { alertText, createNotifier, detectFormat, webhookBody } from "../src/fleet/notify.ts";
 import { FleetService, type FleetEvent } from "../src/fleet/service.ts";
 import { startApp, type App } from "../src/server/app.ts";
@@ -221,6 +222,110 @@ describe("the kernel's and the CLI's shapes", () => {
 		const stuck = alerts.alerts.find((a) => a.code === "server_stuck" && a.source === "cli");
 		expect(stuck).toMatchObject({ acked: false, job: null });
 		expect(typeof stuck?.at).toBe("number");
+	});
+});
+
+describe("new-JobId flood limit", () => {
+	const LIMIT = 3;
+	let floodNow = T0 + 5_000; // 5 s into a clock minute
+	let floodDir: string;
+	let floodApp: App;
+	let floodBase: string;
+	const floodHooks: string[] = [];
+	const events: FleetEvent[] = [];
+	const post = (path: string, body: unknown) =>
+		fetch(`${floodBase}/v1/fleet/${path}`, { method: "POST", headers: { authorization: `Bearer ${INGEST}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+	const floodAlerts = async () => (await createFleetClient({ url: floodBase, token: ADMIN }).alerts()).filter((a) => a.code === "fleet_flood");
+
+	beforeAll(async () => {
+		floodDir = mkdtempSync(join(tmpdir(), "tt-fleet-flood-"));
+		const config = loadConfig([], {
+			TT_ANALYTICS_DATA: floodDir,
+			TT_ANALYTICS_PORT: "0",
+			TT_SERVER_PARTS: "fleet",
+			TT_ANALYTICS_INGEST_TOKENS: INGEST,
+			TT_ANALYTICS_ADMIN_TOKEN: ADMIN,
+			TT_FLEET_WEBHOOK_URL: "https://discord.com/api/webhooks/2/def",
+			TT_FLEET_NEW_JOBS_PER_MINUTE: String(LIMIT),
+		});
+		const capture = (async (_input: string | URL | Request, init?: RequestInit) => {
+			floodHooks.push((JSON.parse(String(init?.body)) as { content: string }).content);
+			return new Response("", { status: 204 });
+		}) as typeof fetch;
+		floodApp = await startApp(config, { clock: () => floodNow, manualJobs: true, log: () => {}, fetch: capture });
+		floodBase = `http://127.0.0.1:${floodApp.port}`;
+		floodApp.fleet?.subscribe((event) => events.push(event));
+	});
+	afterAll(async () => {
+		await floodApp.stop();
+		rmSync(floodDir, { recursive: true, force: true });
+	});
+
+	test("past the limit never-seen JobIds get 429 and one fleet_flood alert goes to the webhook and the stream; known JobIds and the CLI pass", async () => {
+		for (const j of ["srv-1", "srv-2", "srv-3"]) expect((await post("heartbeat", hb(j))).status).toBe(202);
+		const refused = await post("heartbeat", hb("fake-1"));
+		expect(refused.status).toBe(429);
+		expect(refused.headers.get("retry-after")).toBe("55"); // until the minute ends
+		expect(((await refused.json()) as { error: string }).error).toContain("new JobIds");
+		expect((await post("report", { s: 1, j: "fake-2", r: "booted" })).status).toBe(429);
+		expect((await post("alert", { level: "warning", code: "x", message: "m", j: "fake-3" })).status).toBe(429);
+		// Known servers keep going, and so does the CLI (j = "cli").
+		for (const j of ["srv-1", "srv-2", "srv-3"]) expect((await post("heartbeat", hb(j, { n: 5 }))).status).toBe(202);
+		expect((await post("report", { s: 1, j: "srv-2", r: "booted" })).status).toBe(202);
+		expect((await post("alert", { level: "warning", code: "server_stuck", message: "x", j: "cli" })).status).toBe(202);
+		const servers = await createFleetClient({ url: floodBase, token: ADMIN }).servers();
+		expect(servers.servers.map((s) => s.job).sort()).toEqual(["srv-1", "srv-2", "srv-3"]);
+		const floods = await floodAlerts();
+		expect(floods.length).toBe(1);
+		expect(floods[0]).toMatchObject({ level: "critical", source: "server", job: null, details: { limit: LIMIT, windowSeconds: 60, example: "fake-1" } });
+		expect(events.filter((e) => e.type === "alert" && e.alert.code === "fleet_flood").length).toBe(1);
+		await floodApp.notifier?.flush();
+		expect(floodHooks.filter((c) => c.startsWith("CRITICAL: fleet_flood")).length).toBe(1);
+	});
+
+	test("the next minute lets new JobIds in again; another flood raises one more alert (the webhook dedupes it)", async () => {
+		floodNow += 60_000;
+		for (const j of ["srv-4", "fake-1", "fake-4"]) expect((await post("heartbeat", hb(j))).status).toBe(202);
+		expect((await post("heartbeat", hb("fake-5"))).status).toBe(429);
+		expect((await post("heartbeat", hb("fake-6"))).status).toBe(429);
+		expect((await floodAlerts()).length).toBe(2);
+		await floodApp.notifier?.flush();
+		expect(floodHooks.filter((c) => c.startsWith("CRITICAL: fleet_flood")).length).toBe(1);
+	});
+
+	test("a JobId over 64 characters is refused before any limiter", async () => {
+		expect((await post("heartbeat", hb("x".repeat(65)))).status).toBe(400);
+		expect((await post("report", { s: 1, j: "y".repeat(65), r: "booted" })).status).toBe(400);
+	});
+
+	test("refused JobIds never reach the per-JobId limiters, and the limiter holds at most its limit", async () => {
+		const service = await FleetService.open({ db: await openSqlite(":memory:"), clock: () => T0 });
+		const keys = new Set<string>();
+		const counting = { take: (key: string) => (keys.add(key), true), retryAfter: () => 1 };
+		const gate = new NewJobLimiter(10, () => T0);
+		const options = { service, isIngest: () => true, isAdmin: () => false, limiters: { heartbeat: counting, report: counting, alert: counting, closing: counting, deploy: counting }, newJobs: gate };
+		const statuses: number[] = [];
+		for (let i = 0; i < 100; i++) {
+			const req = new Request("http://fleet.test/v1/fleet/heartbeat", { method: "POST", body: JSON.stringify({ j: `random-${i}` }) });
+			statuses.push((await handleFleet(req, new URL(req.url), options))?.status ?? 0);
+		}
+		expect(statuses.filter((s) => s === 202).length).toBe(10);
+		expect(statuses.filter((s) => s === 429).length).toBe(90);
+		expect(keys.size).toBe(10);
+		expect(gate.stats).toEqual({ admitted: 10, refused: 90 });
+		expect((await service.servers()).servers.length).toBe(10);
+		expect((await service.alerts()).filter((a) => a.code === "fleet_flood").length).toBe(1);
+		await service.close();
+	});
+
+	test("the default fits a 1,250-server fleet restarting in one minute; a JobId counts once per window", () => {
+		const gate = new NewJobLimiter(undefined, () => T0);
+		expect(gate.perMinute).toBe(FLEET_NEW_JOBS_PER_MINUTE);
+		expect(FLEET_NEW_JOBS_PER_MINUTE).toBe(2000);
+		for (let i = 0; i < 1250; i++) expect(gate.take(`job-${i}`)).toBe("ok");
+		for (let i = 0; i < 1250; i++) gate.take(`job-${i}`);
+		expect(gate.stats).toEqual({ admitted: 1250, refused: 0 });
+		expect(loadConfig([], {}).fleetNewJobsPerMinute).toBe(2000);
 	});
 });
 

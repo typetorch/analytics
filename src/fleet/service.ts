@@ -36,7 +36,7 @@ export interface Alert {
 	seq: number | null;
 	generation: number | null;
 	kernel: string | null;
-	/** "game" (a kernel), "cli" (e.g. auto_rollback), or "server" (server_lost, server_stuck). */
+	/** "game" (a kernel), "cli" (e.g. auto_rollback), or "server" (server_lost, server_stuck, fleet_flood). */
 	source: "game" | "cli" | "server";
 	/** Extra data, e.g. { jobs: [...] } for server_lost / server_stuck. */
 	details: Record<string, unknown> | null;
@@ -129,7 +129,9 @@ function int(b: Body, key: string, required = false): number | null {
 	return v;
 }
 
-const JOB = 64;
+/** The longest JobId accepted (Roblox JobIds are 36-character GUIDs). */
+export const JOB_ID_MAX = 64;
+const JOB = JOB_ID_MAX;
 
 /** A number sent as a number or a numeric string (`sv`, `x`); anything else is null. */
 function loose(b: Body, key: string): number | null {
@@ -447,6 +449,33 @@ export class FleetService {
 			kernel: text(b, "k", 32),
 			source: fromCli ? "cli" : "game",
 			details: null,
+		});
+	}
+
+	/** Whether a servers row exists for this JobId (live, closed or lost; rows go a day after a server is gone). */
+	async knows(job: string): Promise<boolean> {
+		return (await this.db.first<{ x: number }>("SELECT 1 AS x FROM servers WHERE job = ?", [job])) !== undefined;
+	}
+
+	/**
+	 * `fleet_flood` (critical, source server): the host's new-JobId limit refused a never-seen JobId. The host raises
+	 * it once per limiter window; `example` is the first refused JobId.
+	 */
+	async flood(info: { limit: number; windowSeconds: number; example: string }): Promise<Alert> {
+		return this.addAlert({
+			level: "critical",
+			code: "fleet_flood",
+			message:
+				`over ${info.limit} never-seen JobIds in ${info.windowSeconds} s: more new ones get 429 until the window ends; known servers are not limited. ` +
+				"Either a fleet this large restarted at once, or something with the ingest token is sending made-up JobIds",
+			job: null,
+			branch: null,
+			artifact: null,
+			seq: null,
+			generation: null,
+			kernel: null,
+			source: "server",
+			details: { limit: info.limit, windowSeconds: info.windowSeconds, example: info.example.slice(0, JOB) },
 		});
 	}
 

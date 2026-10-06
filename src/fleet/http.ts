@@ -9,7 +9,7 @@
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
  *   GET  /v1/fleet/stream?branch=&types=server,alert,...            Server-Sent Events
  */
-import { FleetInputError, type AlertLevel, type FleetEvent, type FleetService } from "./service.ts";
+import { FleetInputError, JOB_ID_MAX, type AlertLevel, type FleetEvent, type FleetService } from "./service.ts";
 
 export const FLEET_BODY_LIMIT = 16 * 1024;
 
@@ -19,9 +19,65 @@ export const FLEET_BODY_LIMIT = 16 * 1024;
  */
 export const FLEET_LIMITS = { heartbeat: 40, report: 40, alert: 40, closing: 10, deploy: 30 } as const;
 
+/**
+ * Never-seen JobIds (no servers row) accepted per minute, across all senders. Anyone with the ingest token (any code
+ * in the universe that reads TypeTorchFleet) could otherwise grow the servers table and the per-JobId limiters with
+ * made-up JobIds. 2,000 covers a 1,250-server fleet (50k CCU) restarting within one minute. Known JobIds never count.
+ */
+export const FLEET_NEW_JOBS_PER_MINUTE = 2000;
+
 export interface Limiter {
 	take(key: string): boolean;
 	retryAfter(key: string): number;
+}
+
+/** The new-JobId limit. `take` answers "ok", "refused" (429), or "flood" (429, and the first refusal of the window). */
+export interface NewJobGate {
+	readonly perMinute: number;
+	readonly windowSeconds: number;
+	take(job: string): "ok" | "refused" | "flood";
+	/** Seconds until the window ends. */
+	retryAfter(): number;
+}
+
+/**
+ * Distinct never-seen JobIds per clock minute. Holds at most `perMinute` JobIds (cleared when the minute ends), so its
+ * own memory is bounded whatever is sent; a JobId already let in this minute may keep going.
+ */
+export class NewJobLimiter implements NewJobGate {
+	readonly windowSeconds = 60;
+	private window = -1;
+	private readonly admitted = new Set<string>();
+	private refusedInWindow = 0;
+
+	constructor(
+		readonly perMinute: number = FLEET_NEW_JOBS_PER_MINUTE,
+		private readonly clock: () => number = Date.now,
+	) {}
+
+	take(job: string): "ok" | "refused" | "flood" {
+		const window = Math.floor(this.clock() / (this.windowSeconds * 1000));
+		if (window !== this.window) {
+			this.window = window;
+			this.admitted.clear();
+			this.refusedInWindow = 0;
+		}
+		if (this.admitted.has(job)) return "ok";
+		if (this.admitted.size < this.perMinute) {
+			this.admitted.add(job);
+			return "ok";
+		}
+		return ++this.refusedInWindow === 1 ? "flood" : "refused";
+	}
+
+	retryAfter(): number {
+		return Math.max(1, Math.ceil(((this.window + 1) * this.windowSeconds * 1000 - this.clock()) / 1000));
+	}
+
+	/** New JobIds let in this window, and refusals (tests). */
+	get stats(): { admitted: number; refused: number } {
+		return { admitted: this.admitted.size, refused: this.refusedInWindow };
+	}
 }
 
 export interface FleetHttpOptions {
@@ -29,6 +85,8 @@ export interface FleetHttpOptions {
 	isIngest(req: Request): boolean;
 	isAdmin(req: Request): boolean;
 	limiters: Record<keyof typeof FLEET_LIMITS, Limiter>;
+	/** Checked before `limiters` for JobIds without a servers row (not for the CLI's j = "cli"). */
+	newJobs: NewJobGate;
 	/** Turns off a long-lived connection's idle timeout (SSE). */
 	keepOpen?(req: Request): void;
 	/** Seconds between SSE keep-alive comments (default 15). */
@@ -78,7 +136,20 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 			const kind = route as keyof typeof FLEET_LIMITS;
 			const body = await readJson(req);
 			const job = typeof (body as { j?: unknown })?.j === "string" ? (body as { j: string }).j : (req.headers.get("x-tt-job") ?? "");
+			// Checked here, before any limiter keeps the key (the service checks the same per route).
+			if (job.length > JOB_ID_MAX || job.includes("\0")) throw new FleetInputError(`j must be a string of at most ${JOB_ID_MAX} characters`);
 			const key = job || `ip:${ip}`;
+			if (job && job !== "cli" && !(await o.service.knows(job))) {
+				const verdict = o.newJobs.take(job);
+				if (verdict !== "ok") {
+					if (verdict === "flood") {
+						try {
+							await o.service.flood({ limit: o.newJobs.perMinute, windowSeconds: o.newJobs.windowSeconds, example: job });
+						} catch {}
+					}
+					return json(429, { error: "rate limited: too many new JobIds this minute" }, { "retry-after": String(o.newJobs.retryAfter()) });
+				}
+			}
 			if (!o.limiters[kind].take(key)) return json(429, { error: "rate limited" }, { "retry-after": String(o.limiters[kind].retryAfter(key)) });
 			if (kind === "heartbeat") await o.service.heartbeat(body, req.headers.get("x-tt-job"));
 			else if (kind === "report") await o.service.report(body);
