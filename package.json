@@ -48,7 +48,8 @@
 		"loadtest": "bun scripts/loadtest.ts",
 		"smoke": "node scripts/smoke.mjs",
 		"bench:nightly": "bun scripts/nightly-bench.ts",
-		"report": "bun scripts/report.ts"
+		"report": "bun scripts/report.ts",
+		"local": "bun scripts/local.ts"
 	},
 	"dependencies": {
 		"@duckdb/node-api": "^1.5.6-r.1"
