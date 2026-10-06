@@ -5,7 +5,7 @@
 import { PROP_KEYS } from "../schema.ts";
 import { assertSafeKey, lit } from "../sql/dialect.ts";
 import { bootstrapMeans, twoProportion, verdict, welch, type TestResult } from "../stats.ts";
-import { dayOf, defineQuery, eventsTable, intOption, num, playerRows, ratio, round, str, where } from "./core.ts";
+import { dayOf, defineQuery, eventsTable, intOption, num, playerRows, ratio, round, SERVER_PURCHASE, str, where } from "./core.ts";
 
 /** The group of servers that run no experiment pin (`sexp` = ""). */
 export const SERVER_CONTROL = "(unpinned)";
@@ -97,13 +97,13 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 			o.scope === "server" ? `CASE WHEN e.sexp IS NULL OR e.sexp = '' THEN ${lit(SERVER_CONTROL)} ELSE e.sexp END` : d.jsonText("e.exp", o.experiment as string);
 		const serverPrefix = o.scope === "server" && o.experiment ? ` AND (e.sexp IS NULL OR e.sexp = '' OR e.sexp = ${lit(o.experiment)})` : "";
 		const base =
-			`ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.kind AS kind, e.props AS props, ${variantExpr} AS variant FROM ${table} e WHERE ${playerRows(f, ctx)}${serverPrefix}), ` +
-			`pe AS (SELECT pid, sid, t, kind, props, variant FROM ev WHERE variant IS NOT NULL AND variant <> ''), ` +
+			`ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.kind AS kind, e.props AS props, e.src AS esrc, ${variantExpr} AS variant FROM ${table} e WHERE ${playerRows(f, ctx)}${serverPrefix}), ` +
+			`pe AS (SELECT pid, sid, t, kind, props, esrc, variant FROM ev WHERE variant IS NOT NULL AND variant <> ''), ` +
 			`pv AS (SELECT pid, MIN(variant) AS variant, COUNT(DISTINCT variant) AS nvar FROM pe GROUP BY pid), ` +
 			`s AS (SELECT sid, MIN(pid) AS pid, MAX(t) - MIN(t) AS len FROM pe GROUP BY sid), ` +
 			`sp AS (SELECT pid, SUM(len) AS playtime, COUNT(*) AS sessions FROM s GROUP BY pid), ` +
 			`dp AS (SELECT pid, COUNT(DISTINCT day) AS days FROM (SELECT pid, ${dayOf("t")} AS day FROM pe) dd GROUP BY pid), ` +
-			`pu AS (SELECT pid, SUM(COALESCE(robux, 0)) AS robux FROM (SELECT pid, ${d.jsonNumber("props", o.robuxKey)} AS robux FROM pe WHERE kind = 'purchase') q GROUP BY pid), ` +
+			`pu AS (SELECT pid, SUM(COALESCE(robux, 0)) AS robux FROM (SELECT pid, ${d.jsonNumber("props", o.robuxKey)} AS robux FROM pe WHERE kind = 'purchase' AND ${SERVER_PURCHASE}) q GROUP BY pid), ` +
 			`pp AS (SELECT pv.pid AS pid, pv.variant AS variant, COALESCE(sp.playtime, 0) AS playtime, COALESCE(sp.sessions, 0) AS sessions, ` +
 			`COALESCE(dp.days, 0) AS days, COALESCE(pu.robux, 0) AS robux, CASE WHEN pu.pid IS NULL THEN 0 ELSE 1 END AS payer ` +
 			`FROM pv LEFT JOIN sp ON sp.pid = pv.pid LEFT JOIN dp ON dp.pid = pv.pid LEFT JOIN pu ON pu.pid = pv.pid WHERE pv.nvar = 1)`;

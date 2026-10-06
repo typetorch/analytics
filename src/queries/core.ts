@@ -117,6 +117,13 @@ export const SESSIONS_CTE =
 /** Sessions whose last event is older than this are over (for "left the game" and bounce counts). */
 export const ENDED_AFTER_MS = 10 * 60 * 1000;
 
+/**
+ * Revenue counts server-sent purchase rows only. The framework lets a client send `purchase` events (src = client),
+ * so an exploiter could otherwise inflate payers and Robux. Rows from before `src` existed (NULL) count. The CTE must
+ * expose `e.src AS esrc` (the name `src` is taken by the join source in some queries).
+ */
+export const SERVER_PURCHASE = "(esrc IS NULL OR esrc <> 'client')";
+
 export { dayOf, int, lit };
 
 /** A pid for SQL: the framework's random ids are short tokens. */

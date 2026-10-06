@@ -329,7 +329,9 @@ export class Warehouse {
 		const sessions =
 			`s AS (SELECT sid, MIN(pid) AS pid, MIN(t) AS t0, MAX(t) AS t1, MIN(art) AS art, MIN(branch) AS branch, MIN(dev) AS dev, MIN(exp) AS exp, ` +
 			`MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew FROM ${src} WHERE pid IS NOT NULL AND pid <> '' AND sid IS NOT NULL AND sid <> '' GROUP BY sid)`;
-		const purchases = `pu AS (SELECT sid, COUNT(*) AS purchases, SUM(COALESCE(${robux}, 0)) AS robux FROM ${src} WHERE kind = 'purchase' GROUP BY sid)`;
+		// Revenue counts server-sent purchase rows only: a client can send `purchase` events (src = client) and would
+		// otherwise inflate Robux numbers (queries/core.ts SERVER_PURCHASE applies the same rule to the live queries).
+		const purchases = `pu AS (SELECT sid, COUNT(*) AS purchases, SUM(COALESCE(${robux}, 0)) AS robux FROM ${src} WHERE kind = 'purchase' AND (src IS NULL OR src <> 'client') GROUP BY sid)`;
 		const out = (dir: string) => {
 			const folder = join(this.layout.rollups, dir);
 			mkdirSync(folder, { recursive: true });

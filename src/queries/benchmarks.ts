@@ -10,7 +10,7 @@
 import { FLEET_HEARTBEAT, PROP_KEYS } from "../schema.ts";
 import { DAY_MS, assertSafeKey } from "../sql/dialect.ts";
 import { whereSql, type NormalizedFilters } from "../sql/filters.ts";
-import { ENDED_AFTER_MS, SESSIONS_CTE, dayOf, defineQuery, int, intOption, iso, isoDay, num, numOrNull, playerRows, ratio, round, str, type QueryContext } from "./core.ts";
+import { ENDED_AFTER_MS, SERVER_PURCHASE, SESSIONS_CTE, dayOf, defineQuery, int, intOption, iso, isoDay, num, numOrNull, playerRows, ratio, round, str, type QueryContext } from "./core.ts";
 
 const HOUR_MS = 3_600_000;
 
@@ -97,13 +97,13 @@ export const benchmarks = defineQuery<BenchmarkOptions, BenchmarksResult>({
 		const fc: NormalizedFilters = { ...f, from: cohortFrom, to };
 		return {
 			numbers:
-				`WITH ev AS (${playerEvents(ctx, f, from, to, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp, e.kind AS kind, e.props AS props")}), ${SESSIONS_CTE}, ` +
+				`WITH ev AS (${playerEvents(ctx, f, from, to, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp, e.kind AS kind, e.props AS props, e.src AS esrc")}), ${SESSIONS_CTE}, ` +
 				`sp AS (SELECT CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END AS cur, pid, t0, t1, isnew, ${dayOf("t0")} AS day FROM s), ` +
 				`pt AS (SELECT cur, COUNT(DISTINCT pid) AS players, SUM(t1 - t0) AS playtime_ms, ` +
 				`SUM(CASE WHEN isnew = 1 AND t1 < ${ended} THEN 1 ELSE 0 END) AS first_sessions, ` +
 				`SUM(CASE WHEN isnew = 1 AND t1 < ${ended} AND t1 - t0 >= ${int(o.qualifiedMinutes * 60_000)} THEN 1 ELSE 0 END) AS first_qualified FROM sp GROUP BY cur), ` +
 				`pdays AS (SELECT cur, COUNT(*) AS player_days FROM (SELECT DISTINCT cur, pid, day FROM sp) d GROUP BY cur), ` +
-				`pu AS (SELECT CASE WHEN t >= ${int(mid)} THEN 1 ELSE 0 END AS cur, pid, robux FROM (SELECT pid, t, ${robux} AS robux FROM ev WHERE kind = 'purchase') q), ` +
+				`pu AS (SELECT CASE WHEN t >= ${int(mid)} THEN 1 ELSE 0 END AS cur, pid, robux FROM (SELECT pid, t, ${robux} AS robux FROM ev WHERE kind = 'purchase' AND ${SERVER_PURCHASE}) q), ` +
 				`pay AS (SELECT cur, COUNT(DISTINCT pid) AS payers, SUM(COALESCE(robux, 0)) AS robux FROM pu GROUP BY cur) ` +
 				`SELECT pt.cur AS cur, pt.players AS players, pt.playtime_ms AS playtime_ms, pt.first_sessions AS first_sessions, pt.first_qualified AS first_qualified, ` +
 				`pdays.player_days AS player_days, pay.payers AS payers, pay.robux AS robux ` +
@@ -314,7 +314,7 @@ export const trends = defineQuery<TrendsOptions, TrendsResult>({
 		const lo = firstDay * DAY_MS;
 		const hi = f.to + DAY_MS; // one more day: the last cohort's return day
 		const sessions =
-			`WITH ev AS (${playerEvents(ctx, f, lo, hi, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp, e.kind AS kind, e.name AS name, e.props AS props")}), ` +
+			`WITH ev AS (${playerEvents(ctx, f, lo, hi, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp, e.kind AS kind, e.name AS name, e.props AS props, e.src AS esrc")}), ` +
 			`s AS (SELECT sid, MIN(pid) AS pid, MIN(t) AS t0, MAX(t) AS t1, MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew, ` +
 			`MAX(CASE WHEN kind = 'session' AND name = 'join' THEN ${d.jsonText("props", "from")} END) AS src FROM ev GROUP BY sid), ` +
 			`s1 AS (SELECT sid, pid, t0, t1, isnew, COALESCE(src, 'unknown') AS src, ${dayOf("t0")} AS day FROM s), ` +
@@ -324,7 +324,7 @@ export const trends = defineQuery<TrendsOptions, TrendsResult>({
 				`${sessions}, ` +
 				`pd AS (SELECT pid, day, src FROM sd WHERE rn = 1), ` +
 				`pdn AS (SELECT pid, day, MAX(isnew) AS isnew, SUM(t1 - t0) AS playtime FROM sd GROUP BY pid, day), ` +
-				`pr AS (SELECT pid, day, SUM(COALESCE(robux, 0)) AS robux FROM (SELECT pid, ${dayOf("t")} AS day, ${d.jsonNumber("props", o.robuxKey)} AS robux FROM ev WHERE kind = 'purchase') q GROUP BY pid, day) ` +
+				`pr AS (SELECT pid, day, SUM(COALESCE(robux, 0)) AS robux FROM (SELECT pid, ${dayOf("t")} AS day, ${d.jsonNumber("props", o.robuxKey)} AS robux FROM ev WHERE kind = 'purchase' AND ${SERVER_PURCHASE}) q GROUP BY pid, day) ` +
 				`SELECT pd.day AS day, pd.src AS src, COUNT(*) AS dau, SUM(pdn.isnew) AS new_users, SUM(pdn.playtime) AS playtime_ms, SUM(COALESCE(pr.robux, 0)) AS robux ` +
 				`FROM pd JOIN pdn ON pdn.pid = pd.pid AND pdn.day = pd.day LEFT JOIN pr ON pr.pid = pd.pid AND pr.day = pd.day ` +
 				`WHERE pd.day < ${int(Math.ceil(f.to / DAY_MS))} GROUP BY pd.day, pd.src ORDER BY day, src ${lim(10_000)}`,

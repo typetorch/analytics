@@ -15,6 +15,7 @@ import {
 	playerRows,
 	ratio,
 	round,
+	SERVER_PURCHASE,
 	str,
 	where,
 	type QueryContext,
@@ -161,9 +162,9 @@ export const roblox = defineQuery<RobloxOptions, RobloxResult>({
 		const robux = ctx.dialect.jsonNumber("props", o.robuxKey);
 		return {
 			numbers:
-				`WITH ${sessionCtes(ctx, f, ", e.kind AS kind, e.props AS props")}, ` +
+				`WITH ${sessionCtes(ctx, f, ", e.kind AS kind, e.props AS props, e.src AS esrc")}, ` +
 				`p AS (SELECT pid, SUM(t1 - t0) AS playtime, COUNT(DISTINCT day0) AS days FROM (SELECT pid, t0, t1, ${dayOf("t0")} AS day0 FROM s) x GROUP BY pid), ` +
-				`pu AS (SELECT pid, SUM(COALESCE(robux, 0)) AS robux, COUNT(*) AS purchases FROM (SELECT pid, ${robux} AS robux FROM ev WHERE kind = 'purchase') y GROUP BY pid) ` +
+				`pu AS (SELECT pid, SUM(COALESCE(robux, 0)) AS robux, COUNT(*) AS purchases FROM (SELECT pid, ${robux} AS robux FROM ev WHERE kind = 'purchase' AND ${SERVER_PURCHASE}) y GROUP BY pid) ` +
 				`SELECT a.players, a.playtime_ms, a.play_days, b.sessions, b.qualified, b.first_sessions, b.bounced, c.payers, c.robux, c.purchases ` +
 				`FROM (SELECT COUNT(*) AS players, SUM(playtime) AS playtime_ms, SUM(days) AS play_days FROM p) a ` +
 				`CROSS JOIN (SELECT COUNT(*) AS sessions, SUM(CASE WHEN t1 - t0 >= ${int(o.qualifiedMinutes * 60_000)} THEN 1 ELSE 0 END) AS qualified, ` +
