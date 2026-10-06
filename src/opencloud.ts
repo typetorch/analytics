@@ -125,3 +125,29 @@ export async function deleteDataStoreEntry(options: OpenCloudOptions & { univers
 	if (response.status === 404) return;
 	if (response.status < 200 || response.status >= 300) fail("DELETE", path, response.status, response.text, "universe-datastores.objects:delete");
 }
+
+/**
+ * One page of a DataStore's entry ids, optionally only those starting with `prefix` (v2 `filter: id.startsWith`).
+ * Scope universe-datastores.objects:list.
+ */
+export async function listDataStoreEntries(
+	options: OpenCloudOptions & { universeId: number; dataStore: string; prefix?: string; pageToken?: string; maxPageSize?: number },
+): Promise<{ ids: string[]; nextPageToken?: string }> {
+	const params = new URLSearchParams({ maxPageSize: String(Math.min(256, Math.max(1, options.maxPageSize ?? 100))) });
+	if (options.prefix) params.set("filter", `id.startsWith("${options.prefix.replace(/["\\]/g, "")}")`);
+	if (options.pageToken) params.set("pageToken", options.pageToken);
+	const path = `/cloud/v2/universes/${options.universeId}/data-stores/${encodeURIComponent(options.dataStore)}/entries?${params.toString()}`;
+	const response = await call(options, "GET", path);
+	if (response.status < 200 || response.status >= 300) fail("GET", path.split("?")[0], response.status, response.text, "universe-datastores.objects:list");
+	const body = record(response.body);
+	const entries = Array.isArray(body.dataStoreEntries) ? body.dataStoreEntries : [];
+	const ids = entries
+		.map((e) => {
+			const r = record(e);
+			if (typeof r.id === "string") return r.id;
+			return typeof r.path === "string" ? decodeURIComponent(r.path.split("/entries/")[1] ?? "") : "";
+		})
+		.filter((id) => id !== "");
+	const next = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
+	return next ? { ids, nextPageToken: next } : { ids };
+}

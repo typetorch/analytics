@@ -19,6 +19,7 @@ Runs on Bun and on Node 20+ (the fleet part needs Node 22.5+ for `node:sqlite`, 
 - [Cloudflare Basin setup](#cloudflare-basin-setup)
 - [The analytics server (DuckDB)](#the-analytics-server-duckdb)
 - [The fleet API (SQLite)](#the-fleet-api-sqlite)
+- [Privacy](#privacy)
 - [Deploy on a 1 GB VPS](#deploy-on-a-1-gb-vps)
 - [Load tests](#load-tests)
 - [Development](#development)
@@ -263,6 +264,9 @@ bun src/server/main.ts --env-file analytics.env    # or, after bun run build: no
 | `GET /v1/settings` | ingest or admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
 | `GET /healthz` | none / admin | `{ ok }`; with the admin token: memory, loader lag, row counts, fleet counts |
+| `POST /v1/identity` | ingest | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
+| `GET /v1/identity?pid=` / `?uid=` | admin | pid <-> UserId (`{ identities: [{ pid, uid, firstSeen, lastSeen }] }`); no parameter: `{ count, backfill }` |
+| `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `TT_ANALYTICS_OPENCLOUD_KEY` with `universe-datastores.objects:list` and `:read`) |
 
 How it works:
 
@@ -282,12 +286,20 @@ How it works:
 **Right to Erasure.** In Creator Hub > Webhooks, add `https://<your host>/v1/erasure` for "Right to erasure request"
 with a secret (`TT_ANALYTICS_WEBHOOK_SECRET`). The server checks `roblox-signature` (`t=<unix s>,v1=<base64
 HMAC-SHA256(secret, "<t>.<raw body>")>`, 10 minute window), ignores other games (`TT_ANALYTICS_UNIVERSE_ID`), and maps
-the UserId to the pid by reading the game's DataStore entry `TypeTorchAnalytics` / `p/<UserId>` through Open Cloud.
-That needs `TT_ANALYTICS_OPENCLOUD_KEY`: an API key with `universe-datastores.objects:read` on the universe (plus
-`:delete` with `TT_ANALYTICS_ERASURE_DELETE_LINK=1` to also delete the link). The pid's rows leave the live file at
-once; Parquet files, rollups and raw archives are rewritten in the background, and later rows of that pid are dropped
+the UserId to its pids through the identity table (below), and also, when `TT_ANALYTICS_OPENCLOUD_KEY` is set (an API
+key with `universe-datastores.objects:read` on the universe, plus `:delete` with `TT_ANALYTICS_ERASURE_DELETE_LINK=1`
+to also delete the link), through the game's DataStore entry `TypeTorchAnalytics` / `p/<UserId>`. It deletes the rows,
+then the identity rows of that UserId. The pid's rows leave the live file at once; Parquet files, rollups and raw archives are rewritten in the background, and later rows of that pid are dropped
 at load. The CLI can erase by pid: `POST /v1/erasure { "pid": "..." }` with the admin token. `data/erasure/log.jsonl`
 keeps the notification id and outcome, never the UserId.
+
+**pid <-> UserId.** Game servers send one identity row `{ pid, uid, t }` per session (framework option `identity`):
+DuckDB games in the ingest batch, Basin games to `POST /v1/identity` (Basin rows can't be deleted). They go to one
+table in the fleet SQLite file, `identities (pid PRIMARY KEY, uid, first_seen, last_seen)`, never into the events.
+Queries take a UserId where they take a pid: `players` searches by part of a pid or by a UserId and returns `uid`
+when known; `timeline`, `player-graph` and `events` take `uid` instead of `pid` (the most recently seen pid). Players
+who joined before identity rows existed are mapped by `POST /v1/identity/backfill` (DataStore links, Open Cloud key) or
+not at all.
 
 **Ad-hoc SQL** (`POST /v1/sql`, admin token; `TT_ANALYTICS_SQL=0` turns it off). One SELECT or WITH statement over two
 views, `events` and `recordings` (every day file plus a Parquet snapshot of today's live rows, taken again only when
@@ -351,6 +363,18 @@ own 30.
 
 The fleet core (`src/fleet/service.ts`, `http.ts`) uses no Node APIs (async SQLite interface, Web Request/Response),
 so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durable Object.
+
+## Privacy
+
+- Events carry a random pid, never a UserId, name or chat. The game keeps UserId -> pid in its DataStore
+  (`TypeTorchAnalytics` / `p/<UserId>`).
+- **UserIds are stored on the dev's own server**: the identity table above maps pids to UserIds so the dev can find a
+  player (support) and answer Right to Erasure without a DataStore read. It is never sent anywhere else and never part
+  of the events, Parquet files, rollups, raw archives or Basin.
+- **Erasure removes them**: the webhook (or `POST /v1/erasure` by pid) deletes the pid's rows everywhere, then the
+  identity rows, and identity rows for an erased pid are refused afterwards. The erasure log never holds the UserId.
+- Turning it off: the framework option `identity: false` stops sending identity rows; deleting
+  `data/fleet.sqlite`'s `identities` rows (or the file, which also holds fleet history) forgets the mapping.
 
 ## Deploy on a 1 GB VPS
 

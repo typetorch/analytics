@@ -13,6 +13,8 @@ import { checkPid, defineQuery, eventsTable, intOption, iso, num, playerRows, ro
 export interface PlayersOptions {
 	/** Only pids containing this text (letters, digits, `_`, `-`). */
 	search?: string;
+	/** Also (or only) these pids, e.g. a UserId's pids from the server's identity table (at most 50). */
+	pids?: string[];
 	/** Most players to return (default 50). */
 	limit: number;
 }
@@ -26,6 +28,8 @@ export interface PlayerSummary {
 	playtimeMinutes: number;
 	/** Their first-ever session is in the range. */
 	newInRange: boolean;
+	/** The UserId, when the analytics server knows it (identity rows; added by the server, not the query). */
+	uid?: number;
 }
 
 export interface PlayersResult {
@@ -42,10 +46,15 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 			if (typeof input.search !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(input.search)) throw new Error("search must be 1-64 characters of letters, digits, _ or -");
 			out.search = input.search;
 		}
+		if (input.pids !== undefined) {
+			if (!Array.isArray(input.pids) || input.pids.length > 50) throw new Error("pids must be a list of at most 50 pids");
+			if (input.pids.length) out.pids = input.pids.map((p) => checkPid(p));
+		}
 		return out;
 	},
 	statements(ctx, f, o) {
-		const search = o.search ? `strpos(e.pid, ${lit(o.search)}) > 0` : "";
+		const parts = [...(o.search ? [`strpos(e.pid, ${lit(o.search)}) > 0`] : []), ...(o.pids ? [`e.pid IN (${o.pids.map(lit).join(", ")})`] : [])];
+		const search = parts.length > 1 ? `(${parts.join(" OR ")})` : (parts[0] ?? "");
 		return {
 			players:
 				`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp FROM ${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx, search)}), ` +

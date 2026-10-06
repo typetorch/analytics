@@ -26,6 +26,9 @@ const recordings = fx.recordings.filter((r) => r.t >= dayStart - DAY && r.t < NO
 const players = [...new Set(events.filter((e) => e.pid).map((e) => e.pid as string))];
 const PID_WEBHOOK = players[0];
 const PID_ADMIN = players[1];
+// Identity rows: one mapped through the batch and erased by UserId, one found only by the DataStore backfill.
+const PID_IDENT = players[2];
+const PID_BACKFILL = players[3];
 
 let dir: string;
 let now = NOW;
@@ -53,6 +56,10 @@ const fakeOpenCloud = (async (input: string | URL | Request) => {
 	const url = String(input);
 	ocCalls.push(url);
 	if (url.endsWith("/entries/p%2F1001")) return new Response(JSON.stringify({ value: { pid: PID_WEBHOOK, first: 1 } }), { status: 200 });
+	if (url.endsWith("/entries/p%2F4004")) return new Response(JSON.stringify({ value: { pid: PID_BACKFILL, first: 1_700_000_000, last: 1_700_000_100 } }), { status: 200 });
+	if (url.includes("/data-stores/TypeTorchAnalytics/entries?")) {
+		return new Response(JSON.stringify({ dataStoreEntries: [{ id: "p/3003" }, { id: "p/4004" }, { id: "other" }] }), { status: 200 });
+	}
 	return new Response("{}", { status: 404 });
 }) as typeof fetch;
 
@@ -146,6 +153,56 @@ const sql = async (query: string, limit?: number, headers: Record<string, string
 	const r = await post("/v1/sql", { sql: query, ...(limit !== undefined ? { limit } : {}) }, headers);
 	return { status: r.status, body: (await r.json()) as SqlAnswer };
 };
+
+describe("identities (pid <-> UserId)", () => {
+	type Who = { identities: { pid: string; uid: number; firstSeen: string; lastSeen: string }[] };
+	const whois = async (query: string) => (await (await fetch(`${base}/v1/identity?${query}`, { headers: admin })).json()) as Who;
+
+	test("from the ingest batch, in their own table (never events); bad rows counted", async () => {
+		const before = (await app.warehouse?.liveRows())?.events;
+		const r = await post("/v1/ingest", null, ingestHeaders, gz({ events: [], identities: [{ pid: PID_IDENT, uid: 3003, t: now - 5000 }, { pid: "x y", uid: 1 }, { pid: "p1", uid: -4 }] }));
+		expect(r.status).toBe(202);
+		expect(await r.json()).toMatchObject({ accepted: 0, identities: 1, identitiesRejected: 2 });
+		await app.load();
+		expect((await app.warehouse?.liveRows())?.events).toBe(before);
+		expect((await whois(`pid=${PID_IDENT}`)).identities).toMatchObject([{ pid: PID_IDENT, uid: 3003 }]);
+		expect((await whois("uid=3003")).identities.map((i) => i.pid)).toEqual([PID_IDENT]);
+		expect((await fetch(`${base}/v1/identity?uid=3003`)).status).toBe(401);
+		expect((await fetch(`${base}/v1/identity?uid=3003`, { headers: { authorization: `Bearer ${INGEST}` } })).status).toBe(401);
+	});
+
+	test("POST /v1/identity (ingest token, Basin games); the newest UserId wins, first_seen stays", async () => {
+		expect((await post("/v1/identity", { identities: [{ pid: "tmp-pid-1", uid: 77 }] })).status).toBe(401);
+		const r = await post("/v1/identity", { identities: [{ pid: "tmp-pid-1", uid: 77, t: now - 60_000 }] }, { authorization: `Bearer ${INGEST}` });
+		expect(await r.json()).toEqual({ accepted: 1, rejected: 0 });
+		await post("/v1/identity", { pid: "tmp-pid-1", uid: "78", t: now }, { authorization: `Bearer ${INGEST}` });
+		const [row] = (await whois("pid=tmp-pid-1")).identities;
+		expect(row).toMatchObject({ uid: 78, firstSeen: new Date(now - 60_000).toISOString(), lastSeen: new Date(now).toISOString() });
+		const summary = (await (await fetch(`${base}/v1/identity`, { headers: admin })).json()) as { count: number; backfill: boolean };
+		expect(summary).toEqual({ count: 2, backfill: true });
+	});
+
+	test("queries take a UserId: players search, timeline and player-graph by uid; results carry the uid", async () => {
+		const p = (await (await post("/v1/query/players", { filters: { from: dayStart - DAY }, options: { search: "3003" } }, admin)).json()) as { result: { players: { pid: string; uid?: number }[] } };
+		expect(p.result.players.map((x) => x.pid)).toContain(PID_IDENT);
+		expect(p.result.players.find((x) => x.pid === PID_IDENT)?.uid).toBe(3003);
+		const t = (await (await post("/v1/query/timeline", { filters: { from: dayStart - DAY }, options: { uid: 3003 } }, admin)).json()) as { result: { pid: string; uid: number; events: unknown[] } };
+		expect(t.result).toMatchObject({ pid: PID_IDENT, uid: 3003 });
+		expect(t.result.events.length).toBeGreaterThan(0);
+		const g = (await (await post("/v1/query/player-graph", { filters: { from: dayStart - DAY }, options: { uid: "3003", facet: "zone" } }, admin)).json()) as { result: { pid: string; uid: number } };
+		expect(g.result).toMatchObject({ pid: PID_IDENT, uid: 3003 });
+		expect((await post("/v1/query/timeline", { options: { uid: 999 } }, admin)).status).toBe(404);
+		expect((await post("/v1/query/timeline", { options: { uid: "abc" } }, admin)).status).toBe(400);
+	});
+
+	test("backfill from the DataStore links (Open Cloud), skipping UserIds already known", async () => {
+		const r = (await (await post("/v1/identity/backfill", {}, admin)).json()) as { scanned: number; added: number; known: number };
+		expect(r).toEqual({ scanned: 2, added: 1, known: 1 });
+		expect((await whois("uid=4004")).identities).toMatchObject([{ pid: PID_BACKFILL, uid: 4004, lastSeen: new Date(1_700_000_100_000).toISOString() }]);
+		expect(ocCalls.some((u) => u.includes("filter=id.startsWith"))).toBe(true);
+		expect((await post("/v1/identity/backfill", {}, {})).status).toBe(401);
+	});
+});
 
 describe("ad-hoc SQL (POST /v1/sql)", () => {
 	test("admin only; today's live rows through a snapshot; columns, types, row cap", async () => {
@@ -338,6 +395,25 @@ describe("Right to Erasure", () => {
 		expect(await has()).toBe(0);
 		const log = readFileSync(join(dir, "erasure", "log.jsonl"), "utf8");
 		expect(log).not.toContain("1001");
+	});
+
+	test("webhook: UserId -> pids through the identity table (no DataStore link), then the identity row goes", async () => {
+		const has = async () => {
+			const r = (await (await post("/v1/query/timeline", { filters: { from: dayStart - 30 * DAY, to: now }, options: { pid: PID_IDENT } }, admin)).json()) as { result: { events: unknown[] } };
+			return r.result.events.length;
+		};
+		expect(await has()).toBeGreaterThan(0);
+		const req = signed({ NotificationId: "n4", EventType: "RightToErasureRequest", EventTime: new Date(now).toISOString(), EventPayload: { UserId: 3003, GameIds: [4242] } });
+		const r = await post("/v1/erasure", null, req.headers, req.text);
+		expect(await r.json()).toMatchObject({ ok: true, erased: 1 });
+		await app.warehouse?.rewriteErased();
+		expect(await has()).toBe(0);
+		const who = (await (await fetch(`${base}/v1/identity?uid=3003`, { headers: admin })).json()) as { identities: unknown[] };
+		expect(who.identities).toEqual([]);
+		// An identity row for an erased pid is not taken again.
+		await post("/v1/identity", { pid: PID_IDENT, uid: 3003 }, { authorization: `Bearer ${INGEST}` });
+		expect(((await (await fetch(`${base}/v1/identity?pid=${PID_IDENT}`, { headers: admin })).json()) as { identities: unknown[] }).identities).toEqual([]);
+		expect(readFileSync(join(dir, "erasure", "log.jsonl"), "utf8")).not.toContain("3003");
 	});
 
 	test("by pid with the admin token", async () => {

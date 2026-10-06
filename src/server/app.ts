@@ -6,6 +6,9 @@
  *   GET  /v1/queries                the query list                           admin token
  *   GET  /v1/rollups/<daily|players|edges>?from=&to=&pid=&limit=             admin token
  *   POST /v1/sql                    { sql, limit? } -> { columns, rows, truncated }: one read-only SELECT   admin token
+ *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)   ingest token
+ *   GET  /v1/identity?pid=|uid=     pid <-> UserId; no parameter: count and whether a backfill is possible   admin token
+ *   POST /v1/identity/backfill      fill pid <-> UserId from the game's DataStore links (Open Cloud key)   admin token
  *   GET  /v1/storage                bytes and files per part of the data folder, rows, growth (cached 30 s)  admin token
  *   GET  /v1/settings               live dials from data/settings.json       ingest or admin token
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
@@ -18,6 +21,7 @@ import { gunzipSync } from "node:zlib";
 import { DAY_MS } from "../sql/dialect.ts";
 import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { openSqlite } from "../fleet/db.ts";
+import { IdentityStore, parseIdentities, parseUid, PID_PATTERN } from "../fleet/identity.ts";
 import { FLEET_LIMITS, handleFleet } from "../fleet/http.ts";
 import { createNotifier, type Notifier } from "../fleet/notify.ts";
 import { FleetService } from "../fleet/service.ts";
@@ -30,6 +34,7 @@ import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "
 import { RateLimiter, bearer, clientIp, json, readCapped, tokenIn, tooMany } from "./http.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
 import { measureStorage, type StorageReport } from "./storage.ts";
+import { backfillIdentities } from "./identities.ts";
 import { Warehouse } from "./warehouse.ts";
 
 export interface AppOptions {
@@ -76,7 +81,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const notifier = config.fleetWebhookUrl
 		? createNotifier({ url: config.fleetWebhookUrl, ...(config.fleetWebhookFormat ? { format: config.fleetWebhookFormat } : {}), levels: config.fleetWebhookLevels, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}) })
 		: undefined;
-	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: await openSqlite(config.fleetDb), clock, log, ...(notifier ? { notifier } : {}) }) : undefined;
+	// One SQLite file for the fleet tables and pid <-> UserId (identities live here for DuckDB and Basin games alike).
+	const sqlite = await openSqlite(config.fleetDb);
+	const identities = await IdentityStore.open(sqlite);
+	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, ...(notifier ? { notifier } : {}) }) : undefined;
 
 	const ipLimiter = new RateLimiter(config.ipPerMinute, clock);
 	const jobLimiter = new RateLimiter(config.jobPerMinute, clock);
@@ -132,10 +140,84 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		const job = batch.events[0]?.job ?? batch.recordings[0]?.job;
 		if (job && !jobLimiter.take(`job:${job}`)) return tooMany(jobLimiter.retryAfter(`job:${job}`));
+		// Identity rows (pid -> UserId) go to the identity table, never into the events.
+		const who = parseIdentities(isRecordLike(parsed) ? parsed.identities : undefined, clock());
+		const known = who.rows.filter((r) => !warehouse.isErased(r.pid));
+		if (known.length) await identities.upsert(known);
 		const rt = clock();
 		if (batch.events.length) await warehouse.raw.append("events", batch.events.map((r) => `${JSON.stringify({ ...r, rt })}\n`).join(""));
 		if (batch.recordings.length) await warehouse.raw.append("recordings", batch.recordings.map((r) => `${JSON.stringify({ ...r, rt })}\n`).join(""));
-		return json(202, { accepted: batch.events.length + batch.recordings.length, rejected: batch.rejected, ...(batch.errors.length ? { errors: batch.errors } : {}) });
+		return json(202, {
+			accepted: batch.events.length + batch.recordings.length,
+			rejected: batch.rejected,
+			...(batch.errors.length ? { errors: batch.errors } : {}),
+			...(who.rows.length || who.rejected ? { identities: known.length, identitiesRejected: who.rejected } : {}),
+		});
+	}
+
+	/** POST /v1/identity (ingest token): identity rows from Basin games (the framework posts them to the fleet API). */
+	async function postIdentity(req: Request, ip: string): Promise<Response> {
+		if (!config.ingestTokens.length) return json(503, { error: "ingest is not configured (TT_ANALYTICS_INGEST_TOKENS)" });
+		if (!isIngest(req)) return json(401, { error: "ingest token required" });
+		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		const raw = await readCapped(req, 256 * 1024);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: unknown;
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8"));
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		const list = isRecordLike(body) && Array.isArray(body.identities) ? body.identities : body;
+		const who = parseIdentities(list, clock());
+		const known = who.rows.filter((r) => !warehouse?.isErased(r.pid));
+		if (known.length) await identities.upsert(known);
+		return json(202, { accepted: known.length, rejected: who.rejected });
+	}
+
+	/** GET /v1/identity (admin): ?pid= or ?uid=, or the count and whether a backfill can run. */
+	async function getIdentity(url: URL): Promise<Response> {
+		const pid = url.searchParams.get("pid");
+		const uidText = url.searchParams.get("uid");
+		if (pid) {
+			if (!PID_PATTERN.test(pid)) return json(400, { error: "bad pid" });
+			const found = await identities.byPid(pid);
+			return json(200, { identities: found ? [found] : [] });
+		}
+		if (uidText) {
+			const uid = parseUid(uidText);
+			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
+			return json(200, { identities: await identities.byUid(uid) });
+		}
+		return json(200, { count: await identities.count(), backfill: Boolean(config.openCloudKey && config.universeId) });
+	}
+
+	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
+	async function backfill(req: Request): Promise<Response> {
+		if (!config.openCloudKey || !config.universeId) {
+			return json(409, { error: "no DataStore access: set TT_ANALYTICS_OPENCLOUD_KEY (universe-datastores.objects:list and :read) and TT_ANALYTICS_UNIVERSE_ID" });
+		}
+		const raw = await readCapped(req, 16 * 1024);
+		let body: { pageToken?: unknown; maxEntries?: unknown } = {};
+		try {
+			body = raw && raw.length ? JSON.parse(Buffer.from(raw).toString("utf8")) : {};
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		try {
+			const result = await backfillIdentities({
+				apiKey: config.openCloudKey,
+				universeId: config.universeId,
+				store: identities,
+				clock,
+				...(typeof body.pageToken === "string" ? { pageToken: body.pageToken } : {}),
+				...(typeof body.maxEntries === "number" ? { maxEntries: body.maxEntries } : {}),
+				...(options.fetch ? { fetch: options.fetch } : {}),
+			});
+			return json(200, result);
+		} catch (error) {
+			return json(502, { error: `backfill failed: ${((error as Error).message ?? String(error)).slice(0, 300)}` });
+		}
 	}
 
 	async function query(req: Request, name: string): Promise<Response> {
@@ -151,14 +233,45 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				return json(400, { error: "body is not JSON" });
 			}
 		}
+		// pid <-> UserId from the identity table: a UserId instead of a pid, or a UserId as a players search.
+		const queryOptions: Record<string, unknown> = { ...(isRecordLike(body.options) ? body.options : {}) };
+		if ((name === "timeline" || name === "player-graph" || name === "events") && queryOptions.pid === undefined && queryOptions.uid !== undefined) {
+			const uid = parseUid(queryOptions.uid);
+			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
+			const known = await identities.byUid(uid);
+			if (!known.length) return json(404, { error: `no pid known for UserId ${uid}: only players who joined after the identity update (or a backfill) are mapped` });
+			queryOptions.pid = known[0].pid;
+		}
+		delete queryOptions.uid;
+		if (name === "players" && typeof queryOptions.search === "string" && /^\d{1,16}$/.test(queryOptions.search)) {
+			const known = await identities.byUid(Number(queryOptions.search));
+			const given = Array.isArray(queryOptions.pids) ? (queryOptions.pids as unknown[]) : [];
+			if (known.length) queryOptions.pids = [...given, ...known.map((k) => k.pid)].slice(0, 50);
+		}
 		try {
-			renderQuery(warehouse.context(), name, body.filters, body.options); // input errors -> 400
+			renderQuery(warehouse.context(), name, body.filters, queryOptions); // input errors -> 400
 		} catch (error) {
 			return json(400, { error: (error as Error).message });
 		}
 		try {
 			const started = performance.now();
-			const result = await warehouse.query(name, body.filters, body.options);
+			let result = await warehouse.query(name, body.filters, queryOptions);
+			// A Graph answers through its toJSON; as plain data it can carry the uid too.
+			const asJson = result as { toJSON?: () => unknown };
+			if (typeof asJson.toJSON === "function") result = asJson.toJSON();
+			if (name === "players") {
+				const players = (result as { players: { pid: string; uid?: number }[] }).players;
+				const uids = await identities.uids(players.map((p) => p.pid));
+				for (const p of players) {
+					const uid = uids.get(p.pid);
+					if (uid !== undefined) p.uid = uid;
+				}
+			}
+			if (name === "timeline" || name === "player-graph") {
+				const r = result as { pid?: string; uid?: number };
+				const found = r.pid ? await identities.byPid(r.pid) : undefined;
+				if (found) r.uid = found.uid;
+			}
 			return json(200, { result, ms: Math.round(performance.now() - started) });
 		} catch (error) {
 			const message = (error as Error).message ?? String(error);
@@ -268,6 +381,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const pids = (Array.isArray(b.pids) ? b.pids : [b.pid]).filter((p): p is string => typeof p === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(p));
 			if (!pids.length) return json(400, { error: "give pid or pids" });
 			const { liveRows } = await warehouse.erase(pids);
+			await identities.deletePids(pids);
 			void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
 			logErasure(warehouse.layout.erasure, { source: "admin", pids: pids.length, liveRows });
 			return json(200, { erased: pids.length, liveRows, files: "rewriting in the background" });
@@ -283,25 +397,33 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(200, { ok: true, ignored: "another game" });
 		}
 		if (!request.userId) return json(400, { error: "no UserId in the payload" });
-		if (!config.openCloudKey || !config.universeId) {
-			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no Open Cloud key configured for the UserId -> pid lookup" });
-			return json(202, { ok: true, pending: "configure TT_ANALYTICS_OPENCLOUD_KEY and TT_ANALYTICS_UNIVERSE_ID, or erase by pid with the admin token" });
+		// UserId -> pids: the identity table first, then the DataStore link (which also deletes it when configured).
+		const pids = (await identities.byUid(request.userId)).map((i) => i.pid);
+		if (config.openCloudKey && config.universeId) {
+			try {
+				const linked = await lookupPid({ apiKey: config.openCloudKey, universeId: config.universeId, deleteLink: config.erasureDeleteLink, ...(options.fetch ? { fetch: options.fetch } : {}) }, request.userId);
+				if (linked && !pids.includes(linked)) pids.push(linked);
+			} catch (error) {
+				if (!pids.length) {
+					logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: `lookup failed: ${(error as Error).message.slice(0, 200)}` });
+					return json(502, { error: "pid lookup failed; Roblox will retry" });
+				}
+			}
+		} else if (!pids.length) {
+			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no identity row and no Open Cloud key for the DataStore lookup" });
+			return json(202, { ok: true, pending: "no pid known for this UserId: configure TT_ANALYTICS_OPENCLOUD_KEY and TT_ANALYTICS_UNIVERSE_ID, or erase by pid with the admin token" });
 		}
-		let pid: string | undefined;
-		try {
-			pid = await lookupPid({ apiKey: config.openCloudKey, universeId: config.universeId, deleteLink: config.erasureDeleteLink, ...(options.fetch ? { fetch: options.fetch } : {}) }, request.userId);
-		} catch (error) {
-			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: `lookup failed: ${(error as Error).message.slice(0, 200)}` });
-			return json(502, { error: "pid lookup failed; Roblox will retry" });
-		}
-		if (!pid) {
+		if (!pids.length) {
 			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no pid link (already anonymous)" });
 			return json(200, { ok: true, erased: 0 });
 		}
-		const { liveRows } = await warehouse.erase([pid]);
+		const { liveRows } = await warehouse.erase(pids);
+		// The rows first, then the link between the UserId and its pids.
+		await identities.deleteUid(request.userId);
+		await identities.deletePids(pids);
 		void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
-		logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "erased", pid, liveRows });
-		return json(200, { ok: true, erased: 1 });
+		logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "erased", pids: pids.length, liveRows });
+		return json(200, { ok: true, erased: pids.length });
 	}
 
 	async function health(req: Request): Promise<Response> {
@@ -328,6 +450,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		try {
 			if (path === "/healthz" && req.method === "GET") return await health(req);
 			if (path === "/v1/ingest") return req.method === "POST" ? await ingest(req, ip) : json(405, { error: "POST only" });
+			if (path === "/v1/identity" && req.method === "POST") return await postIdentity(req, ip);
 			if (path.startsWith("/v1/fleet/")) {
 				if (!fleet) return json(404, { error: "the fleet part is off on this server" });
 				// Per-JobId limits only: many game servers can share one egress IP.
@@ -344,6 +467,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (path === "/v1/queries" && req.method === "GET") return json(200, { queries: describeQueries() });
 			if (path === "/v1/sql") return req.method === "POST" ? await adhocSql(req) : json(405, { error: "POST only" });
 			if (path === "/v1/storage" && req.method === "GET") return json(200, await storage());
+			if (path === "/v1/identity" && req.method === "GET") return await getIdentity(url);
+			if (path === "/v1/identity/backfill") return req.method === "POST" ? await backfill(req) : json(405, { error: "POST only" });
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
 			if (q) return req.method === "POST" ? await query(req, q[1]) : json(405, { error: "POST only" });
 			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);
@@ -421,7 +546,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				await warehouse.close();
 			}
 			await notifier?.flush();
-			await fleet?.close();
+			if (fleet) await fleet.close();
+			else await sqlite.close();
 		},
 	};
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
