@@ -1,7 +1,7 @@
 /** The analytics server end to end over HTTP: ingest, loader, nightly Parquet export, queries, erasure. */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -258,6 +258,31 @@ describe("nightly export", () => {
 		// Ad-hoc SQL reads the day files now (and no stale snapshot of the live rows).
 		const viaSql = await sql("SELECT COUNT(*) FROM events");
 		expect(viaSql.body.rows[0][0]).toBe(events.length + 10);
+	});
+
+	test("storage: bytes and files per part, rows, raw growth per day; admin only, cached 30 s", async () => {
+		expect((await fetch(`${base}/v1/storage`)).status).toBe(401);
+		type Report = {
+			totalBytes: number;
+			parts: { key: string; bytes: number; files: number; days?: number; oldest?: string; newest?: string }[];
+			rows: { liveEvents: number; parquetEvents: number; parquetRecordings: number };
+			growth: { todayBytes: number; avgPerDayBytes: number | null; days: { date: string; bytes: number }[] };
+			at: string;
+		};
+		const r = (await (await fetch(`${base}/v1/storage`, { headers: admin })).json()) as Report;
+		const part = (key: string) => r.parts.find((p) => p.key === key);
+		const eventFiles = readdirSync(join(dir, "events")).filter((f) => f.endsWith(".parquet"));
+		expect(part("events")).toMatchObject({ files: eventFiles.length, days: eventFiles.length, oldest: eventFiles.sort()[0].slice(0, 10) });
+		expect(part("events")?.bytes).toBe(eventFiles.reduce((s, f) => s + statSync(join(dir, "events", f)).size, 0));
+		expect(part("live")?.bytes).toBeGreaterThan(0);
+		expect(part("rawArchive")?.files).toBeGreaterThan(0);
+		expect(r.totalBytes).toBe(r.parts.reduce((s, p) => s + p.bytes, 0));
+		expect(r.rows.parquetEvents).toBe(events.length + 10);
+		expect(r.rows.parquetRecordings).toBe(recordings.length);
+		expect(r.rows.liveEvents).toBe(0);
+		expect(r.growth.days.length).toBeGreaterThan(0);
+		const again = (await (await fetch(`${base}/v1/storage`, { headers: admin })).json()) as Report;
+		expect(again.at).toBe(r.at); // cached
 	});
 });
 

@@ -23,6 +23,7 @@ export type { FunnelResult, TimelineResult } from "./queries/funnel.ts";
 export type { ExperimentResult, Comparison, VariantStats } from "./queries/experiment.ts";
 export type { ConfusionResult } from "./queries/confusion.ts";
 export type { EventsResult, PlayersResult, ValuesResult } from "./queries/explore.ts";
+export type { BenchmarksResult, BenchmarkPeriod, RealtimeResult, RealtimeWindow, TrendsResult, TrendValues } from "./queries/benchmarks.ts";
 export type { DeployReportResult, ServersResult, ServerInfo } from "./queries/fleet.ts";
 export * from "./graph.ts";
 export * from "./stats.ts";

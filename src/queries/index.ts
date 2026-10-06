@@ -1,5 +1,6 @@
 /** Every logical query, by name, and the code that renders and runs them for any backend. */
 import { normalizeFilters, type Filters, type NormalizedFilters } from "../sql/filters.ts";
+import { benchmarks, realtime, trends } from "./benchmarks.ts";
 import { confusion } from "./confusion.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment } from "./experiment.ts";
@@ -25,6 +26,9 @@ export const QUERIES = {
 	players,
 	values,
 	events,
+	benchmarks,
+	realtime,
+	trends,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;

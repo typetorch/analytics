@@ -6,6 +6,7 @@
  *   GET  /v1/queries                the query list                           admin token
  *   GET  /v1/rollups/<daily|players|edges>?from=&to=&pid=&limit=             admin token
  *   POST /v1/sql                    { sql, limit? } -> { columns, rows, truncated }: one read-only SELECT   admin token
+ *   GET  /v1/storage                bytes and files per part of the data folder, rows, growth (cached 30 s)  admin token
  *   GET  /v1/settings               live dials from data/settings.json       ingest or admin token
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts
@@ -15,7 +16,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { DAY_MS } from "../sql/dialect.ts";
-import { dayFiles, pathLit } from "../duckdb/layout.ts";
+import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { openSqlite } from "../fleet/db.ts";
 import { FLEET_LIMITS, handleFleet } from "../fleet/http.ts";
 import { createNotifier, type Notifier } from "../fleet/notify.ts";
@@ -28,6 +29,7 @@ import type { ServerConfig } from "./config.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
 import { RateLimiter, bearer, clientIp, json, readCapped, tokenIn, tooMany } from "./http.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
+import { measureStorage, type StorageReport } from "./storage.ts";
 import { Warehouse } from "./warehouse.ts";
 
 export interface AppOptions {
@@ -164,6 +166,26 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			log(`query ${name} failed: ${message.slice(0, 300)}`);
 			return json(500, { error: "query failed", detail: message.slice(0, 300) });
 		}
+	}
+
+	const STORAGE_CACHE_SECONDS = 30;
+	let storageCache: { at: number; report: Promise<StorageReport> } | undefined;
+
+	/** The storage report, measured at most every 30 s (the explorer polls it). */
+	function storage(): Promise<StorageReport> {
+		const now = clock();
+		if (storageCache && now - storageCache.at < STORAGE_CACHE_SECONDS * 1000) return storageCache.report;
+		const w = warehouse;
+		const report = measureStorage({
+			layout: w?.layout ?? dataLayout(config.dataDir),
+			...(fleet ? { fleetDb: config.fleetDb } : {}),
+			...(w ? { sql: (s: string) => w.sql(s), liveRows: () => w.liveRows() } : {}),
+			clock,
+			cacheSeconds: STORAGE_CACHE_SECONDS,
+		});
+		storageCache = { at: now, report };
+		report.catch(() => (storageCache = undefined));
+		return report;
 	}
 
 	let sandbox: Promise<SqlSandbox> | undefined;
@@ -321,6 +343,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (!isAdmin(req)) return json(path.startsWith("/v1/") ? 401 : 404, { error: path.startsWith("/v1/") ? "admin token required" : "not found" });
 			if (path === "/v1/queries" && req.method === "GET") return json(200, { queries: describeQueries() });
 			if (path === "/v1/sql") return req.method === "POST" ? await adhocSql(req) : json(405, { error: "POST only" });
+			if (path === "/v1/storage" && req.method === "GET") return json(200, await storage());
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
 			if (q) return req.method === "POST" ? await query(req, q[1]) : json(405, { error: "POST only" });
 			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);
