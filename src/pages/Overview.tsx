@@ -1,4 +1,5 @@
 import { DayBars, fillDays } from "@/components/DayBars";
+import { StorageCard } from "@/components/StorageCard";
 import { Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { describeRange } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum } from "@/lib/format";
@@ -53,6 +54,7 @@ export default function Overview() {
 			<QueryState query={q} loadingRows={6}>
 				{(data) => <Body data={data} />}
 			</QueryState>
+			<StorageCard />
 		</>
 	);
 }

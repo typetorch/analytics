@@ -68,3 +68,16 @@ export function compactJson(value: unknown, max = 160): string {
 export function plural(n: number | null | undefined, word: string, many = `${word}s`): string {
 	return `${fmtInt(n)} ${n === 1 ? word : many}`;
 }
+
+/** "1.2 MB", "340 KB", "2.1 GB" (1024-based). */
+export function fmtBytes(bytes: number | null | undefined): string {
+	if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "–";
+	const units = ["B", "KB", "MB", "GB", "TB"];
+	let v = bytes;
+	let i = 0;
+	while (v >= 1024 && i < units.length - 1) {
+		v /= 1024;
+		i++;
+	}
+	return `${i === 0 ? Math.round(v) : v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}

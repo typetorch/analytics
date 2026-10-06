@@ -19,6 +19,7 @@ describe("explorer proxy", () => {
 		expect(guardRequest({ method: "POST", url: "/v1/query/overview", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/fleet/stream?branch=dev", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/sql", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/storage", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/healthz", headers: { host: "localhost:5173", "sec-fetch-site": "none" } }, true)).toEqual({ ok: true });
 		for (const [method, url] of [
 			["POST", "/v1/erasure"],

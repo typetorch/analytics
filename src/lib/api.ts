@@ -2,7 +2,7 @@
  * The analytics API, through the local proxy (`/api` -> the analytics server, admin token added by the proxy).
  * Every call answers parsed JSON or throws an ApiError carrying the server's own message.
  */
-import type { Filters, FleetAlert, FleetReports, FleetServers, Health, QueryInfo, QueryName, QueryResults, SqlResult } from "./types";
+import type { Filters, FleetAlert, FleetReports, FleetServers, Health, QueryInfo, QueryName, QueryResults, SqlResult, StorageReport } from "./types";
 
 export class ApiError extends Error {
 	override name = "ApiError";
@@ -102,6 +102,8 @@ export function createApi(options: ApiOptions = {}) {
 		queries: (signal?: AbortSignal) => get<{ queries: QueryInfo[] }>("/v1/queries", signal).then((r) => r.queries),
 		sql: (sql: string, limit?: number, signal?: AbortSignal) => post<SqlResult>("/v1/sql", { sql, ...(limit ? { limit } : {}) }, signal),
 		health: (signal?: AbortSignal) => get<Health>("/healthz", signal),
+		/** What the server keeps on disk (measured at most every 30 s). */
+		storage: (signal?: AbortSignal) => get<StorageReport>("/v1/storage", signal),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		fleetAlerts: (params: { since?: number; level?: string; unacked?: boolean; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ alerts: FleetAlert[] }>(`/v1/fleet/alerts${qs(params)}`, signal).then((r) => r.alerts),

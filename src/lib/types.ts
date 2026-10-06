@@ -272,6 +272,58 @@ export interface EventsResult {
 	events: EventRow[];
 }
 
+export interface BenchmarkPeriod {
+	from: string;
+	to: string;
+	players: number;
+	dau: number;
+	avgPlaytimeMinutes: number | null;
+	d1Retention: Rate;
+	d7Retention: Rate;
+	payerConversion: Rate;
+	arppu: number | null;
+	robux: number;
+	playThrough: Rate & { minutes: number };
+}
+
+export interface BenchmarksResult {
+	days: number;
+	current: BenchmarkPeriod;
+	previous: BenchmarkPeriod;
+}
+
+export interface RealtimeWindow {
+	sessions: number;
+	avgSessionMinutes: number | null;
+	clientErrors: number;
+	errorsPerSession: number | null;
+	clientFps: number | null;
+	serverMemoryMb: number | null;
+}
+
+export interface RealtimeResult {
+	hours: number;
+	current: RealtimeWindow;
+	previous: RealtimeWindow;
+	ccu: { now: number; series: { hour: string; avg: number; peak: number }[]; currentAvg: number; previousAvg: number };
+}
+
+export interface TrendValues {
+	newUsers: number;
+	dau: number;
+	playtimeMinutes: number | null;
+	robux: number;
+	d1: number | null;
+}
+
+export interface TrendsResult {
+	from: string;
+	to: string;
+	window: number;
+	sources: string[];
+	days: { date: string; total: TrendValues; bySource: Record<string, TrendValues> }[];
+}
+
 /** Every named query and its result. */
 export interface QueryResults {
 	overview: OverviewResult;
@@ -289,6 +341,9 @@ export interface QueryResults {
 	players: PlayersResult;
 	values: ValuesResult;
 	events: EventsResult;
+	benchmarks: BenchmarksResult;
+	realtime: RealtimeResult;
+	trends: TrendsResult;
 }
 
 export type QueryName = keyof QueryResults;
@@ -383,4 +438,24 @@ export interface SqlResult {
 	rows: unknown[][];
 	truncated: boolean;
 	ms: number;
+}
+
+export interface StoragePart {
+	key: string;
+	label: string;
+	bytes: number;
+	files: number;
+	oldest?: string;
+	newest?: string;
+	days?: number;
+}
+
+export interface StorageReport {
+	at: string;
+	cacheSeconds: number;
+	totalBytes: number;
+	parts: StoragePart[];
+	rows: { liveEvents: number; liveRecordings: number; parquetEvents: number; parquetRecordings: number } | null;
+	growth: { todayBytes: number; avgPerDayBytes: number | null; days: { date: string; bytes: number }[] } | null;
+	disk: { freeBytes: number; totalBytes: number } | null;
 }

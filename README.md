@@ -25,7 +25,7 @@ variables) with `TT_ANALYTICS_URL=https://...` and `TT_ANALYTICS_ADMIN_TOKEN`. I
 **The token never reaches the browser.** The page calls `/api/...`; the dev or preview server forwards it to the
 analytics server and adds `Authorization: Bearer <admin token>` (`server/proxy.ts`). Because any other page open in
 the same browser could also send requests to localhost, a guard runs first: only the read endpoints the explorer uses
-(`POST /v1/query/*`, `POST /v1/sql`, `GET /v1/queries`, `GET /v1/rollups/*`, `GET /v1/fleet/servers|reports|alerts|stream`,
+(`POST /v1/query/*`, `POST /v1/sql`, `GET /v1/queries`, `GET /v1/storage`, `GET /v1/rollups/*`, `GET /v1/fleet/servers|reports|alerts|stream`,
 `GET /healthz`), only from the explorer's own origin (Sec-Fetch-Site / Origin), JSON bodies only. Erasure, ingest,
 alert acks and settings are never forwarded. The servers listen on localhost only. No CORS change is needed on the
 analytics server.
@@ -39,8 +39,8 @@ it lives in the URL, so a view can be bookmarked.
 
 | Page | What it shows | Query |
 |---|---|---|
-| Overview | players, new, returning, sessions, events, playtime; per-day bars | `overview` |
-| Roblox | first-play bounce, qualified plays, D1/D7, playtime and play days per user, payer conversion, Robux per user / payer, one-line definitions | `roblox` |
+| Overview | players, new, returning, sessions, events, playtime; per-day bars; Storage: what the server keeps on disk (DuckDB live, Parquet history, raw, fleet, rows, today's growth), every 30 s | `overview`, `/v1/storage` |
+| Roblox | Creator Hub's overview from our events: benchmark cards (playtime per DAU, D1, D7, payer conversion, ARPPU, after-join play-through; 7/14/28 days vs the period before; the 50th/90th you copy from Creator Hub, kept in this browser, with an estimated percentile), a realtime column (concurrent users and a 7-day line from heartbeats, session time, client errors per session, client fps, server memory vs the 24 h before), and 7-day moving averages per join source | `benchmarks`, `realtime`, `trends` |
 | Retention | join-day cohorts x day 1/3/7/14/30 heatmap, weighted average, days not over shown as – | `retention` |
 | Funnels | funnel picker, step bars (reached, of start, from previous, median time), biggest drop highlighted | `funnel` |
 | Players | recent players + pid search; the node graph for all sessions or one (session picker, or "View graph" on a session): one session numbers its moves in order, shows the time in each state and the path; sessions with every event, state and props | `players`, `player-graph`, `timeline` |

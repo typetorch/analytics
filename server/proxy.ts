@@ -58,6 +58,7 @@ export function resolveTarget(env: Record<string, string | undefined>, readFile:
 export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	{ method: "GET", path: /^\/healthz$/ },
 	{ method: "GET", path: /^\/v1\/queries$/ },
+	{ method: "GET", path: /^\/v1\/storage$/ },
 	{ method: "POST", path: /^\/v1\/query\/[A-Za-z-]{1,64}$/ },
 	{ method: "POST", path: /^\/v1\/sql$/ },
 	{ method: "GET", path: /^\/v1\/rollups\/(daily|players|player_days|edges)$/ },
