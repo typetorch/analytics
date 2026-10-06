@@ -49,6 +49,16 @@ function readEnv(path: string): Map<string, string> {
 
 const log = (line: string) => console.log(`${new Date().toTimeString().slice(0, 8)} ${line}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const color = !process.env.NO_COLOR && (process.stdout.isTTY ?? false);
+const red = (text: string) => (color ? `\x1b[1;31m${text}\x1b[0m` : text);
+
+// Without --game nothing points game servers at this tunnel: say so loudly, now and again when ready.
+const NO_GAME = "no --game: the game's settings and typetorch.json are NOT updated, so game servers won't use this tunnel";
+const NO_GAME_FIX = "  fix: Ctrl+C, then bun run local -- --env-file <server env file> --game <game repo> (e.g. --game ../template)";
+if (writeGameSettings && !gameDir) {
+	log(red(NO_GAME));
+	log(red(NO_GAME_FIX));
+}
 const serverEnv = readEnv(envFile);
 const host = serverEnv.get("TT_ANALYTICS_HOST") ?? "127.0.0.1";
 const port = serverEnv.get("TT_ANALYTICS_PORT") ?? "8787";
@@ -124,8 +134,10 @@ log(`tunnel answering after ${Math.round((Date.now() - waitStart) / 1000)} s`);
 
 // 4. Point the game at it.
 if (writeGameSettings) {
-	if (!gameDir) log("no --game: skipped the game's settings and typetorch.json (pass --game <game repo>)");
-	else {
+	if (!gameDir) {
+		log(red(NO_GAME));
+		log(red(NO_GAME_FIX));
+	} else {
 		const cli = { gameDir, ...(cliEntry ? { cli: [process.execPath, cliEntry] } : {}) };
 		const fleet = await writeFleetSettings({ ...cli, url, ingestToken });
 		log(`settings.fleet ${fleet.written ? "written" : "already set"}${fleet.seq !== undefined ? ` (settings #${fleet.seq})` : ""}; typetorch.json fleet.url = ${url} (local edit; don't commit it)`);
@@ -136,5 +148,9 @@ if (writeGameSettings) {
 		log(`settings.analytics ${analytics.written ? "written" : "already set"}${analytics.seq !== undefined ? ` (settings #${analytics.seq})` : ""}`);
 	}
 }
-log("ready: running servers (kernel 0.3.8+) switch within seconds of the ping, new servers at once. Ctrl+C stops.");
+if (writeGameSettings && gameDir) {
+	log("ready: running servers (kernel 0.3.8+) switch within seconds of the ping, new servers at once. Ctrl+C stops.");
+} else {
+	log(red(`ready on ${url}, but game servers were NOT told about it (${gameDir ? "--no-settings" : "no --game"}). Ctrl+C stops.`));
+}
 await new Promise(() => {});
