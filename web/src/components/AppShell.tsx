@@ -1,13 +1,15 @@
 /** The frame: navigation on the left, the header (server status, theme) and the shared filter bar on top. */
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	Activity,
+	Bug,
 	CalendarRange,
 	Compass,
 	FlaskConical,
 	Gamepad2,
 	LayoutDashboard,
 	ListFilter,
+	LogOut,
 	Monitor,
 	Moon,
 	Server,
@@ -26,6 +28,7 @@ import { LoadingBlock } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { api, ApiError } from "@/lib/api";
+import { userLabel, useAuth } from "@/lib/auth";
 import { FILTER_KEYS } from "@/lib/filters";
 import { fmtInt } from "@/lib/format";
 import { useTheme, type Theme } from "@/lib/theme";
@@ -49,6 +52,7 @@ export const NAV: NavItem[] = [
 	{ path: "/first-session", label: "First session", icon: Compass },
 	{ path: "/events", label: "Events", icon: Activity },
 	{ path: "/fleet", label: "Fleet", icon: Server, noFilters: true },
+	{ path: "/errors", label: "Errors", icon: Bug, noFilters: true },
 	{ path: "/query", label: "Query", icon: Terminal },
 ];
 
@@ -94,6 +98,40 @@ function ServerStatus() {
 	);
 }
 
+/** Who is signed in (Roblox name and avatar, or the admin token) and the Sign out button. */
+function UserMenu() {
+	const auth = useAuth();
+	const client = useQueryClient();
+	if (!auth) return null;
+	const user = auth.user;
+	const label = userLabel(user, auth.via);
+	const out = async () => {
+		try {
+			await api.logout();
+		} finally {
+			client.clear();
+			window.location.assign("/");
+		}
+	};
+	return (
+		<div className="flex items-center gap-2 text-xs text-muted-foreground" title={user?.kind === "roblox" ? `Roblox user ${user.userId}` : undefined}>
+			{user?.kind === "roblox" && user.avatar ? (
+				<img src={user.avatar} alt="" className="size-5 rounded-full bg-muted" referrerPolicy="no-referrer" />
+			) : (
+				<span className="grid size-5 place-items-center rounded-full bg-muted text-[10px] font-medium uppercase text-foreground" aria-hidden>
+					{label.slice(0, 1)}
+				</span>
+			)}
+			<span className="hidden max-w-32 truncate sm:inline">{label}</span>
+			{auth.via === "cookie" ? (
+				<Button variant="ghost" size="icon-sm" aria-label="Sign out" title="Sign out" onClick={() => void out()}>
+					<LogOut />
+				</Button>
+			) : null}
+		</div>
+	);
+}
+
 function ThemeToggle() {
 	const { theme, resolved, setTheme } = useTheme();
 	const Icon = theme === "system" ? Monitor : resolved === "dark" ? Moon : Sun;
@@ -124,7 +162,7 @@ export function AppShell() {
 			<aside className="sticky top-0 hidden h-svh w-52 shrink-0 flex-col border-r bg-sidebar px-3 py-4 md:flex">
 				<div className="px-2 pb-4">
 					<div className="text-sm font-semibold">TypeTorch</div>
-					<div className="text-xs text-muted-foreground">Analytics explorer</div>
+					<div className="text-xs text-muted-foreground">Backend explorer</div>
 				</div>
 				<nav className="flex flex-col gap-0.5">
 					{NAV.map((item) => (
@@ -167,6 +205,7 @@ export function AppShell() {
 							<FindPlayer />
 							<ServerStatus />
 							<ThemeToggle />
+							<UserMenu />
 						</div>
 					</div>
 					{current?.noFilters ? null : (

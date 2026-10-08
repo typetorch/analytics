@@ -48,7 +48,7 @@ describe("api client", () => {
 
 	it("names proxy and network failures plainly", async () => {
 		const down = createApi({ fetch: fakeFetch(() => new Response("<html>Bad Gateway</html>", { status: 502 })).fetch });
-		await expect(down.health()).rejects.toThrow("the analytics server is not answering");
+		await expect(down.health()).rejects.toThrow("the backend is not answering");
 		const offline = createApi({
 			fetch: (async () => {
 				throw new TypeError("Failed to fetch");
@@ -102,6 +102,50 @@ describe("api client", () => {
 			"POST /api/v1/identity/backfill",
 		]);
 		expect(calls[3].body).toEqual({ pageToken: "next" });
+	});
+
+	it("sends the session cookie and the X-TypeTorch header on requests that change something, never on reads", async () => {
+		const seen: { method: string; credentials?: string; header?: string }[] = [];
+		const fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+			seen.push({ method: init?.method ?? "GET", credentials: init?.credentials, header: new Headers(init?.headers).get("x-typetorch") ?? undefined });
+			return json(200, { ok: true });
+		}) as typeof globalThis.fetch;
+		const api = createApi({ fetch });
+		await api.health();
+		await api.sql("SELECT 1");
+		await api.logout();
+		expect(seen).toEqual([
+			{ method: "GET", credentials: "same-origin", header: undefined },
+			{ method: "POST", credentials: "same-origin", header: "1" },
+			{ method: "POST", credentials: "same-origin", header: "1" },
+		]);
+	});
+
+	it("asks who is signed in; a 401 keeps the body so the login page knows what to offer", async () => {
+		const { fetch, calls } = fakeFetch((call) =>
+			call.url.endsWith("/auth/check") ? json(401, { error: "sign in required", login: { token: false, roblox: true } }) : json(200, { ok: true, role: "admin", via: "cookie", user: { kind: "token" } }),
+		);
+		const api = createApi({ fetch });
+		const error = (await api.authCheck().catch((e: unknown) => e)) as ApiError;
+		expect(error).toBeInstanceOf(ApiError);
+		expect(error.unauthorized).toBe(true);
+		expect(error.body).toEqual({ error: "sign in required", login: { token: false, roblox: true } });
+		expect(await api.login("the-token")).toMatchObject({ role: "admin" });
+		expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /api/v1/auth/check", "POST /api/v1/auth/login"]);
+		expect(calls[1].body).toEqual({ token: "the-token" });
+	});
+
+	it("reads error logs: list, one kind, and the live stream URL", async () => {
+		const { fetch, calls } = fakeFetch(() => json(200, { kinds: [] }));
+		const api = createApi({ fetch });
+		await api.errors({ window: "6h", realm: "server", branch: "prod", q: "nil value", limit: 50 });
+		await api.errorKind("fp:abc/def", { window: "7d" });
+		expect(calls.map((c) => c.url)).toEqual([
+			"/api/v1/errors?window=6h&realm=server&branch=prod&q=nil+value&limit=50",
+			"/api/v1/errors/fp%3Aabc%2Fdef?window=7d",
+		]);
+		expect(api.liveUrl(["error", "alert"])).toBe("/api/v1/live?topics=error%2Calert");
+		expect(api.liveUrl()).toBe("/api/v1/live");
 	});
 
 	it("cleanFilters keeps set values only", () => {

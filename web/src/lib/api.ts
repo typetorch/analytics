@@ -1,8 +1,29 @@
 /**
- * The analytics API, through the local proxy (`/api` -> the analytics server, admin token added by the proxy).
- * Every call answers parsed JSON or throws an ApiError carrying the server's own message.
+ * The backend's API under `/api` (the backend takes the prefix off itself; the dev proxy forwards it and adds the admin
+ * token). In the browser the session cookie does the authentication: requests that change something carry the
+ * X-TypeTorch header the backend wants with a cookie. Every call answers parsed JSON or throws an ApiError carrying the
+ * server's own message.
  */
-import type { BackfillResult, Filters, FleetAlert, FleetReports, FleetServers, Health, Identity, QueryInfo, QueryName, QueryResults, SqlResult, StorageReport } from "./types";
+import type {
+	AuthInfo,
+	BackfillResult,
+	ErrorDetail,
+	ErrorList,
+	Filters,
+	FleetAlert,
+	FleetReports,
+	FleetServers,
+	Health,
+	Identity,
+	QueryInfo,
+	QueryName,
+	QueryResults,
+	SqlResult,
+	StorageReport,
+} from "./types";
+
+/** The header the backend wants on cookie-authenticated requests that change something. */
+export const CSRF_HEADER = "x-typetorch";
 
 export class ApiError extends Error {
 	override name = "ApiError";
@@ -10,8 +31,15 @@ export class ApiError extends Error {
 		readonly status: number,
 		message: string,
 		readonly path: string,
+		/** The parsed JSON body of the answer, when it had one (a 401 from the auth check says which logins are on). */
+		readonly body?: unknown,
 	) {
 		super(message);
+	}
+
+	/** Not signed in (or the session ended). */
+	get unauthorized(): boolean {
+		return this.status === 401;
 	}
 
 	/** The endpoint doesn't exist on this server (an older server version, or the part is off). */
@@ -50,10 +78,16 @@ export function createApi(options: ApiOptions = {}) {
 		try {
 			response = await doFetch(`${base}${path}`, {
 				...init,
-				headers: { accept: "application/json", ...(init?.body ? { "content-type": "application/json" } : {}), ...init?.headers },
+				credentials: "same-origin",
+				headers: {
+					accept: "application/json",
+					...(init?.body ? { "content-type": "application/json" } : {}),
+					...(init?.method && init.method !== "GET" ? { [CSRF_HEADER]: "1" } : {}),
+					...init?.headers,
+				},
 			});
 		} catch (error) {
-			throw new ApiError(0, `cannot reach the explorer's proxy: ${(error as Error).message}`, path);
+			throw new ApiError(0, `cannot reach the backend: ${(error as Error).message}`, path);
 		}
 		const text = await response.text();
 		let body: unknown = undefined;
@@ -69,9 +103,9 @@ export function createApi(options: ApiOptions = {}) {
 					? `${b.error}: ${b.detail}`
 					: b.error
 				: response.status === 502 || response.status === 504
-					? "the analytics server is not answering"
+					? "the backend is not answering"
 					: `HTTP ${response.status}`;
-			throw new ApiError(response.status, message, path);
+			throw new ApiError(response.status, message, path, body);
 		}
 		if (body === undefined) throw new ApiError(response.status, "the answer is not JSON", path);
 		return body as T;
@@ -102,6 +136,15 @@ export function createApi(options: ApiOptions = {}) {
 		queries: (signal?: AbortSignal) => get<{ queries: QueryInfo[] }>("/v1/queries", signal).then((r) => r.queries),
 		sql: (sql: string, limit?: number, signal?: AbortSignal) => post<SqlResult>("/v1/sql", { sql, ...(limit ? { limit } : {}) }, signal),
 		health: (signal?: AbortSignal) => get<Health>("/healthz", signal),
+		/** Who is signed in; a 401 (ApiError.body.login) says which logins this backend offers. */
+		authCheck: (signal?: AbortSignal) => get<AuthInfo>("/v1/auth/check", signal),
+		login: (token: string, signal?: AbortSignal) => post<AuthInfo>("/v1/auth/login", { token }, signal),
+		logout: (signal?: AbortSignal) => post<{ ok: boolean }>("/v1/auth/logout", {}, signal),
+		/** Error kinds seen in a window (see backend README "Error logs"). */
+		errors: (params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorList>(`/v1/errors${qs({ ...params })}`, signal),
+		errorKind: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorDetail>(`/v1/errors/${encodeURIComponent(fp)}${qs({ ...params })}`, signal),
+		/** The live SSE stream's URL (EventSource sends the session cookie; the dev proxy adds the token). */
+		liveUrl: (topics: string[] = []) => `${base}/v1/live${qs({ topics: topics.join(",") })}`,
 		/** What the server keeps on disk (measured at most every 30 s). */
 		storage: (signal?: AbortSignal) => get<StorageReport>("/v1/storage", signal),
 		/** pid <-> UserId: the identities of a pid or a UserId (most recently seen first). */
@@ -121,6 +164,19 @@ export function createApi(options: ApiOptions = {}) {
 		/** The SSE stream's URL (EventSource can't set headers; the proxy adds the token). */
 		streamUrl: (params: { branch?: string; types?: string } = {}) => `${base}/v1/fleet/stream${qs(params)}`,
 	};
+}
+
+/** Window and filters of the error log reads. `window` is a number and m, h or d (30m, 24h, 7d). */
+export interface ErrorParams {
+	window?: string;
+	from?: number;
+	to?: number;
+	branch?: string;
+	build?: string;
+	realm?: string;
+	q?: string;
+	limit?: number;
+	bucket?: number;
 }
 
 export type Api = ReturnType<typeof createApi>;

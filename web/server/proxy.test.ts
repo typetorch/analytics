@@ -1,36 +1,92 @@
 import { describe, expect, it } from "vitest";
-import { guardRequest, parseEnvFile, resolveTarget } from "./proxy";
+import { assertSafeTarget, guardRequest, parseEnvFile, resolveTarget } from "./proxy";
 
 const same = { host: "localhost:5173", "sec-fetch-site": "same-origin", "content-type": "application/json" };
+const TOKEN = "fake-admin-token-for-the-explorer-tests-0123456789";
 
-describe("explorer proxy", () => {
-	it("reads the analytics server's env file; real environment wins", () => {
-		const file = '# comment\nTT_ANALYTICS_HOST=0.0.0.0\nTT_ANALYTICS_PORT="8787"\nexport TT_ANALYTICS_ADMIN_TOKEN=abc123 # trailing\n';
-		expect(parseEnvFile(file)).toEqual({ TT_ANALYTICS_HOST: "0.0.0.0", TT_ANALYTICS_PORT: "8787", TT_ANALYTICS_ADMIN_TOKEN: "abc123" });
-		const target = resolveTarget({ TT_ANALYTICS_ENV_FILE: "x.env" }, () => file);
-		expect(target.url).toBe("http://127.0.0.1:8787");
-		expect(target.token).toBe("abc123");
-		expect(resolveTarget({ TT_ANALYTICS_ENV_FILE: "x.env", TT_ANALYTICS_URL: "https://a.example.com/" }, () => file).url).toBe("https://a.example.com");
-		expect(resolveTarget({}).token).toBeUndefined();
-		expect(resolveTarget({}).url).toBe("http://127.0.0.1:8787");
+/** A fake disk: path -> text; anything else throws like a missing file. */
+const disk = (files: Record<string, string>) => (path: string) => {
+	const hit = Object.entries(files).find(([name]) => path.replace(/\\/g, "/").endsWith(name));
+	if (!hit) throw new Error(`ENOENT ${path}`);
+	return hit[1];
+};
+
+describe("explorer proxy target", () => {
+	it("parses env files like the backend does", () => {
+		const file = '# comment\nTYPETORCH_API_KEY=abc\nTYPETORCH_ADMIN_TOKEN="quoted token"\nexport OTHER=1 # trailing\n';
+		expect(parseEnvFile(file)).toEqual({ TYPETORCH_API_KEY: "abc", TYPETORCH_ADMIN_TOKEN: "quoted token", OTHER: "1" });
 	});
 
-	it("forwards only the explorer's read endpoints", () => {
+	it("reads the admin token from the game's .env and the URL from its typetorch.json (backend.url, else fleet.url)", () => {
+		const files = disk({
+			"/game/.env": `OPENCLOUD_API_KEY=unrelated\nTYPETORCH_ADMIN_TOKEN=${TOKEN}\n`,
+			"/game/typetorch.json": JSON.stringify({ backend: { url: "https://backend.example.com/" } }),
+		});
+		const target = resolveTarget({ TYPETORCH_GAME_DIR: "/game" }, files);
+		expect(target.url).toBe("https://backend.example.com");
+		expect(target.token).toBe(TOKEN);
+		expect(target.source).toContain("typetorch.json");
+		expect(target.source).not.toContain(TOKEN);
+		const old = resolveTarget({ TYPETORCH_GAME_DIR: "/game" }, disk({ "/game/.env": `TYPETORCH_ADMIN_TOKEN=${TOKEN}`, "/game/typetorch.json": '{"fleet":{"url":"https://fleet.example.com"}}' }));
+		expect(old.url).toBe("https://fleet.example.com");
+	});
+
+	it("the environment wins: TYPETORCH_ADMIN_TOKEN, TYPETORCH_BACKEND_URL, TYPETORCH_ENV_FILE", () => {
+		const files = disk({ "/game/.env": "TYPETORCH_ADMIN_TOKEN=from-file", "/other.env": "TYPETORCH_ADMIN_TOKEN=from-other-file", "/game/typetorch.json": '{"backend":{"url":"https://a.example.com"}}' });
+		expect(resolveTarget({ TYPETORCH_GAME_DIR: "/game", TYPETORCH_ADMIN_TOKEN: "from-env" }, files).token).toBe("from-env");
+		expect(resolveTarget({ TYPETORCH_GAME_DIR: "/game", TYPETORCH_BACKEND_URL: "http://127.0.0.1:9000" }, files).url).toBe("http://127.0.0.1:9000");
+		expect(resolveTarget({ TYPETORCH_GAME_DIR: "/game", TYPETORCH_ENV_FILE: "/other.env" }, files).token).toBe("from-other-file");
+		expect(resolveTarget({ TYPETORCH_ENV_FILE: "/other.env" }, files).token).toBe("from-other-file");
+	});
+
+	it("without a game: no token and the local default URL; a missing .env or broken typetorch.json is not a crash", () => {
+		expect(resolveTarget({}, disk({}))).toMatchObject({ url: "http://127.0.0.1:8787", source: "default url, no token" });
+		expect(resolveTarget({}, disk({})).token).toBeUndefined();
+		const broken = resolveTarget({ TYPETORCH_GAME_DIR: "/game" }, disk({ "/game/typetorch.json": "{not json" }));
+		expect(broken.url).toBe("http://127.0.0.1:8787");
+		expect(broken.source).toContain("no token in");
+	});
+
+	it("never sends the token over plain http to another machine", () => {
+		expect(() => assertSafeTarget("https://backend.example.com")).not.toThrow();
+		expect(() => assertSafeTarget("http://127.0.0.1:8787")).not.toThrow();
+		expect(() => assertSafeTarget("http://localhost:8787")).not.toThrow();
+		expect(() => assertSafeTarget("http://[::1]:8787")).not.toThrow();
+		expect(() => assertSafeTarget("http://backend.example.com")).toThrow("plain http");
+		expect(() => assertSafeTarget("http://10.0.0.5:8787")).toThrow("plain http");
+		expect(() => assertSafeTarget("https://user:pass@backend.example.com")).toThrow("credentials");
+		expect(() => assertSafeTarget("not a url")).toThrow("not a URL");
+	});
+});
+
+describe("explorer proxy guard", () => {
+	it("forwards only the explorer's endpoints", () => {
 		expect(guardRequest({ method: "POST", url: "/v1/query/overview", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/fleet/stream?branch=dev", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/sql", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/storage", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/identity?uid=1", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/identity/backfill", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/auth/check", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/errors?window=24h&realm=server", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/errors/fp-abc123", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/live?topics=error", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/identity", headers: same }, true)).toMatchObject({ ok: false, status: 403 }); // the game's ingest route
 		expect(guardRequest({ method: "GET", url: "/healthz", headers: { host: "localhost:5173", "sec-fetch-site": "none" } }, true)).toEqual({ ok: true });
 		for (const [method, url] of [
 			["POST", "/v1/erasure"],
 			["POST", "/v1/ingest"],
+			["POST", "/v1/errors"],
+			["POST", "/v1/auth/login"],
+			["POST", "/v1/auth/logout"],
+			["GET", "/v1/auth/roblox/start"],
+			["PUT", "/v1/access"],
+			["GET", "/v1/access"],
 			["POST", "/v1/fleet/alerts/3/ack"],
 			["POST", "/v1/fleet/heartbeat"],
 			["GET", "/v1/settings"],
 			["GET", "/v1/query/overview"],
+			["GET", "/v1/errors/../storage"],
 			["POST", "/v1/query/../erasure"],
 		]) {
 			expect(guardRequest({ method, url, headers: same }, true)).toMatchObject({ ok: false, status: 403 });
@@ -50,6 +106,6 @@ describe("explorer proxy", () => {
 		});
 		const noToken = guardRequest({ method: "POST", url: "/v1/query/overview", headers: same }, false);
 		expect(noToken).toMatchObject({ ok: false, status: 503 });
-		expect(noToken.ok ? "" : noToken.error).toContain("--env-file");
+		expect(noToken.ok ? "" : noToken.error).toContain("--game");
 	});
 });

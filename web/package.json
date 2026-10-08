@@ -1,7 +1,7 @@
 {
 	"name": "@typetorch/web",
 	"version": "0.1.0",
-	"description": "TypeTorch web: an internal explorer for the self-hosted analytics server (overview, Roblox numbers, retention, funnels, players, flow graphs, experiments, fleet, raw queries).",
+	"description": "The TypeTorch backend explorer: overview, Roblox numbers, retention, funnels, players, flow graphs, experiments, fleet, error logs and raw queries. Built into web/dist and served by the backend at /.",
 	"license": "MIT",
 	"private": true,
 	"type": "module",
@@ -12,7 +12,6 @@
 		"dev": "node scripts/vite.mjs dev",
 		"build": "tsc -b && vite build",
 		"preview": "node scripts/vite.mjs preview",
-		"local": "vite build && node scripts/vite.mjs preview",
 		"typecheck": "tsc -b --noEmit",
 		"test": "vitest run"
 	},

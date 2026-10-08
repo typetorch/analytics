@@ -1,25 +1,28 @@
 /**
- * The local proxy between the explorer and the analytics server, for `vite dev` and `vite preview`.
+ * The local proxy between the explorer and the backend, for `vite dev` and `vite preview` (the backend serves the built
+ * explorer itself at /; this is for working on the explorer).
  *
- * The browser calls `/api/...`; this forwards to the analytics server and adds the admin token, read from an env file
- * (`--env-file` / TT_ANALYTICS_ENV_FILE, the same file the server uses) or the environment. The token never reaches
- * the browser. Because any page open in the same browser could also send requests to localhost, a guard runs first:
- * only the read endpoints the explorer uses, only from the explorer's own origin, JSON bodies only.
+ * The browser calls `/api/...`; this forwards to the backend and adds the admin token, read from the game repo's .env
+ * (`--game <repo>`; TYPETORCH_ENV_FILE names another file; a TYPETORCH_ADMIN_TOKEN in the environment wins). The backend's
+ * URL is the game's typetorch.json `backend.url` (else the old `fleet.url`), or TYPETORCH_BACKEND_URL / `--url`, else
+ * http://127.0.0.1:8787. The token never reaches the browser. Because any page open in the same browser could also send
+ * requests to localhost, a guard runs first: only the endpoints the explorer uses, only from the explorer's own origin,
+ * JSON bodies only.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { Plugin, ProxyOptions } from "vite";
 
 export interface AnalyticsTarget {
-	/** Base URL of the analytics server, e.g. http://127.0.0.1:8787 */
+	/** Base URL of the backend, e.g. http://127.0.0.1:8787 */
 	url: string;
 	token?: string;
 	/** Where the settings came from (for the startup line; never the token itself). */
 	source: string;
 }
 
-/** KEY=value lines (comments, quotes and `export` allowed), like the analytics server reads them. */
+/** KEY=value lines (comments, quotes and `export` allowed), like the backend reads them. */
 export function parseEnvFile(text: string): Record<string, string> {
 	const values: Record<string, string> = {};
 	for (const raw of text.split(/\r?\n/)) {
@@ -36,27 +39,66 @@ export function parseEnvFile(text: string): Record<string, string> {
 	return values;
 }
 
-/**
- * The analytics server to talk to: TT_ANALYTICS_URL, else http://TT_ANALYTICS_HOST:TT_ANALYTICS_PORT (the server's own
- * settings; 0.0.0.0 means this machine), else http://127.0.0.1:8787. Real environment variables win over the file.
- */
-export function resolveTarget(env: Record<string, string | undefined>, readFile: (path: string) => string = (p) => readFileSync(p, "utf8")): AnalyticsTarget {
-	const file = env.TT_ANALYTICS_ENV_FILE;
-	const fromFile = file ? parseEnvFile(readFile(resolve(file))) : {};
-	const pick = (key: string) => (env[key] !== undefined && env[key] !== "" ? env[key] : fromFile[key]);
-	let url = pick("TT_ANALYTICS_URL");
-	if (!url) {
-		const host = pick("TT_ANALYTICS_HOST") ?? "127.0.0.1";
-		const local = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host;
-		url = `http://${local.includes(":") ? `[${local}]` : local}:${pick("TT_ANALYTICS_PORT") ?? "8787"}`;
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/** The admin token goes only to https URLs, or to this machine. */
+export function assertSafeTarget(url: string): void {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		throw new Error(`the backend URL ${JSON.stringify(url)} is not a URL`);
 	}
-	const token = pick("TT_ANALYTICS_ADMIN_TOKEN");
-	return { url: url.replace(/\/+$/, ""), ...(token ? { token } : {}), source: file ? `env file ${resolve(file)}` : "environment" };
+	if (parsed.username || parsed.password) throw new Error("the backend URL must not hold credentials");
+	if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && LOCAL_HOSTS.has(parsed.hostname))) {
+		throw new Error(`refusing to send the admin token over plain http to ${parsed.host}: use https, or a backend on this machine`);
+	}
 }
 
-/** The analytics endpoints the explorer may reach through the proxy (paths without /api). Everything else is refused. */
+/**
+ * The backend to talk to and the admin token for it. Inputs (all optional): TYPETORCH_GAME_DIR (the game repo, set by
+ * `--game`), TYPETORCH_ENV_FILE, TYPETORCH_ADMIN_TOKEN, TYPETORCH_BACKEND_URL. Real environment variables win over files.
+ */
+export function resolveTarget(env: Record<string, string | undefined>, readFile: (path: string) => string = (p) => readFileSync(p, "utf8")): AnalyticsTarget {
+	const read = (path: string): string | undefined => {
+		try {
+			return readFile(path);
+		} catch {
+			return undefined;
+		}
+	};
+	const gameDir = env.TYPETORCH_GAME_DIR ? resolve(env.TYPETORCH_GAME_DIR) : undefined;
+	const envFile = env.TYPETORCH_ENV_FILE ? resolve(env.TYPETORCH_ENV_FILE) : gameDir ? join(gameDir, ".env") : undefined;
+	const fileText = envFile ? read(envFile) : undefined;
+	const fromFile = fileText !== undefined ? parseEnvFile(fileText) : {};
+	let config: { backend?: { url?: unknown }; fleet?: { url?: unknown } } = {};
+	const configPath = gameDir ? join(gameDir, "typetorch.json") : undefined;
+	const configText = configPath ? read(configPath) : undefined;
+	if (configText !== undefined) {
+		try {
+			config = JSON.parse(configText);
+		} catch {
+			// a broken typetorch.json is the CLI's to report
+		}
+	}
+	const fromConfig = [config.backend?.url, config.fleet?.url].find((u): u is string => typeof u === "string" && u !== "");
+	const url = (env.TYPETORCH_BACKEND_URL || fromConfig || "http://127.0.0.1:8787").replace(/\/+$/, "");
+	const token = env.TYPETORCH_ADMIN_TOKEN || fromFile.TYPETORCH_ADMIN_TOKEN;
+	const parts: string[] = [];
+	if (env.TYPETORCH_BACKEND_URL) parts.push("url from the environment");
+	else if (fromConfig) parts.push("url from typetorch.json");
+	else parts.push("default url");
+	parts.push(env.TYPETORCH_ADMIN_TOKEN ? "token from the environment" : fromFile.TYPETORCH_ADMIN_TOKEN ? `token from ${envFile}` : envFile ? `no token in ${envFile}` : "no token");
+	return { url, ...(token ? { token } : {}), source: parts.join(", ") };
+}
+
+/** The backend endpoints the explorer may reach through the proxy (paths without /api). Everything else is refused. */
 export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	{ method: "GET", path: /^\/healthz$/ },
+	// Who am I: the proxy's token makes the answer "admin", so the explorer skips its login page.
+	{ method: "GET", path: /^\/v1\/auth\/check$/ },
+	{ method: "GET", path: /^\/v1\/errors(\/[A-Za-z0-9_.:-]{1,64})?$/ },
+	{ method: "GET", path: /^\/v1\/live$/ },
 	{ method: "GET", path: /^\/v1\/queries$/ },
 	{ method: "GET", path: /^\/v1\/storage$/ },
 	{ method: "GET", path: /^\/v1\/identity$/ },
@@ -85,6 +127,8 @@ const header = (headers: GuardInput["headers"], name: string): string | undefine
 /** Decides whether a browser request may go through the proxy. */
 export function guardRequest(req: GuardInput, hasToken: boolean): GuardResult {
 	const path = req.url.split("?")[0] ?? "";
+	// No walking out of an allowed route.
+	if (path.split("/").some((segment) => segment === ".." || segment === ".")) return { ok: false, status: 403, error: "bad path" };
 	const method = req.method.toUpperCase();
 	if (!ALLOWED_ROUTES.some((r) => r.method === method && r.path.test(path)))
 		return { ok: false, status: 403, error: `the explorer proxy does not forward ${method} ${path}` };
@@ -106,7 +150,7 @@ export function guardRequest(req: GuardInput, hasToken: boolean): GuardResult {
 	if (method === "POST" && !/^application\/json\b/i.test(header(req.headers, "content-type") ?? ""))
 		return { ok: false, status: 415, error: "POST bodies must be application/json" };
 	if (!hasToken)
-		return { ok: false, status: 503, error: "no admin token: start the explorer with --env-file <the analytics server's env file> (or TT_ANALYTICS_ENV_FILE)" };
+		return { ok: false, status: 503, error: "no admin token: start the explorer with --game <the game repo> (its .env holds TYPETORCH_ADMIN_TOKEN)" };
 	return { ok: true };
 }
 

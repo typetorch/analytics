@@ -77,11 +77,11 @@ export function ErrorState({ error, title = "Could not load this" }: { error: un
 	const message = error instanceof Error ? error.message : String(error);
 	const hint =
 		error instanceof ApiError && error.status === 503
-			? "Start the explorer with the analytics env file: bun run dev -- --env-file <file>"
+			? "Start the explorer with the game repo: bun run dev -- --game <game repo> (its .env holds TYPETORCH_ADMIN_TOKEN)"
 			: error instanceof ApiError && error.notFound
-				? "This server doesn't have that endpoint or query yet: restart it with the latest analytics code."
+				? "This server doesn't have that endpoint or query yet: update and restart the backend."
 				: error instanceof ApiError && (error.status === 502 || error.status === 0)
-					? "Is the analytics server running?"
+					? "Is the backend running?"
 					: null;
 	return (
 		<Alert variant="destructive">

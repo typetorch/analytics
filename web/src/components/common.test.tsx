@@ -26,13 +26,13 @@ describe("QueryState", () => {
 	it("explains a missing admin token and an older server", () => {
 		render(<QueryState query={query({ isPending: false, isError: true, error: new ApiError(503, "no admin token", "/v1/queries") })}>{() => null}</QueryState>);
 		expect(screen.getByText("no admin token")).toBeTruthy();
-		expect(screen.getByText(/--env-file/)).toBeTruthy();
+		expect(screen.getByText(/--game <game repo>/)).toBeTruthy();
 		cleanup();
 		render(
 			<QueryState query={query({ isPending: false, isError: true, error: new ApiError(404, 'unknown query "players"', "/v1/query/players") })}>
 				{() => null}
 			</QueryState>,
 		);
-		expect(screen.getByText(/restart it with the latest analytics code/)).toBeTruthy();
+		expect(screen.getByText(/update and restart the backend/)).toBeTruthy();
 	});
 });

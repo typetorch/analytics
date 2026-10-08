@@ -478,3 +478,65 @@ export interface StorageReport {
 	growth: { todayBytes: number; avgPerDayBytes: number | null; days: { date: string; bytes: number }[] } | null;
 	disk: { freeBytes: number; totalBytes: number } | null;
 }
+
+// Sign-in (GET /v1/auth/check) -----------------------------------------------------------------------------------------
+
+/** Who is signed in: the admin token, or a Roblox owner. */
+export type AuthUser = { kind: "token" } | { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string };
+
+export interface AuthInfo {
+	ok: true;
+	role: "admin" | "game";
+	/** "cookie" = an explorer session; "bearer" = a token in the request (the dev proxy adds one). */
+	via: "bearer" | "cookie";
+	user?: AuthUser;
+	version?: string;
+}
+
+/** Which logins the backend offers (the body of a 401 from the auth check). */
+export interface LoginOptions {
+	token: boolean;
+	roblox: boolean;
+}
+
+// Error logs (GET /v1/errors) ------------------------------------------------------------------------------------------
+
+export interface ErrorWindow {
+	from: string;
+	to: string;
+	bucketSeconds: number;
+	buckets: number;
+}
+
+export interface ErrorKind {
+	fp: string;
+	template: string;
+	/** First line of the sample stack. */
+	topFrame: string | null;
+	realm: "server" | "client" | string;
+	count: number;
+	players: number;
+	firstAt: string;
+	lastAt: string;
+	total: number;
+	/** Counts per bucket across the window, oldest first. */
+	spark: number[];
+}
+
+export interface ErrorList {
+	window: ErrorWindow;
+	kinds: ErrorKind[];
+	totals: { count: number; kinds: number; players: number };
+	more: number;
+}
+
+export interface ErrorDetail {
+	kind: { fp: string; template: string; stack: string | null; realm: string; firstAt: string; lastAt: string; total: number };
+	window: ErrorWindow;
+	count: number;
+	players: number;
+	series: { t: string; n: number }[];
+	byBuild: { build: string; n: number }[];
+	byBranch: { branch: string; n: number }[];
+	byRealm: { realm: string; n: number }[];
+}
