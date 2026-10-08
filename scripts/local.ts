@@ -19,6 +19,9 @@
  *    Cloud key (DataStore read/create/update + messaging), then pings servers so they switch within seconds;
  * 6. keeps running; Ctrl+C stops the tunnel and the server it started.
  *
+ * The CLI checks the address and token before it signs (the URL parses and is https, GET <url>/healthz answers, the token
+ * is accepted by GET /v1/auth/check as an ingest token) and refuses a broken value; step 5 then prints the CLI's reason
+ * and fix in red, the tunnel keeps running, and the game keeps its old settings.
  * `--port <n>` (default 8787), `--public-url <url>` (instead of localhost), `--no-settings` skips step 5, `--cli <entry>`
  * runs that CLI entry file instead of the game's node_modules/@typetorch/cli, `--cloudflared <path>`. Prints no tokens
  * or keys (the API key reaches the CLI through its environment).
@@ -138,25 +141,37 @@ while (!(await answers(url))) {
 }
 log(`tunnel answering after ${Math.round((Date.now() - waitStart) / 1000)} s`);
 
-// 4. Point the game at it.
+// 4. Point the game at it. The game's CLI checks the address and token (URL, GET /healthz, GET /v1/auth/check) before it
+// signs anything, so a tunnel that does not answer or a token the server does not know is refused with the reason;
+// the server and tunnel keep running either way, and the game keeps its old settings.
+let pointed = false;
+let refusal: string | undefined;
 if (writeGameSettings) {
 	if (!gameDir) {
 		log(red(NO_GAME));
 		log(red(NO_GAME_FIX));
 	} else {
 		const cli = { gameDir, ...(cliEntry ? { cli: [process.execPath, cliEntry] } : {}) };
-		const fleet = await writeFleetSettings({ ...cli, url, ingestToken: apiKey });
-		log(`settings.fleet ${fleet.written ? "written" : "already set"}${fleet.seq !== undefined ? ` (settings #${fleet.seq})` : ""}; typetorch.json fleet.url = ${url} (local edit; don't commit it)`);
-		const analytics = await writeSettings({
-			...cli,
-			settings: { backend: "duckdb", events: `${url}/v1/ingest`, token: apiKey, flushSeconds: 15, recordShare: 1 },
-		});
-		log(`settings.analytics ${analytics.written ? "written" : "already set"}${analytics.seq !== undefined ? ` (settings #${analytics.seq})` : ""}`);
+		try {
+			const fleet = await writeFleetSettings({ ...cli, url, ingestToken: apiKey });
+			log(`settings.fleet ${fleet.written ? "written" : "already set"}${fleet.seq !== undefined ? ` (settings #${fleet.seq})` : ""}; typetorch.json fleet.url = ${url} (local edit; don't commit it)`);
+			const analytics = await writeSettings({
+				...cli,
+				settings: { backend: "duckdb", events: `${url}/v1/ingest`, token: apiKey, flushSeconds: 15, recordShare: 1 },
+			});
+			log(`settings.analytics ${analytics.written ? "written" : "already set"}${analytics.seq !== undefined ? ` (settings #${analytics.seq})` : ""}`);
+			pointed = true;
+		} catch (error) {
+			refusal = (error as Error).message;
+			for (const line of refusal.split("\n")) log(red(line));
+			log(red("the game was NOT pointed at this tunnel (its old settings stay). Fix the above and restart, or run the typetorch command by hand."));
+		}
 	}
 }
-if (writeGameSettings && gameDir) {
+if (pointed) {
 	log("ready: running servers (kernel 0.3.8+) switch within seconds of the ping, new servers at once. Ctrl+C stops.");
 } else {
-	log(red(`ready on ${url}, but game servers were NOT told about it (${gameDir ? "--no-settings" : "no --game"}). Ctrl+C stops.`));
+	const why = refusal ? "the game's CLI refused the settings" : gameDir ? "--no-settings" : "no --game";
+	log(red(`ready on ${url}, but game servers were NOT told about it (${why}). Ctrl+C stops.`));
 }
 await new Promise(() => {});

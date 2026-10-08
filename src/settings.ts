@@ -113,6 +113,11 @@ export interface WriteSettingsOptions extends TypeTorchCliOptions {
 	dryRun?: boolean;
 	/** Don't ping servers (they still read the record within about a minute). */
 	noPing?: boolean;
+	/**
+	 * `--force`: write the value although the CLI's endpoint checks failed (the URL, GET /healthz, the ingest token), and
+	 * replace a record the game's keys didn't sign. Without it a broken value is refused and nothing is written.
+	 */
+	force?: boolean;
 }
 
 export interface WriteSettingsResult {
@@ -130,11 +135,13 @@ export interface WriteSettingsResult {
  * folder (the value on stdin, so the token never sits in a command line). The CLI reads the record, checks it was
  * signed by the game's keys, signs the change with both prod keys, writes it and pings servers. Needs the game's
  * signing keys (`typetorch keys init`) and its Open Cloud key with DataStore read/create/update + messaging scopes.
+ * The CLI checks the endpoint first (the URL is https and ends in /v1/ingest, GET <server>/healthz answers, the token is
+ * accepted as an ingest token) and refuses a broken value: this throws with the CLI's message and what to fix.
  */
 export async function writeSettings(options: WriteSettingsOptions): Promise<WriteSettingsResult> {
 	const value = validateSettings(options.settings);
 	if (options.dryRun) return { value, written: false };
-	const args = ["settings", "set", SETTINGS_FIELD, "-", ...(options.noPing ? ["--no-ping"] : [])];
+	const args = ["settings", "set", SETTINGS_FIELD, "-", ...(options.noPing ? ["--no-ping"] : []), ...(options.force ? ["--force"] : [])];
 	const out = await runTypeTorch(options, args, { stdin: JSON.stringify(value) });
 	const result: WriteSettingsResult = { value, written: out.outcome === "written" };
 	if (typeof out.seq === "number") result.seq = out.seq;
@@ -148,16 +155,19 @@ export interface WriteFleetSettingsOptions extends TypeTorchCliOptions {
 	/** The server's write-only ingest token (game servers post with it). Goes to the CLI through its environment. */
 	ingestToken: string;
 	noPing?: boolean;
+	/** `--force`: write it although the CLI's endpoint checks failed (see WriteSettingsOptions.force). */
+	force?: boolean;
 }
 
 /**
  * Points the game's servers at a fleet API: runs `typetorch fleet setup --url <url>` in the game folder with the
  * ingest token in the CLI's environment (TYPETORCH_FLEET_INGEST_TOKEN, never argv). The CLI writes the signed
- * record's `fleet` field ({url, token}) and sets typetorch.json `fleet.url`.
+ * record's `fleet` field ({url, token}) and sets typetorch.json `fleet.url`. Like `writeSettings`, the CLI refuses an
+ * address or token that fails its checks (this throws with its message) unless `force`.
  */
 export async function writeFleetSettings(options: WriteFleetSettingsOptions): Promise<{ written: boolean; seq?: number }> {
 	if (!/^https:\/\//.test(options.url)) throw new Error("the fleet URL must be https");
-	const args = ["fleet", "setup", "--url", options.url, ...(options.noPing ? ["--no-ping"] : [])];
+	const args = ["fleet", "setup", "--url", options.url, ...(options.noPing ? ["--no-ping"] : []), ...(options.force ? ["--force"] : [])];
 	const out = await runTypeTorch(options, args, { env: { TYPETORCH_FLEET_INGEST_TOKEN: options.ingestToken } });
 	return { written: out.outcome === "written", ...(typeof out.settingsSeq === "number" ? { seq: out.settingsSeq } : {}) };
 }

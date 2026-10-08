@@ -421,7 +421,12 @@ const { servers } = await fleet.servers({ branch: "prod" });
   seconds, no publish. It needs the game's signing keys (`typetorch keys init`, `--fallback`) and its Open Cloud key
   (DataStore read/create/update, messaging); a failure carries the CLI's own message. Returns `{ value, written, seq,
   pinged }`. **writeFleetSettings** runs `typetorch fleet setup --url <url>` with the API key in the child's
-  environment (`TYPETORCH_FLEET_INGEST_TOKEN`). This package never signs anything. Settings, as the framework reads them (SCHEMA.md "Sink settings"): `{ backend: "basin" | "duckdb", events,
+  environment (`TYPETORCH_FLEET_INGEST_TOKEN`). Both calls go through the CLI's endpoint checks before anything is
+  signed: the URL is https (DuckDB: ends in `/v1/ingest`), `GET <server>/healthz` answers within 5 s, and
+  `GET /v1/auth/check` accepts the token as a game key (API key, write-only) for that part (the admin token is refused). A
+  broken value is refused: the call throws with the CLI's message (each failing check and its fix) and nothing is
+  written; `force: true` (`--force`) writes it anyway. `bun run local` prints that message in red and keeps the
+  tunnel running with the game's old settings. This package never signs anything. Settings, as the framework reads them (SCHEMA.md "Sink settings"): `{ backend: "basin" | "duckdb", events,
   recordings?, token?, flushSeconds? (5-300), recordShare? (0-1), techEvery? (15-3600), experiments?: { name: {
   active?, weights?, variant? } } }`. URLs must be https here (the framework also takes http).
 

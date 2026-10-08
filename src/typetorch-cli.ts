@@ -55,14 +55,29 @@ export const spawnCli: RunCli = (command, options) =>
 		child.stdin!.end(options.stdin ?? "");
 	});
 
+const cleanLines = (text: string): string[] =>
+	text
+		.split(/\r?\n/)
+		.map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").trimEnd())
+		.filter((line) => line.trim() !== "");
+
 /** The last few non-empty lines of the CLI's error output, for an error message. */
 function lastLines(text: string, count = 4): string {
-	return text
-		.split(/\r?\n/)
-		.map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").trim())
-		.filter(Boolean)
+	return cleanLines(text)
+		.map((line) => line.trim())
 		.slice(-count)
 		.join(" / ");
+}
+
+/**
+ * The CLI's failure message from its error output: everything from its last `error:` line on (a refused endpoint check
+ * lists each failing step and its fix over several lines), one per line; else the last few lines.
+ */
+function failureText(stderr: string, stdout: string): string {
+	const lines = cleanLines(stderr);
+	const at = lines.map((line) => line.trimStart().startsWith("error:")).lastIndexOf(true);
+	if (at >= 0) return lines.slice(at, at + 24).join("\n  ");
+	return lastLines(stderr) || lastLines(stdout) || "no output";
 }
 
 /**
@@ -74,7 +89,7 @@ export async function runTypeTorch(options: TypeTorchCliOptions, args: string[],
 	const run = options.run ?? spawnCli;
 	const result = await run(command, { cwd: resolve(options.gameDir), stdin: input.stdin, env: { ...options.env, ...input.env } });
 	if (result.code !== 0) {
-		throw new Error(`typetorch ${args.join(" ")} failed (exit ${result.code}): ${lastLines(result.stderr) || lastLines(result.stdout) || "no output"}`);
+		throw new Error(`typetorch ${args.join(" ")} failed (exit ${result.code}): ${failureText(result.stderr, result.stdout)}`);
 	}
 	const text = result.stdout.trim();
 	const start = text.lastIndexOf("\n{");

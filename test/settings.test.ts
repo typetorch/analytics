@@ -92,6 +92,30 @@ describe("writeSettings (through the game's TypeTorch CLI)", () => {
 		expect(error.message).not.toContain("\u001b");
 	});
 
+	test("--force passes through (write although the CLI's endpoint checks failed)", async () => {
+		const { calls, run } = fakeCli({ stdout: { outcome: "written", seq: 2 } });
+		await writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good, noPing: true, force: true });
+		expect(calls[0].command).toEqual(["tt", "settings", "set", "analytics", "-", "--no-ping", "--force", "--json"]);
+	});
+
+	test("a refused endpoint check keeps the CLI's whole message: every failing step and its fix, no colors, no passing lines", async () => {
+		const stderr = [
+			"\u001b[2m  ok   fleet url     abc.trycloudflare.com over https\u001b[0m",
+			"\u001b[31merror: refusing to write settings.analytics: 1 check failed, nothing was signed or written",
+			"  FAIL analytics healthz abc.trycloudflare.com/healthz didn't answer (ENOTFOUND)",
+			"       fix: abc.trycloudflare.com no longer exists (quick tunnel URLs die with their cloudflared); start it again on the dev PC: bun run local",
+			"Fix that and run it again, or pass --force to write it anyway.\u001b[0m",
+		].join("\n");
+		const { run } = fakeCli({ code: 1, stderr });
+		const error = await writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good }).catch((e) => e);
+		expect(error.message).toContain("failed (exit 1): error: refusing to write settings.analytics");
+		expect(error.message).toContain("FAIL analytics healthz");
+		expect(error.message).toContain("fix: abc.trycloudflare.com no longer exists");
+		expect(error.message).toContain("--force");
+		expect(error.message).not.toContain("fleet url");
+		expect(error.message).not.toContain("\u001b");
+	});
+
 	test("an old CLI that prints no JSON is named", async () => {
 		const { run } = fakeCli({ stdout: "Usage: typetorch <command>" });
 		await expect(writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good })).rejects.toThrow("0.8+");
@@ -117,6 +141,8 @@ describe("writeFleetSettings", () => {
 		expect(await writeFleetSettings({ gameDir: ".", cli: ["tt"], run, url: "https://a.trycloudflare.com", ingestToken: token })).toEqual({ written: true, seq: 9 });
 		expect(calls[0].command).toEqual(["tt", "fleet", "setup", "--url", "https://a.trycloudflare.com", "--json"]);
 		expect(calls[0].env).toEqual({ TYPETORCH_FLEET_INGEST_TOKEN: token });
+		await writeFleetSettings({ gameDir: ".", cli: ["tt"], run, url: "https://a.trycloudflare.com", ingestToken: token, force: true });
+		expect(calls[1].command).toEqual(["tt", "fleet", "setup", "--url", "https://a.trycloudflare.com", "--force", "--json"]);
 		expect(calls[0].command.join(" ")).not.toContain(token);
 		await expect(writeFleetSettings({ gameDir: ".", cli: ["tt"], run, url: "http://insecure", ingestToken: token })).rejects.toThrow("https");
 	});

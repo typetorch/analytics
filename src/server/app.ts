@@ -24,7 +24,7 @@
  *
  *   open
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
- *   GET  /v1/auth/check             which role the credentials have (no side effects); 401 says which logins are on
+ *   GET  /v1/auth/check             which role the credentials have and which parts run (no side effects); 401 says which logins are on
  *   POST /v1/auth/login | logout    explorer session by pasting the admin token
  *   GET  /v1/auth/roblox/start | callback   Sign in with Roblox (owners only)
  *   GET  /                          the built explorer (web/dist) and its files
@@ -599,7 +599,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const principal = auth.principal(req);
 		if (principal && (principal.role === "game" || adminIpOk(ip))) {
 			const user = describeUser(principal);
-			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version });
+			// `parts`: what this server runs, so `typetorch fleet setup` / `settings set analytics` can refuse a game key for a
+			// part that is off (a game key writes to every part that runs; the admin token reads them).
+			const parts = { analytics: config.parts.has("analytics"), fleet: config.parts.has("fleet") };
+			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version, parts });
 		}
 		if (bearer(req) !== undefined) failedAuth(ip, "token check");
 		return json(401, { error: "sign in required", login: loginOptions() });

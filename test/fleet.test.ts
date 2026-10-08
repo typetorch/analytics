@@ -53,6 +53,17 @@ afterAll(async () => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
+describe("auth check", () => {
+	test("GET /v1/auth/check says the role and that only the fleet part runs here, and changes nothing", async () => {
+		const check = (token?: string) => fetch(`${base}/v1/auth/check`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+		expect(await (await check(INGEST)).json()).toMatchObject({ ok: true, role: "game", parts: { analytics: false, fleet: true } });
+		expect(await (await check(ADMIN)).json()).toMatchObject({ ok: true, role: "admin", parts: { analytics: false, fleet: true } });
+		expect((await check()).status).toBe(401);
+		expect((await check("not-a-token-0123456789abcdefgh01234567")).status).toBe(401);
+		expect((await client.servers()).servers).toEqual([]);
+	});
+});
+
 describe("ingest", () => {
 	test("tokens, shapes, sizes", async () => {
 		expect((await ingest("heartbeat", hb("job-1"), { authorization: `Bearer ${ADMIN}` })).status).toBe(401);
