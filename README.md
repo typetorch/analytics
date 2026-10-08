@@ -252,7 +252,7 @@ here): the files are checked by tests that read them, so expect to fix a typo on
    open `https://backend.example.com/` and sign in.
 6. Point the game at it: put the same two values in the game repo's `.env`, set the backend URL in `typetorch.json`, and run
    the CLI's backend setup (today `typetorch fleet setup` and `typetorch settings set analytics -`; `typetorch backend setup`
-   replaces both in CLI 0.9).
+   will replace both, plans/21 part B).
 7. Roblox "Right to erasure" webhook: `https://backend.example.com/v1/erasure` with `ROBLOX_WEBHOOK_SECRET`.
 
 Things to know: the container runs as the non-root `bun` user (uid 1000), so a **bind-mounted** `/data` must be writable by
