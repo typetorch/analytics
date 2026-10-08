@@ -1,18 +1,19 @@
-# Caddy in front of the analytics server: TLS (automatic Let's Encrypt), body cap, SSE passthrough.
-# Replace analytics.example.com with your domain (an A record pointing at the VPS).
+# Caddy in front of the backend on a VPS (no Docker): TLS (automatic Let's Encrypt), body cap, SSE passthrough.
+# Replace backend.example.com with your domain (an A record pointing at the VPS). Coolify has its own proxy: skip this there.
 #   sudo cp server/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
-analytics.example.com {
+# Set TYPETORCH_TRUST_PROXY=1 and TYPETORCH_PUBLIC_URL=https://<your domain> in the backend's environment.
+backend.example.com {
 	request_body {
-		# The server refuses ingest bodies over TT_ANALYTICS_MAX_BODY (2 MB) itself; this stops anything bigger early.
+		# The server refuses ingest bodies over TYPETORCH_MAX_BODY (2 MB) itself; this stops anything bigger early.
 		max_size 4MB
 	}
 	reverse_proxy 127.0.0.1:8787 {
-		# Server-Sent Events (/v1/fleet/stream): pass each event at once.
+		# Server-Sent Events (/v1/live, /v1/fleet/stream): pass each event at once.
 		flush_interval -1
 	}
 	# Caddy redacts the Authorization header in its logs by default; keep it that way (no log_credentials).
 	log {
-		output file /var/log/caddy/analytics.log {
+		output file /var/log/caddy/backend.log {
 			roll_size 50MiB
 			roll_keep 5
 		}

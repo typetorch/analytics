@@ -1,8 +1,8 @@
-# systemd unit for the TypeTorch analytics server (README "Deploy on a 1 GB VPS").
-#   sudo cp server/typetorch-analytics.service /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now typetorch-analytics
+# systemd unit for the TypeTorch backend (README "Run it on a VPS without Docker").
+#   sudo cp server/typetorch-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now typetorch-backend
 [Unit]
-Description=TypeTorch analytics + fleet API
+Description=TypeTorch backend (analytics, fleet, error logs, explorer)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,9 +10,9 @@ Wants=network-online.target
 Type=simple
 User=typetorch
 Group=typetorch
-WorkingDirectory=/opt/typetorch-analytics
-# Tokens and settings (chmod 640, root:typetorch). Never commit this file.
-EnvironmentFile=/etc/typetorch/analytics.env
+WorkingDirectory=/opt/typetorch-backend
+# Secrets and settings (chmod 640, root:typetorch). Never commit this file.
+EnvironmentFile=/etc/typetorch/backend.env
 ExecStart=/usr/local/bin/bun src/server/main.ts
 Restart=always
 RestartSec=2
@@ -20,7 +20,7 @@ RestartSec=2
 KillSignal=SIGTERM
 TimeoutStopSec=60
 
-# Memory: DuckDB is capped at TT_ANALYTICS_MEMORY_LIMIT (400MB); the rest is the API. Swap absorbs spikes.
+# Memory: DuckDB is capped at TYPETORCH_MEMORY_LIMIT (400MB); the rest is the API. Swap absorbs spikes.
 MemoryHigh=800M
 MemoryMax=950M
 LimitNOFILE=65536
@@ -35,7 +35,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-ReadWritePaths=/var/lib/typetorch-analytics
+ReadWritePaths=/var/lib/typetorch-backend
 
 [Install]
 WantedBy=multi-user.target

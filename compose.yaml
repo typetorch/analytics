@@ -1,0 +1,48 @@
+# The TypeTorch backend. Coolify: a "Docker Compose" app on this repo (Docker Compose Location: /compose.yaml), the two
+# secrets and the optional values below as environment variables, your domain on the `backend` service, port 8787.
+# Locally: docker compose -f compose.yaml -f compose.local.yaml up --build   (compose.local.yaml publishes 127.0.0.1:8787)
+#
+# One volume holds everything the backend keeps (events, fleet state, error logs, the owner list): back it up.
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: typetorch-backend
+    restart: unless-stopped
+    init: true
+    # The server loads the last raw files and checkpoints DuckDB on SIGTERM.
+    stop_grace_period: 60s
+    expose:
+      - "8787"
+    environment:
+      # Required: 32+ random characters each (openssl rand -hex 32), different from each other.
+      TYPETORCH_API_KEY: ${TYPETORCH_API_KEY:?set TYPETORCH_API_KEY to 32+ random characters}
+      TYPETORCH_ADMIN_TOKEN: ${TYPETORCH_ADMIN_TOKEN:?set TYPETORCH_ADMIN_TOKEN to 32+ random characters, different from the API key}
+      # Optional.
+      TYPETORCH_API_KEY_PREVIOUS: ${TYPETORCH_API_KEY_PREVIOUS:-}
+      TYPETORCH_PUBLIC_URL: ${TYPETORCH_PUBLIC_URL:-}
+      # Coolify's proxy is one hop in front: client addresses come from X-Forwarded-For.
+      TYPETORCH_TRUST_PROXY: ${TYPETORCH_TRUST_PROXY:-1}
+      TYPETORCH_ADMIN_ALLOW_IPS: ${TYPETORCH_ADMIN_ALLOW_IPS:-}
+      TYPETORCH_TOKEN_LOGIN: ${TYPETORCH_TOKEN_LOGIN:-on}
+      ROBLOX_OAUTH_CLIENT_ID: ${ROBLOX_OAUTH_CLIENT_ID:-}
+      ROBLOX_OAUTH_CLIENT_SECRET: ${ROBLOX_OAUTH_CLIENT_SECRET:-}
+      ROBLOX_WEBHOOK_SECRET: ${ROBLOX_WEBHOOK_SECRET:-}
+      OPENCLOUD_API_KEY: ${OPENCLOUD_API_KEY:-}
+      TYPETORCH_UNIVERSE_ID: ${TYPETORCH_UNIVERSE_ID:-}
+      TYPETORCH_ALERT_WEBHOOK_URL: ${TYPETORCH_ALERT_WEBHOOK_URL:-}
+      # Advanced (defaults suit a 1 GB machine).
+      TYPETORCH_MEMORY_LIMIT: ${TYPETORCH_MEMORY_LIMIT:-400MB}
+      TYPETORCH_THREADS: ${TYPETORCH_THREADS:-2}
+    volumes:
+      - typetorch-data:/data
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  typetorch-data:

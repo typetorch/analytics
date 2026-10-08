@@ -1,0 +1,23 @@
+# Keep the build context small and secret-free: the image is built from src/, basin/, web/ and the two package files.
+.git
+.gitattributes
+.gitignore
+.scratch
+node_modules
+web/node_modules
+dist
+web/dist
+data
+.loadtest
+*.log
+*.tsbuildinfo
+**/.env
+**/.env.*
+**/*.env
+CHANGELOG.md
+web/CHANGELOG.md
+test
+scripts
+server
+compose*.yaml
+README.md

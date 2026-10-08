@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@typetorch/analytics",
+      "name": "@typetorch/backend",
       "dependencies": {
         "@duckdb/node-api": "^1.5.6-r.1",
       },

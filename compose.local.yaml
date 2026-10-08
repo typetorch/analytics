@@ -1,0 +1,7 @@
+# Local use only: publishes the backend on this machine's loopback.
+#   docker compose -f compose.yaml -f compose.local.yaml up --build
+# Needs TYPETORCH_API_KEY and TYPETORCH_ADMIN_TOKEN in the shell or in a .env next to this file (never commit it).
+services:
+  backend:
+    ports:
+      - "127.0.0.1:${TYPETORCH_HOST_PORT:-8787}:8787"
