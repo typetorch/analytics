@@ -16,11 +16,12 @@ const port = 18000 + Math.floor(Math.random() * 1000);
 const base = `http://127.0.0.1:${port}`;
 const env = {
 	...process.env,
-	TT_ANALYTICS_DATA: dir,
-	TT_ANALYTICS_PORT: String(port),
-	TT_ANALYTICS_INGEST_TOKENS: INGEST,
-	TT_ANALYTICS_ADMIN_TOKEN: ADMIN,
-	TT_ANALYTICS_LOAD_SECONDS: "0.5",
+	TYPETORCH_DATA_DIR: dir,
+	PORT: String(port),
+	TYPETORCH_API_KEY: INGEST,
+	TYPETORCH_ADMIN_TOKEN: ADMIN,
+	TYPETORCH_LOAD_SECONDS: "0.5",
+	TYPETORCH_EXPLORER: "off",
 };
 const child = spawn(process.execPath, [join(root, "dist", "server", "main.js")], { env, stdio: ["ignore", "pipe", "pipe"] });
 let output = "";

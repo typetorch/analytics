@@ -1,18 +1,21 @@
 {
-	"name": "@typetorch/analytics",
+	"name": "@typetorch/backend",
 	"version": "0.1.0",
-	"description": "TypeTorch analytics, read side: the shared event types, Basin and DuckDB storage adapters, the logical queries (retention, funnels, flow graphs, experiments, first-session signals) and a small DuckDB analytics server for a 1 GB VPS.",
+	"description": "The TypeTorch backend: one server for game fleet status, analytics (DuckDB / Basin), error logs, an event bus and the web explorer. Two keys (a game API key and an admin token), Sign in with Roblox for owners, one Docker image for Coolify.",
 	"license": "MIT",
 	"private": true,
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/typetorch/analytics.git"
+		"url": "git+https://github.com/typetorch/backend.git"
 	},
 	"keywords": [
 		"roblox",
 		"roblox-ts",
 		"typetorch",
+		"backend",
 		"analytics",
+		"fleet",
+		"error-logs",
 		"duckdb",
 		"cloudflare",
 		"basin",
@@ -20,7 +23,7 @@
 	],
 	"type": "module",
 	"bin": {
-		"typetorch-analytics-server": "dist/server/main.js"
+		"typetorch-backend": "dist/server/main.js"
 	},
 	"exports": {
 		".": {
@@ -43,13 +46,17 @@
 		"server": "bun src/server/main.ts",
 		"build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
 		"test": "bun test",
+		"test:all": "bun test && cd web && bun run test",
 		"typecheck": "tsc --noEmit",
 		"basin:schemas": "bun scripts/gen-basin-schemas.ts",
 		"loadtest": "bun scripts/loadtest.ts",
 		"smoke": "node scripts/smoke.mjs",
 		"bench:nightly": "bun scripts/nightly-bench.ts",
 		"report": "bun scripts/report.ts",
-		"local": "bun scripts/local.ts"
+		"local": "bun scripts/local.ts",
+		"web:install": "cd web && bun install --frozen-lockfile",
+		"web:build": "cd web && bun run build",
+		"web:dev": "cd web && bun run dev"
 	},
 	"dependencies": {
 		"@duckdb/node-api": "^1.5.6-r.1"

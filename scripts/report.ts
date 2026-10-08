@@ -1,15 +1,15 @@
 /**
- * A quick look at your analytics in the terminal: `bun scripts/report.ts --env-file <server env file> [--pid <pid>]`
- * (also `bun run report -- --env-file ...`).
+ * A quick look at your analytics in the terminal: `bun run report -- --game <game repo> [--url <backend url>] [--pid <pid>]`.
  *
- * Asks the running analytics server (host/port and admin token from the same env file the server uses) for the main
+ * Asks the running backend (default http://127.0.0.1:8787, the admin token from the game repo's .env) for the main
  * queries and prints them: overview, Roblox-style numbers, top events, the onboarding funnel, experiments, live
  * servers, and one player's timeline and node graph (Mermaid). Without `--pid` it picks the player seen last in the
- * server's raw archive. Prints no tokens.
+ * backend's raw archive (`--data <dir>`, default ./data). Prints no tokens.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { readGameEnv } from "../src/game-env.ts";
 import { Graph } from "../src/graph.ts";
 
 const args = process.argv.slice(2);
@@ -17,21 +17,14 @@ const flag = (name: string) => {
 	const i = args.indexOf(name);
 	return i >= 0 ? args[i + 1] : undefined;
 };
-const envFile = flag("--env-file");
-if (!envFile) {
-	console.error("usage: bun scripts/report.ts --env-file <server env file> [--pid <pid>]");
+const gameDir = flag("--game");
+const token = process.env.TYPETORCH_ADMIN_TOKEN || (gameDir ? readGameEnv(gameDir).values.TYPETORCH_ADMIN_TOKEN : undefined);
+if (!token) {
+	console.error("usage: bun run report -- --game <game repo> [--url <backend url>] [--pid <pid>]");
+	console.error("The admin token comes from TYPETORCH_ADMIN_TOKEN in the game repo's .env (or the environment).");
 	process.exit(2);
 }
-
-const env = new Map<string, string>();
-for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
-	if (line.trimStart().startsWith("#")) continue;
-	const eq = line.indexOf("=");
-	if (eq > 0) env.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim().replace(/^"(.*)"$/, "$1"));
-}
-const base = `http://${env.get("TT_ANALYTICS_HOST") ?? "127.0.0.1"}:${env.get("TT_ANALYTICS_PORT") ?? "8787"}`;
-const token = env.get("TT_ANALYTICS_ADMIN_TOKEN");
-if (!token) throw new Error(`TT_ANALYTICS_ADMIN_TOKEN is missing from ${envFile}`);
+const base = (flag("--url") ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
 const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
 
 async function query(name: string, options: Record<string, unknown> = {}): Promise<any> {
@@ -43,7 +36,7 @@ async function query(name: string, options: Record<string, unknown> = {}): Promi
 
 /** The pid seen last in the raw archive (newest file first). */
 function lastPid(): string | undefined {
-	const archive = join(resolve(env.get("TT_ANALYTICS_DATA") ?? "data"), "raw", "archive");
+	const archive = join(resolve(flag("--data") ?? "data"), "raw", "archive");
 	if (!existsSync(archive)) return undefined;
 	const files = readdirSync(archive)
 		.sort()
