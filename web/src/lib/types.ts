@@ -380,6 +380,19 @@ export interface FleetServer {
 	experiment: boolean | null;
 	placeId?: number | null;
 	serverVersion?: number | null;
+	/** Kernel 0.4.0: the heartbeat's budget summary `bu` (requests per minute next to Roblox's limits; fleet API only). */
+	budget?: ServerBudget | null;
+}
+
+/** Kernel 0.4.0 `bu`: ds DataStore (r read, w write, lr/lw limits, br/bw budget left), ms MemoryStore units, h HTTP, mg MessagingService, by per caller, mem MB. */
+export interface ServerBudget {
+	p?: number;
+	ds?: { r?: number; w?: number; l?: number; x?: number; lr?: number; lw?: number; br?: number; bw?: number };
+	ms?: { u?: number; l?: number };
+	h?: { r?: number; l?: number };
+	mg?: { p?: number; lp?: number; s?: number; ls?: number };
+	by?: Partial<Record<"k" | "d" | "a" | "g" | "f", number>>;
+	mem?: { t?: number; h?: number };
 }
 
 export interface FleetServers {

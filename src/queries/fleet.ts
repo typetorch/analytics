@@ -67,6 +67,11 @@ export interface ServerInfo {
 	lastError: string | null;
 	/** The status format version (`sv`, 2 since kernel 0.3.2). */
 	serverVersion: number | null;
+	/**
+	 * Kernel 0.4.0 (problem 25): the heartbeat's budget summary `bu` (requests per minute next to Roblox's limits; see
+	 * parseBudget in fleet/service.ts). Fleet API only; null when the server sent none.
+	 */
+	budget?: Record<string, unknown> | null;
 }
 
 /** Unix seconds or ms -> ms (the kernel sends seconds). */

@@ -7,7 +7,7 @@ import { createFleetClient, FleetApiError } from "../src/fleet/client.ts";
 import { openSqlite } from "../src/fleet/db.ts";
 import { FLEET_NEW_JOBS_PER_MINUTE, handleFleet, NewJobLimiter } from "../src/fleet/http.ts";
 import { alertText, createNotifier, detectFormat, webhookBody } from "../src/fleet/notify.ts";
-import { FleetService, type FleetEvent } from "../src/fleet/service.ts";
+import { FleetService, parseBudget, type FleetEvent } from "../src/fleet/service.ts";
 import { startApp, type App } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 
@@ -370,5 +370,49 @@ describe("notifier and storage units", () => {
 		await service.heartbeat({ j: "a", b: "prod", q: 1 });
 		expect((await service.servers()).servers.length).toBe(1);
 		await service.close();
+	});
+});
+
+describe("budget summary (kernel 0.4.0 heartbeat bu)", () => {
+	const T1 = Date.UTC(2026, 9, 9, 12, 0, 0);
+	const bu = { p: 4, ds: { r: 3, w: 1, l: 0, x: 0, lr: 220, lw: 220, br: 900 }, ms: { u: 2, l: 480 }, h: { r: 5, l: 500 }, mg: { p: 0, lp: 1560, s: 3, ls: 240 }, by: { k: 9, a: 4 }, mem: { t: 812.5, h: 120.3 } };
+
+	test("parseBudget keeps a small object of numbers, ignores anything else", () => {
+		expect(parseBudget(bu)).toBe(JSON.stringify(bu));
+		expect(parseBudget(undefined)).toBeNull();
+		expect(parseBudget("x")).toBeNull();
+		expect(parseBudget({ ds: { r: "3" } })).toBeNull();
+		expect(parseBudget({ a: { b: { c: 1 } } })).toBeNull(); // one level of nesting only
+		expect(parseBudget({ "bad key!": 1 })).toBeNull();
+		expect(parseBudget({ x: Number.POSITIVE_INFINITY })).toBeNull();
+		const big: Record<string, Record<string, number>> = {};
+		for (let i = 0; i < 16; i++) {
+			const inner: Record<string, number> = {};
+			for (let j = 0; j < 16; j++) inner[`k${j}`] = 123456.789;
+			big[`g${i}`] = inner;
+		}
+		expect(parseBudget(big)).toBeNull(); // over BUDGET_MAX characters
+	});
+
+	test("stored per server and returned on the server row; a bad bu never refuses the heartbeat", async () => {
+		const service = await FleetService.open({ db: await openSqlite(":memory:"), clock: () => T1 });
+		await service.heartbeat({ j: "job-bu", t: "public", b: "prod", n: 4, m: 10, s: 1791547000, u: 1791547200, p: 1, v: "0.4.0", q: 5, g: 1, h: "ok", sv: 2, bu });
+		let { servers } = await service.servers({});
+		expect(servers[0].budget).toEqual(bu);
+		await service.heartbeat({ j: "job-bu", t: "public", b: "prod", n: 4, m: 10, s: 1791547000, u: 1791547230, p: 1, v: "0.3.9", q: 5, g: 1, h: "ok", sv: 2, bu: { evil: "x" } });
+		({ servers } = await service.servers({}));
+		expect(servers[0].budget).toBeNull();
+		expect(servers[0].kernel).toBe("0.3.9");
+	});
+
+	test("a fleet file made before the budget column gets it on open", async () => {
+		const db = await openSqlite(":memory:");
+		await db.exec(
+			"CREATE TABLE servers (job TEXT PRIMARY KEY, server_type TEXT, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER, last_write INTEGER, place_id INTEGER, experiment INTEGER, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT, last_error TEXT, server_version INTEGER, sent_at INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);",
+		);
+		const service = await FleetService.open({ db, clock: () => T1 });
+		await service.heartbeat({ j: "job-old", t: "public", b: "prod", n: 1, m: 10, s: 1791547000, u: 1791547200, p: 1, v: "0.4.0", q: 1, g: 1, h: "ok", sv: 2, bu });
+		const { servers } = await service.servers({});
+		expect(servers[0].budget).toEqual(bu);
 	});
 });

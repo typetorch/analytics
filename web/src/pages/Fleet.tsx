@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { api } from "@/lib/api";
 import { fmtAgo, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
-import type { FleetAlert, FleetReports, FleetServers } from "@/lib/types";
+import type { FleetAlert, FleetReports, FleetServers, ServerBudget } from "@/lib/types";
 
 type StreamState = "connecting" | "live" | "retrying";
 
@@ -78,6 +78,30 @@ function useFleetStream(branch: string): { state: StreamState; log: LiveEvent[] 
 	return { state, log };
 }
 
+/** Kernel 0.4.0 heartbeat `bu`, one short line: TypeTorch's DataStore reads and HTTP requests a minute against the limits, memory. */
+export function budgetText(b: ServerBudget | null | undefined): string {
+	if (!b) return "–";
+	const parts: string[] = [];
+	if (b.ds) parts.push(`DS ${b.ds.r ?? 0}/${b.ds.lr ?? "?"}`);
+	if (b.h) parts.push(`HTTP ${b.h.r ?? 0}/${b.h.l ?? "?"}`);
+	if (b.mem?.t !== undefined) parts.push(`${Math.round(b.mem.t)} MB`);
+	return parts.length ? parts.join(" · ") : "–";
+}
+
+const CALLERS: Record<string, string> = { k: "kernel", d: "devtools", a: "analytics", g: "game", f: "framework" };
+
+/** The full summary for the cell's tooltip. */
+export function budgetTitle(b: ServerBudget | null | undefined): string | undefined {
+	if (!b) return undefined;
+	const lines = [
+		`DataStore a minute: read ${b.ds?.r ?? 0}/${b.ds?.lr ?? "?"}, write ${b.ds?.w ?? 0}/${b.ds?.lw ?? "?"}${b.ds?.br !== undefined ? `, budget left ${b.ds.br} read / ${b.ds.bw ?? "?"} write` : ""}`,
+		`MemoryStore units ${b.ms?.u ?? 0}/${b.ms?.l ?? "?"}, HTTP ${b.h?.r ?? 0}/${b.h?.l ?? "?"}, publishes ${b.mg?.p ?? 0}/${b.mg?.lp ?? "?"}`,
+		`by ${Object.entries(b.by ?? {}).map(([k, v]) => `${CALLERS[k] ?? k} ${v}`).join(", ") || "-"}`,
+	];
+	if (b.mem) lines.push(`memory ${b.mem.t ?? "?"} MB, LuaHeap ${b.mem.h ?? "?"} MB`);
+	return lines.join(" | ");
+}
+
 function Servers({ data }: { data: FleetServers }) {
 	if (!data.servers.length)
 		return <EmptyState>No live servers (a server shows up within 30 s of its first heartbeat, and leaves 90 s after its last).</EmptyState>;
@@ -93,6 +117,7 @@ function Servers({ data }: { data: FleetServers }) {
 					<TableHead className="text-right">Players</TableHead>
 					<TableHead>Health</TableHead>
 					<TableHead>Kernel</TableHead>
+					<TableHead>Budget</TableHead>
 					<TableHead>Up since</TableHead>
 					<TableHead>Seen</TableHead>
 				</TableRow>
@@ -116,6 +141,9 @@ function Servers({ data }: { data: FleetServers }) {
 							<Status tone={HEALTH_TONE[s.health ?? ""]}>{s.health ?? "unknown"}</Status>
 						</TableCell>
 						<TableCell className="text-xs">{s.kernel ?? "–"}</TableCell>
+						<TableCell className="font-mono text-xs" title={budgetTitle(s.budget)}>
+							{budgetText(s.budget)}
+						</TableCell>
 						<TableCell className="text-xs">{fmtAgo(s.startedAt)}</TableCell>
 						<TableCell className="text-xs">{s.ageSeconds !== undefined ? `${s.ageSeconds}s ago` : fmtAgo(s.lastSeen)}</TableCell>
 					</TableRow>

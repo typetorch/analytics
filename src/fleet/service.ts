@@ -164,6 +164,8 @@ export interface ParsedHeartbeat {
 	lastError: string | null;
 	serverVersion: number | null;
 	sentAt: number | null;
+	/** Kernel 0.4.0: the budget summary (`bu`) as JSON text, or null (missing or not a small object of numbers). */
+	budget: string | null;
 }
 
 export interface ParsedReport {
@@ -223,7 +225,45 @@ export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedH
 		lastError: text(b, "e", 500),
 		serverVersion: loose(b, "sv"),
 		sentAt: typeof b.t === "number" ? toMs(int(b, "t")) : null,
+		budget: parseBudget(b.bu),
 	};
+}
+
+/** The longest budget summary kept (JSON characters). */
+export const BUDGET_MAX = 1024;
+const BUDGET_KEY = /^[A-Za-z0-9_]{1,16}$/;
+
+/**
+ * Kernel 0.4.0 (problem 25): the heartbeat's `bu`, the server's requests per minute next to Roblox's limits:
+ * { p, ds: { r, w, l, x, lr, lw, br?, bw? }, ms: { u, l }, h: { r, l }, mg: { p, lp, s, ls }, by: { k, d, a, g, f },
+ * mem: { t?, h? } }. Kept as JSON text when it is an object of finite numbers (one level of nested objects), short keys,
+ * at most BUDGET_MAX characters; anything else is ignored (null), never a reason to refuse the heartbeat.
+ */
+export function parseBudget(value: unknown): string | null {
+	const clean = (input: unknown, depth: number): Record<string, unknown> | null => {
+		if (typeof input !== "object" || input === null || Array.isArray(input)) return null;
+		const entries = Object.entries(input as Record<string, unknown>);
+		if (entries.length > 16) return null;
+		const out: Record<string, unknown> = {};
+		for (const [key, inner] of entries) {
+			if (!BUDGET_KEY.test(key)) return null;
+			if (typeof inner === "number") {
+				if (!Number.isFinite(inner) || Math.abs(inner) > 1e12) return null;
+				out[key] = inner;
+			} else if (depth === 0 && typeof inner === "object" && inner !== null) {
+				const nested = clean(inner, 1);
+				if (!nested) return null;
+				out[key] = nested;
+			} else if (inner !== null && inner !== undefined) {
+				return null;
+			}
+		}
+		return out;
+	};
+	const budget = clean(value, 0);
+	if (!budget) return null;
+	const text = JSON.stringify(budget);
+	return text.length <= BUDGET_MAX ? text : null;
 }
 
 /** The server is shutting down: the heartbeat body plus `closing = true` (BindToClose); `{ j, t }` alone works too. */
@@ -315,6 +355,7 @@ interface ServerRow {
 	health: string | null;
 	last_error: string | null;
 	server_version: number | null;
+	budget: string | null;
 	first_seen: number;
 	last_seen: number;
 	closed_at: number | null;
@@ -323,7 +364,7 @@ interface ServerRow {
 
 /** Columns read for servers. The access code is not among them because it is never stored. */
 const SERVER_COLUMNS =
-	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, first_seen, last_seen, closed_at, lost_at";
+	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, first_seen, last_seen, closed_at, lost_at";
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
 
@@ -348,7 +389,19 @@ function serverInfo(r: ServerRow, now: number): ServerInfo {
 		health: r.health,
 		lastError: r.last_error,
 		serverVersion: r.server_version,
+		budget: budgetOf(r.budget),
 	};
+}
+
+/** The stored budget summary (JSON text) as an object, or null. */
+function budgetOf(text: string | null | undefined): Record<string, unknown> | null {
+	if (!text) return null;
+	try {
+		const value = JSON.parse(text);
+		return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+	} catch {
+		return null;
+	}
 }
 
 interface AlertRow {
@@ -408,7 +461,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS servers (
 	job TEXT PRIMARY KEY, server_type TEXT, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER,
 	last_write INTEGER, place_id INTEGER, experiment INTEGER, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT,
-	last_error TEXT, server_version INTEGER, sent_at INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+	last_error TEXT, server_version INTEGER, sent_at INTEGER, budget TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
 	closed_at INTEGER, lost_at INTEGER);
 CREATE INDEX IF NOT EXISTS servers_branch ON servers (branch, last_seen);
 CREATE INDEX IF NOT EXISTS servers_seen ON servers (last_seen);
@@ -452,6 +505,9 @@ export class FleetService {
 	static async open(options: FleetServiceOptions): Promise<FleetService> {
 		const service = new FleetService(options);
 		await options.db.exec(SCHEMA);
+		// Kernel 0.4.0: the budget summary column, added to files made before it.
+		const columns = await options.db.all<{ name: string }>("PRAGMA table_info(servers)");
+		if (!columns.some((c) => c.name === "budget")) await options.db.exec("ALTER TABLE servers ADD COLUMN budget TEXT");
 		return service;
 	}
 
@@ -491,16 +547,16 @@ export class FleetService {
 
 	async applyHeartbeat(p: ParsedHeartbeat): Promise<void> {
 		const now = this.clock();
-		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, now, now];
+		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, now, now];
 		const job = p.job;
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
 		await this.db.run(
-			`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, first_seen, last_seen) ` +
-				`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
+			`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, first_seen, last_seen) ` +
+				`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
 				`artifact = excluded.artifact, players = excluded.players, max_players = excluded.max_players, started_at = excluded.started_at, ` +
 				`last_write = excluded.last_write, place_id = excluded.place_id, experiment = excluded.experiment, kernel = excluded.kernel, ` +
 				`applied_seq = excluded.applied_seq, generation = excluded.generation, health = excluded.health, last_error = excluded.last_error, ` +
-				`server_version = excluded.server_version, sent_at = excluded.sent_at, last_seen = excluded.last_seen, closed_at = NULL, lost_at = NULL`,
+				`server_version = excluded.server_version, sent_at = excluded.sent_at, budget = excluded.budget, last_seen = excluded.last_seen, closed_at = NULL, lost_at = NULL`,
 			row,
 		);
 		if (!this.listeners.size) return;
