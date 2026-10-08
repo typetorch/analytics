@@ -2,7 +2,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { ERROR_LIMITS, ErrorInputError, parseErrorBatch } from "../src/errors/parse.ts";
-import { chooseBucket, spreadCount } from "../src/errors/store.ts";
+import { chooseBucket, ErrorQueueFull, ErrorStore, spreadCount } from "../src/errors/store.ts";
+import { openSqlite } from "../src/fleet/db.ts";
 import { ADMIN, API, T0, asJson, bearer, harness, json, post, type Harness } from "./harness.ts";
 
 const MIN = 60_000;
@@ -26,18 +27,26 @@ describe("parseErrorBatch", () => {
 		expect(b).toMatchObject({ job: "job-1", rejected: 0, total: 3 });
 		expect(b.items[0]).toMatchObject({ fp: "fp-boom", firstAt: T0 - MIN, lastAt: T0, realm: "server", branch: "prod", build: "a1b2c3d-000042", pids: ["p1", "p2"] });
 		expect(b.items[0]).not.toHaveProperty("extra");
-		expect(parseErrorBatch([item()], T0).items.length).toBe(1);
-		expect(parseErrorBatch({ errors: [] }, T0)).toMatchObject({ job: null, items: [], total: 0 });
-		const minimal = parseErrorBatch({ errors: [{ fp: "a", template: "t", count: 1, firstAt: T0, lastAt: T0, realm: "client" }] }, T0).items[0];
+		// The bare array works with the JobId in the X-TT-Job header.
+		expect(parseErrorBatch([item()], T0, "job-h")).toMatchObject({ job: "job-h" });
+		expect(parseErrorBatch({ j: "job-1", errors: [] }, T0)).toMatchObject({ job: "job-1", items: [], total: 0 });
+		const minimal = parseErrorBatch({ j: "job-1", errors: [{ fp: "a", template: "t", count: 1, firstAt: T0, lastAt: T0, realm: "client" }] }, T0).items[0];
 		expect(minimal).toMatchObject({ stack: null, branch: null, build: null, pids: [] });
 	});
 
 	test("the body itself must have the right shape (400)", () => {
-		for (const bad of [null, "text", 5, {}, { errors: {} }, { errors: "x" }, { j: 5, errors: [] }, { j: "x".repeat(65), errors: [] }]) {
+		for (const bad of [null, "text", 5, {}, { j: "job-1", errors: {} }, { j: "job-1", errors: "x" }, { j: 5, errors: [] }, { j: "x".repeat(65), errors: [] }, { j: "line" + String.fromCharCode(10) + "break", errors: [] }]) {
 			expect(() => parseErrorBatch(bad, T0)).toThrow(ErrorInputError);
 		}
-		expect(() => parseErrorBatch({ errors: new Array(ERROR_LIMITS.items + 1).fill(item()) }, T0)).toThrow("at most 200");
-		expect(parseErrorBatch({ errors: new Array(ERROR_LIMITS.items).fill(item()) }, T0).items.length).toBe(200);
+		expect(() => parseErrorBatch({ j: "job-1", errors: new Array(ERROR_LIMITS.items + 1).fill(item()) }, T0)).toThrow("at most 200");
+		expect(parseErrorBatch({ j: "job-1", errors: new Array(ERROR_LIMITS.items).fill(item()) }, T0).items.length).toBe(200);
+	});
+
+	test("j (the JobId) is required: in the body or the X-TT-Job header", () => {
+		for (const body of [{ errors: [] }, { j: "", errors: [] }, { j: null, errors: [] }, [item()]]) expect(() => parseErrorBatch(body, T0)).toThrow("j (the JobId) is required");
+		expect(parseErrorBatch({ errors: [] }, T0, "job-header").job).toBe("job-header");
+		expect(parseErrorBatch({ j: "job-body", errors: [] }, T0, "job-header").job).toBe("job-body");
+		expect(() => parseErrorBatch({ errors: [] }, T0, "x".repeat(65))).toThrow(ErrorInputError);
 	});
 
 	test("bad items are dropped and counted, with the first few reasons", () => {
@@ -64,17 +73,17 @@ describe("parseErrorBatch", () => {
 			"not an object",
 			null,
 		];
-		const b = parseErrorBatch({ errors: [...bad, item()] }, T0);
+		const b = parseErrorBatch({ j: "job-1", errors: [...bad, item()] }, T0);
 		expect(b.items.length).toBe(1);
 		expect(b.rejected).toBe(bad.length);
 		expect(b.errors.length).toBe(5);
 		expect(b.errors[0]).toContain("errors[0]");
 	});
 
-	test("limits of the pid list: at most 50, bad ids dropped", () => {
+	test("limits of the pid list: at most 10 (more are ignored), bad ids dropped", () => {
 		const pids = [...Array.from({ length: 70 }, (_, i) => `p${i}`), "bad id", "x".repeat(65), 5];
-		const out = parseErrorBatch({ errors: [item({ pids })] }, T0).items[0]?.pids as string[];
-		expect(out.length).toBe(50);
+		const out = parseErrorBatch({ j: "job-1", errors: [item({ pids })] }, T0).items[0]?.pids as string[];
+		expect(out.length).toBe(10);
 		expect(out.every((p) => /^[A-Za-z0-9_-]{1,64}$/.test(p))).toBe(true);
 	});
 
@@ -86,8 +95,10 @@ describe("parseErrorBatch", () => {
 			{ minute: Math.floor(T0 / MIN) - 1, n: 2 },
 			{ minute: Math.floor(T0 / MIN), n: 4 },
 		]);
-		// Longer than an hour: all in the last minute.
+		// Longer than 10 minutes: all in the last minute (one item is at most 11 count rows).
 		expect(spreadCount(10, T0 - 3 * 3_600_000, T0)).toEqual([{ minute: Math.floor(T0 / MIN), n: 10 }]);
+		expect(spreadCount(10, T0 - 11 * MIN, T0)).toEqual([{ minute: Math.floor(T0 / MIN), n: 10 }]);
+		expect(spreadCount(100, T0 - 10 * MIN, T0).length).toBe(11);
 		expect(spreadCount(2, T0 - 3 * MIN, T0).reduce((s, x) => s + x.n, 0)).toBe(2);
 		expect(chooseBucket(3_600_000)).toBe(60);
 		expect(chooseBucket(24 * 3_600_000)).toBe(1800);
@@ -108,31 +119,39 @@ describe("POST /v1/errors", () => {
 		const ok = await h.call("/v1/errors", post(API, { v: 1, j: "job-e1", errors: [item(), item({ fp: "fp-other", template: "other <player.user_id>", count: 1, pids: [] })] }));
 		expect(ok.status).toBe(202);
 		expect(await asJson(ok)).toEqual({ accepted: 2, rejected: 0 });
-		expect((await h.call("/v1/errors", post(ADMIN, { errors: [] }))).status).toBe(401);
-		expect((await h.call("/v1/errors", post(undefined, { errors: [] }))).status).toBe(401);
-		expect((await h.call("/v1/errors", { method: "PUT", ...json({ errors: [] }), headers: { ...bearer(API) } })).status).toBe(401);
+		expect((await h.call("/v1/errors", post(ADMIN, { j: "job-e1", errors: [] }))).status).toBe(401);
+		expect((await h.call("/v1/errors", post(undefined, { j: "job-e1", errors: [] }))).status).toBe(401);
+		expect((await h.call("/v1/errors", { method: "PUT", ...json({ j: "job-e1", errors: [] }), headers: { ...bearer(API) } })).status).toBe(401);
+		// No JobId: 400.
+		const none = await h.call("/v1/errors", post(API, { errors: [item()] }));
+		expect(none.status).toBe(400);
+		expect((await asJson(none)).error).toContain("j (the JobId) is required");
 	});
 
 	test("strict sizes like /v1/ingest: shape 400, body 413, inflated 413, bad rows counted", async () => {
-		expect((await h.call("/v1/errors", post(API, { errors: "nope" }))).status).toBe(400);
+		expect((await h.call("/v1/errors", post(API, { j: "job-s", errors: "nope" }))).status).toBe(400);
 		expect((await h.call("/v1/errors", { method: "POST", body: "{nope", headers: bearer(API) })).status).toBe(400);
 		expect((await h.call("/v1/errors", { method: "POST", body: new Uint8Array([0x1f, 0x8b, 1, 2, 3]), headers: { ...bearer(API), "content-encoding": "gzip" } })).status).toBe(400);
 		expect((await h.call("/v1/errors", { method: "POST", body: new Uint8Array(600 * 1024), headers: bearer(API) })).status).toBe(413);
 		const bomb = gzipSync(Buffer.alloc(5 * 1024 * 1024, 32));
 		expect((await h.call("/v1/errors", { method: "POST", body: bomb, headers: { ...bearer(API), "content-encoding": "gzip" } })).status).toBe(413);
-		expect((await h.call("/v1/errors", post(API, { errors: new Array(201).fill(item()) }))).status).toBe(400);
-		const mixed = await h.call("/v1/errors", post(API, { errors: [item({ fp: "fp-mixed" }), item({ count: -1 }), item({ realm: "x" })] }));
+		expect((await h.call("/v1/errors", post(API, { j: "job-s", errors: new Array(201).fill(item()) }))).status).toBe(400);
+		const mixed = await h.call("/v1/errors", post(API, { j: "job-s", errors: [item({ fp: "fp-mixed" }), item({ count: -1 }), item({ realm: "x" })] }));
 		expect(mixed.status).toBe(202);
 		expect(await asJson(mixed)).toMatchObject({ accepted: 1, rejected: 2 });
-		const gz = await h.call("/v1/errors", { method: "POST", body: gzipSync(Buffer.from(JSON.stringify({ errors: [item({ fp: "fp-gz" })] }))), headers: { ...bearer(API), "content-encoding": "gzip" } });
+		const gz = await h.call("/v1/errors", { method: "POST", body: gzipSync(Buffer.from(JSON.stringify({ j: "job-s", errors: [item({ fp: "fp-gz" })] }))), headers: { ...bearer(API), "content-encoding": "gzip" } });
 		expect(gz.status).toBe(202);
 	});
 
-	test("rate limit per JobId", async () => {
-		let limited = 0;
-		for (let i = 0; i < 40; i++) if ((await h.call("/v1/errors", post(API, { j: "job-flood", errors: [] }))).status === 429) limited++;
-		expect(limited).toBeGreaterThan(0);
+	test("rate limit per JobId: 30 a minute pass, the 31st is 429", async () => {
+		const codes: number[] = [];
+		for (let i = 0; i < 31; i++) codes.push((await h.call("/v1/errors", post(API, { j: "job-flood", errors: [] }))).status);
+		expect(codes.slice(0, 30).every((c) => c === 202)).toBe(true);
+		expect(codes[30]).toBe(429);
 		expect((await h.call("/v1/errors", post(API, { j: "job-other", errors: [] }))).status).toBe(202);
+		// The JobId may come in the X-TT-Job header (then the bare array works).
+		const viaHeader = await h.call("/v1/errors", { method: "POST", body: JSON.stringify([item({ fp: "fp-hdr" })]), headers: { ...bearer(API), "x-tt-job": "job-hdr" } });
+		expect(viaHeader.status).toBe(202);
 	});
 });
 
@@ -344,5 +363,156 @@ describe("GET /v1/live", () => {
 		await Bun.sleep(50);
 		await h.call("/v1/errors", post(API, { j: "job-net", errors: [item({ fp: "fp-net" })] }));
 		expect((await got).some((e) => e.event === "error" && e.data.kinds[0].fp === "fp-net")).toBe(true);
+	});
+});
+
+describe("POST /v1/errors under a flood (one API key holder)", () => {
+	const items = (n: number, over: (i: number) => Record<string, unknown> = () => ({})) => Array.from({ length: n }, (_, i) => item({ fp: `fp-${i}`, ...over(i) }));
+	const send = (h: Harness, j: string, errors: unknown[], ip = "198.51.100.1") => h.call("/v1/errors", { ...post(API, { j, errors }), ip });
+
+	test("a limit per address, whatever JobIds are used", async () => {
+		const h = await harness({ TYPETORCH_ERRORS_IP_PER_MINUTE: "5" });
+		try {
+			const codes: number[] = [];
+			for (let i = 0; i < 6; i++) codes.push((await send(h, `job-ip-${i}`, [])).status);
+			expect(codes).toEqual([202, 202, 202, 202, 202, 429]);
+			expect((await send(h, "job-ip-x", [], "198.51.100.2")).status).toBe(202);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("never-seen JobIds per minute are capped; known ones keep going; the next minute lets new ones in", async () => {
+		const h = await harness({ TYPETORCH_NEW_JOBS_PER_MINUTE: "3" });
+		try {
+			for (let i = 0; i < 3; i++) expect((await send(h, `job-new-${i}`, [], `198.51.100.${i + 10}`)).status).toBe(202);
+			const refused = await send(h, "job-new-3", [], "198.51.100.20");
+			expect(refused.status).toBe(429);
+			expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+			expect((await send(h, "job-new-0", [], "198.51.100.10")).status).toBe(202);
+			h.setNow(T0 + 61_000);
+			expect((await send(h, "job-new-3", [], "198.51.100.20")).status).toBe(202);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("the kind table can not be filled from one sender in an hour: 50 new kinds per JobId, 200 per address", async () => {
+		const h = await harness();
+		try {
+			expect((await send(h, "job-k1", items(200))).status).toBe(202);
+			expect(h.app.errors.stats).toMatchObject({ kinds: 50, droppedQuota: 150 });
+			// Known kinds still count for that JobId (only new kinds are limited).
+			await send(h, "job-k1", items(50));
+			expect(h.app.errors.stats.droppedQuota).toBe(150);
+			// More JobIds from the same address: 200 new kinds an hour in all.
+			for (let j = 2; j <= 6; j++) await send(h, `job-k${j}`, items(50, (i) => ({ fp: `fp-${j}-${i}` })));
+			expect(h.app.errors.stats.kinds).toBe(200);
+			// Another address still adds kinds (a real game server elsewhere is not starved).
+			await send(h, "job-elsewhere", [item({ fp: "fp-real" })], "203.0.113.50");
+			expect(h.app.errors.stats.kinds).toBe(201);
+			// The next hour the sender may add more.
+			h.setNow(T0 + 3_600_000);
+			await send(h, "job-k1", items(10, (i) => ({ fp: `fp-later-${i}`, firstAt: T0 + 3_500_000, lastAt: T0 + 3_500_000 })));
+			expect(h.app.errors.stats.kinds).toBe(211);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("one item is bounded work: at most 11 count rows and 10 pids", async () => {
+		const h = await harness();
+		try {
+			const pids = Array.from({ length: 50 }, (_, i) => `p${i}`);
+			await send(h, "job-b", [item({ fp: "fp-wide", count: 600, firstAt: T0 - 60 * MIN, lastAt: T0 - MIN, pids }), item({ fp: "fp-ten", count: 11, firstAt: T0 - 11 * MIN, lastAt: T0 - MIN, pids: [] })]);
+			const d = await asJson(await h.call("/v1/errors/fp-wide?window=1h", { headers: bearer(ADMIN) }));
+			expect(d.series.filter((p: { n: number }) => p.n > 0).length).toBe(1);
+			expect(d.players).toBe(10);
+			const ten = await asJson(await h.call("/v1/errors/fp-ten?window=1h", { headers: bearer(ADMIN) }));
+			expect(ten.series.filter((p: { n: number }) => p.n > 0).length).toBe(11);
+			expect(h.app.errors.stats.rowsToday).toBe(1 + 10 + 11);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("a daily budget of new rows; drops are counted in /healthz; adding to rows that exist goes on", async () => {
+		const h = await harness({ TYPETORCH_ERROR_ROWS_PER_DAY: "1000" });
+		try {
+			// One kind, 200 items in different minutes, 10 new pids each: far more than 1,000 new rows.
+			const many = Array.from({ length: 200 }, (_, i) => item({ fp: "fp-budget", count: 1, firstAt: T0 - (i + 1) * MIN, lastAt: T0 - (i + 1) * MIN, pids: Array.from({ length: 10 }, (_, k) => `q${i}x${k}`) }));
+			expect((await send(h, "job-budget", many)).status).toBe(202);
+			const stats = h.app.errors.stats;
+			expect(stats.rowsToday).toBe(1000);
+			expect(stats.droppedRows).toBeGreaterThan(0);
+			const health = await asJson(await h.call("/healthz", { headers: bearer(ADMIN) }));
+			expect(health.errors).toMatchObject({ rowsToday: 1000, rowsPerDay: 1000 });
+			expect(health.errors.droppedRows).toBe(stats.droppedRows);
+			// A minute row that exists still counts up.
+			const before = (await asJson(await h.call("/v1/errors/fp-budget?window=1h", { headers: bearer(ADMIN) }))).count;
+			await send(h, "job-budget", [item({ fp: "fp-budget", count: 5, firstAt: T0 - MIN, lastAt: T0 - MIN, pids: [] })]);
+			expect((await asJson(await h.call("/v1/errors/fp-budget?window=1h", { headers: bearer(ADMIN) }))).count).toBe(before + 5);
+			// A new UTC day: a new budget.
+			h.setNow(T0 + 86_400_000);
+			await send(h, "job-budget", [item({ fp: "fp-budget", firstAt: T0 + 86_000_000, lastAt: T0 + 86_000_000 })]);
+			expect(h.app.errors.stats.rowsToday).toBeGreaterThan(0);
+			expect(h.app.errors.stats.rowsToday).toBeLessThan(20);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("the sample follows the newest report, so text sent first does not stick", async () => {
+		const h = await harness();
+		try {
+			await send(h, "job-evil", [item({ fp: "fp-real", template: "misleading text", stack: "fake:1", firstAt: T0 - 5 * MIN, lastAt: T0 - 5 * MIN })]);
+			await send(h, "job-real", [item({ fp: "fp-real", template: "the real message", stack: "real:42", firstAt: T0 - 2 * MIN, lastAt: T0 - 2 * MIN })]);
+			let d = await asJson(await h.call("/v1/errors/fp-real?window=1h", { headers: bearer(ADMIN) }));
+			expect(d.kind).toMatchObject({ template: "the real message", stack: "real:42", total: 6 });
+			// An older report does not replace a newer sample; an item without a stack keeps the stack.
+			await send(h, "job-evil", [item({ fp: "fp-real", template: "old misleading", stack: "fake:2", firstAt: T0 - 4 * MIN, lastAt: T0 - 4 * MIN })]);
+			await send(h, "job-real", [item({ fp: "fp-real", template: "the real message", stack: undefined, firstAt: T0 - MIN, lastAt: T0 - MIN })]);
+			d = await asJson(await h.call("/v1/errors/fp-real?window=1h", { headers: bearer(ADMIN) }));
+			expect(d.kind).toMatchObject({ template: "the real message", stack: "real:42" });
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("the store takes one batch at a time behind a bounded queue (full = 429), each batch quickly", async () => {
+		const db = await openSqlite(":memory:");
+		const store = await ErrorStore.open(db, { clock: () => T0, maxQueue: 2 });
+		const batch = (j: string) => parseErrorBatch({ j, errors: items(200, (i) => ({ fp: `fp-q-${j}-${i % 50}`, count: 100, firstAt: T0 - 10 * MIN, lastAt: T0, pids: Array.from({ length: 10 }, (_, k) => `p${i}-${k}`) })) }, T0);
+		const a = store.record(batch("a"), { ip: "1" });
+		const b = store.record(batch("b"), { ip: "2" });
+		expect(store.full).toBe(true);
+		await expect(store.record(batch("c"), { ip: "3" })).rejects.toBeInstanceOf(ErrorQueueFull);
+		expect(store.stats.refusedFull).toBe(1);
+		await Promise.all([a, b]);
+		expect(store.full).toBe(false);
+		// The worst-case batch (200 items x 11 minutes x 10 pids) is one transaction: well under a second.
+		const started = performance.now();
+		await store.record(batch("d"), { ip: "4" });
+		expect(performance.now() - started).toBeLessThan(1000);
+		await db.close();
+	});
+
+	test("a flood of worst-case batches leaves the event loop free for other work", async () => {
+		const h = await harness();
+		try {
+			const worst = (n: number) => items(200, (i) => ({ fp: `fp-f${n}-${i % 50}`, count: 100, firstAt: T0 - 10 * MIN, lastAt: T0, pids: Array.from({ length: 10 }, (_, k) => `p${n}-${i}-${k}`) }));
+			const started = performance.now();
+			const flood = Array.from({ length: 8 }, (_, n) => send(h, `job-f${n}`, worst(n), `198.51.100.${n + 100}`));
+			// A timer set now fires long before the flood is through (each batch yields to the event loop).
+			let fired = 0;
+			await new Promise<void>((done) => setTimeout(() => ((fired = performance.now()), done()), 0));
+			const statuses = (await Promise.all(flood)).map((r) => r.status);
+			const finished = performance.now();
+			expect(statuses.every((s) => s === 202)).toBe(true);
+			expect(fired).toBeLessThan(finished);
+			expect(fired - started).toBeLessThan((finished - started) / 2);
+		} finally {
+			await h.close();
+		}
 	});
 });
