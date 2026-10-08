@@ -12,16 +12,18 @@
  *    reuses one already answering on that port. It serves the explorer at the same address when `web/dist` is built;
  * 3. opens a quick tunnel (cloudflared, with an empty --config so a ~/.cloudflared/config.yml can't override --url);
  * 4. waits until the tunnel answers;
- * 5. points the game at it through the game's own TypeTorch CLI (0.8+, kernel 0.3.8's signed settings record):
- *    `typetorch fleet setup --url <tunnel>` (settings.fleet = {url, token}; also sets typetorch.json `fleet.url`, a
- *    local edit: the tunnel URL changes every run, don't commit it) and `typetorch settings set analytics -` (DuckDB
- *    ingest at <url>/v1/ingest). The CLI signs with the game's keys (`typetorch keys init`) and uses the game's Open
- *    Cloud key (DataStore read/create/update + messaging), then pings servers so they switch within seconds;
+ * 5. points the game at it through the game's own TypeTorch CLI (0.9+, the signed settings record):
+ *    `typetorch backend setup --url <tunnel> --flush-seconds 15 --record-share 1` (settings.backend = {url, key,
+ *    analytics}, plus the old fleet and analytics sections for kernels before 0.4; also sets typetorch.json
+ *    `backend.url`, a local edit: the tunnel URL changes every run, don't commit it). The keys reach the CLI through its
+ *    environment, never its command line. The CLI signs with the game's keys (`typetorch keys init`), uses the game's
+ *    Open Cloud key (DataStore read/create/update + messaging), pings servers so they switch within seconds, and sends
+ *    the owner list to the backend (PUT /v1/access);
  * 6. keeps running; Ctrl+C stops the tunnel and the server it started.
  *
- * The CLI checks the address and token before it signs (the URL parses and is https, GET <url>/healthz answers, the token
- * is accepted by GET /v1/auth/check as an ingest token) and refuses a broken value; step 5 then prints the CLI's reason
- * and fix in red, the tunnel keeps running, and the game keeps its old settings.
+ * The CLI checks the address and both keys before it signs (the URL parses and is https, GET <url>/healthz answers,
+ * GET /v1/auth/check says role game for the API key and role admin for the admin token) and refuses a broken value;
+ * step 5 then prints the CLI's reason and fix in red, the tunnel keeps running, and the game keeps its old settings.
  * `--port <n>` (default 8787), `--public-url <url>` (instead of localhost), `--no-settings` skips step 5, `--cli <entry>`
  * runs that CLI entry file instead of the game's node_modules/@typetorch/cli, `--cloudflared <path>`. Prints no tokens
  * or keys (the API key reaches the CLI through its environment).
@@ -31,7 +33,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { planLocalRun } from "../src/game-env.ts";
-import { writeFleetSettings, writeSettings } from "../src/settings.ts";
+import { writeBackendSettings } from "../src/settings.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => {
@@ -72,6 +74,7 @@ if (plan.problems.length) {
 for (const note of plan.notes) log(note);
 const local = `http://127.0.0.1:${port}`;
 const apiKey = plan.serverEnv.TYPETORCH_API_KEY as string;
+const adminToken = plan.serverEnv.TYPETORCH_ADMIN_TOKEN as string;
 
 async function answers(url: string): Promise<boolean> {
 	try {
@@ -153,13 +156,10 @@ if (writeGameSettings) {
 	} else {
 		const cli = { gameDir, ...(cliEntry ? { cli: [process.execPath, cliEntry] } : {}) };
 		try {
-			const fleet = await writeFleetSettings({ ...cli, url, ingestToken: apiKey });
-			log(`settings.fleet ${fleet.written ? "written" : "already set"}${fleet.seq !== undefined ? ` (settings #${fleet.seq})` : ""}; typetorch.json fleet.url = ${url} (local edit; don't commit it)`);
-			const analytics = await writeSettings({
-				...cli,
-				settings: { backend: "duckdb", events: `${url}/v1/ingest`, token: apiKey, flushSeconds: 15, recordShare: 1 },
-			});
-			log(`settings.analytics ${analytics.written ? "written" : "already set"}${analytics.seq !== undefined ? ` (settings #${analytics.seq})` : ""}`);
+			const backend = await writeBackendSettings({ ...cli, url, apiKey, adminToken, flushSeconds: 15, recordShare: 1 });
+			log(`settings.backend ${backend.written ? "written" : "already set"}${backend.seq !== undefined ? ` (settings #${backend.seq})` : ""}; typetorch.json backend.url = ${url} (local edit; don't commit it)`);
+			const owners = backend.owners as { state?: string; reason?: string; message?: string } | undefined;
+			if (owners?.state === "failed" || owners?.state === "conflict") log(yellow(`the backend's owner list wasn't updated (${owners.message ?? owners.state}): run typetorch access push in the game repo`));
 			pointed = true;
 		} catch (error) {
 			refusal = (error as Error).message;

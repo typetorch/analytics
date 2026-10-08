@@ -1,9 +1,10 @@
 /**
  * The game's analytics settings: the `analytics` field of the game's signed settings record (kernel 0.3.8, TypeTorch
- * plans/20; DataStore TypeTorch / settings), read by game servers and written by `writeSettings` through the game's own
- * TypeTorch CLI (`typetorch settings set analytics -`), which signs it with the game's two prod keys. Updating it
- * needs no place publish: servers re-read it within seconds (ping) or a minute. Read tokens (Basin SQL, the server's
- * admin token) never go here: only the write-only ingest/send token.
+ * plans/20; DataStore TypeTorch / settings), read by game servers. Since CLI 0.9 (plans/21 B) the game's own TypeTorch
+ * CLI writes it, with the record's `backend` section, through `typetorch backend setup` (`writeBackendSettings` runs
+ * it), signed with the game's two prod keys. Updating it needs no place publish: servers re-read it within seconds
+ * (ping) or a minute. Read tokens (Basin SQL, the server's admin token) never go here: only the write-only key.
+ * `validateSettings` still checks the shape (the server's /v1/settings answers with it).
  */
 import { SAFE_KEY } from "./sql/dialect.ts";
 import { runTypeTorch, type TypeTorchCliOptions } from "./typetorch-cli.ts";
@@ -107,67 +108,63 @@ export function validateSettings(input: unknown): AnalyticsSettings {
 	return out;
 }
 
-export interface WriteSettingsOptions extends TypeTorchCliOptions {
-	settings: AnalyticsSettings;
-	/** Validate and return the value without running the CLI. */
-	dryRun?: boolean;
+export interface WriteBackendSettingsOptions extends TypeTorchCliOptions {
+	/** The backend's public https base URL (this server, or its tunnel). */
+	url: string;
+	/** The backend's API key (TYPETORCH_API_KEY, the game key). Goes to the CLI through its environment only. */
+	apiKey: string;
+	/** The backend's admin token (TYPETORCH_ADMIN_TOKEN): the CLI checks it and sends the owner list with it. Environment only. */
+	adminToken: string;
+	/** Seconds between analytics sends (5-300). */
+	flushSeconds?: number;
+	/** Share (0-1) of new players whose first session is recorded in detail. */
+	recordShare?: number;
 	/** Don't ping servers (they still read the record within about a minute). */
 	noPing?: boolean;
 	/**
-	 * `--force`: write the value although the CLI's endpoint checks failed (the URL, GET /healthz, the ingest token), and
-	 * replace a record the game's keys didn't sign. Without it a broken value is refused and nothing is written.
+	 * `--force`: write it although the CLI's endpoint checks failed (the URL, GET /healthz), and replace a record the
+	 * game's keys didn't sign. The CLI never lets the admin token into the record, --force or not.
 	 */
 	force?: boolean;
 }
 
-export interface WriteSettingsResult {
-	value: AnalyticsSettings;
-	/** True when the CLI wrote the record (false on a dry run, or when it already held these settings). */
+export interface WriteBackendSettingsResult {
+	/** True when the CLI wrote the record (false when it already held this backend). */
 	written: boolean;
 	/** The settings record's seq after the call. */
 	seq?: number;
 	/** True when the CLI pinged running servers. */
 	pinged?: boolean;
+	/** The owner list sent to the backend (PUT /v1/access): the CLI's outcome, no secrets. */
+	owners?: Record<string, unknown>;
 }
 
 /**
- * Sets the game's `analytics` settings: validates them, then runs `typetorch settings set analytics -` in the game
- * folder (the value on stdin, so the token never sits in a command line). The CLI reads the record, checks it was
- * signed by the game's keys, signs the change with both prod keys, writes it and pings servers. Needs the game's
- * signing keys (`typetorch keys init`) and its Open Cloud key with DataStore read/create/update + messaging scopes.
- * The CLI checks the endpoint first (the URL is https and ends in /v1/ingest, GET <server>/healthz answers, the token is
- * accepted as an ingest token) and refuses a broken value: this throws with the CLI's message and what to fix.
+ * Points the game at a backend (TypeTorch plans/21 B): runs `typetorch backend setup --url <url>` in the game folder
+ * (CLI 0.9+) with the API key and the admin token in the CLI's environment (TYPETORCH_API_KEY, TYPETORCH_ADMIN_TOKEN;
+ * never argv). The CLI checks the address and both keys (URL, GET /healthz, GET /v1/auth/check: role game for the key,
+ * role admin for the token), writes the signed record's backend section (and, for kernels before 0.4, the old fleet and
+ * analytics sections from it), pings servers, sends the owner list to the backend and sets typetorch.json backend.url.
+ * It refuses a broken address or key (this throws with its message and the fix) unless `force`.
  */
-export async function writeSettings(options: WriteSettingsOptions): Promise<WriteSettingsResult> {
-	const value = validateSettings(options.settings);
-	if (options.dryRun) return { value, written: false };
-	const args = ["settings", "set", SETTINGS_FIELD, "-", ...(options.noPing ? ["--no-ping"] : []), ...(options.force ? ["--force"] : [])];
-	const out = await runTypeTorch(options, args, { stdin: JSON.stringify(value) });
-	const result: WriteSettingsResult = { value, written: out.outcome === "written" };
-	if (typeof out.seq === "number") result.seq = out.seq;
+export async function writeBackendSettings(options: WriteBackendSettingsOptions): Promise<WriteBackendSettingsResult> {
+	if (!/^https:\/\//.test(options.url)) throw new Error("the backend URL must be https");
+	if (options.flushSeconds !== undefined) checkNumber(options.flushSeconds, "flushSeconds", 5, 300);
+	if (options.recordShare !== undefined) checkNumber(options.recordShare, "recordShare", 0, 1);
+	const args = [
+		"backend",
+		"setup",
+		"--url",
+		options.url,
+		...(options.flushSeconds !== undefined ? ["--flush-seconds", String(options.flushSeconds)] : []),
+		...(options.recordShare !== undefined ? ["--record-share", String(options.recordShare)] : []),
+		...(options.noPing ? ["--no-ping"] : []),
+		...(options.force ? ["--force"] : []),
+	];
+	const out = await runTypeTorch(options, args, { env: { TYPETORCH_API_KEY: options.apiKey, TYPETORCH_ADMIN_TOKEN: options.adminToken } });
+	const result: WriteBackendSettingsResult = { written: out.outcome === "written" };
+	if (typeof out.settingsSeq === "number") result.seq = out.settingsSeq;
 	if (out.pinged === true) result.pinged = true;
+	if (typeof out.owners === "object" && out.owners !== null) result.owners = out.owners as Record<string, unknown>;
 	return result;
-}
-
-export interface WriteFleetSettingsOptions extends TypeTorchCliOptions {
-	/** The fleet API's https base URL (this server). */
-	url: string;
-	/** The server's write-only ingest token (game servers post with it). Goes to the CLI through its environment. */
-	ingestToken: string;
-	noPing?: boolean;
-	/** `--force`: write it although the CLI's endpoint checks failed (see WriteSettingsOptions.force). */
-	force?: boolean;
-}
-
-/**
- * Points the game's servers at a fleet API: runs `typetorch fleet setup --url <url>` in the game folder with the
- * ingest token in the CLI's environment (TYPETORCH_FLEET_INGEST_TOKEN, never argv). The CLI writes the signed
- * record's `fleet` field ({url, token}) and sets typetorch.json `fleet.url`. Like `writeSettings`, the CLI refuses an
- * address or token that fails its checks (this throws with its message) unless `force`.
- */
-export async function writeFleetSettings(options: WriteFleetSettingsOptions): Promise<{ written: boolean; seq?: number }> {
-	if (!/^https:\/\//.test(options.url)) throw new Error("the fleet URL must be https");
-	const args = ["fleet", "setup", "--url", options.url, ...(options.noPing ? ["--no-ping"] : []), ...(options.force ? ["--force"] : [])];
-	const out = await runTypeTorch(options, args, { env: { TYPETORCH_FLEET_INGEST_TOKEN: options.ingestToken } });
-	return { written: out.outcome === "written", ...(typeof out.settingsSeq === "number" ? { seq: out.settingsSeq } : {}) };
 }

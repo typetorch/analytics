@@ -3,7 +3,7 @@ import { deleteDataStoreEntry, getDataStoreEntry } from "../src/opencloud.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { SETTINGS_FIELD, validateSettings, writeFleetSettings, writeSettings } from "../src/settings.ts";
+import { validateSettings, writeBackendSettings } from "../src/settings.ts";
 import { typetorchCliCommand, type RunCli } from "../src/typetorch-cli.ts";
 
 const KEY = "test-api-key-not-real-0000";
@@ -59,66 +59,64 @@ function fakeCli(reply: { code?: number; stdout?: unknown; stderr?: string } = {
 	return { calls, run };
 }
 
-describe("writeSettings (through the game's TypeTorch CLI)", () => {
-	test("runs `typetorch settings set analytics - --json` in the game folder, the value on stdin, never in argv", async () => {
-		const { calls, run } = fakeCli({ stdout: { outcome: "written", seq: 8, pinged: true, fields: ["analytics"] } });
-		const result = await writeSettings({ gameDir: "/games/demo", cli: ["bun", "cli.ts"], run, settings: good });
-		expect(result).toEqual({ value: good, written: true, seq: 8, pinged: true });
+describe("writeBackendSettings (typetorch backend setup through the game's TypeTorch CLI, 0.9+)", () => {
+	const API = "api-key-not-real-0123456789abcdef0123";
+	const ADMIN = "admin-token-not-real-0123456789abcdef";
+	const base = { gameDir: "/games/demo", cli: ["bun", "cli.ts"], url: "https://abc.trycloudflare.com", apiKey: API, adminToken: ADMIN };
+
+	test("runs `typetorch backend setup --url ... --json` in the game folder; both keys only in the child's environment", async () => {
+		const { calls, run } = fakeCli({ stdout: { field: "backend", url: base.url, settingsSeq: 8, outcome: "written", pinged: true, owners: { state: "updated", seq: 8, owners: 1, sessionsEnded: 0 } } });
+		const result = await writeBackendSettings({ ...base, run, flushSeconds: 15, recordShare: 1 });
+		expect(result).toEqual({ written: true, seq: 8, pinged: true, owners: { state: "updated", seq: 8, owners: 1, sessionsEnded: 0 } });
 		expect(calls).toHaveLength(1);
-		expect(calls[0].command).toEqual(["bun", "cli.ts", "settings", "set", SETTINGS_FIELD, "-", "--json"]);
+		expect(calls[0].command).toEqual(["bun", "cli.ts", "backend", "setup", "--url", base.url, "--flush-seconds", "15", "--record-share", "1", "--json"]);
 		expect(calls[0].cwd).toBe(resolve("/games/demo"));
-		expect(JSON.parse(calls[0].stdin!)).toEqual(good);
-		expect(calls[0].command.join(" ")).not.toContain(good.token);
+		expect(calls[0].env).toEqual({ TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN });
+		expect(calls[0].command.join(" ")).not.toContain(API);
+		expect(calls[0].command.join(" ")).not.toContain(ADMIN);
 	});
 
-	test("--no-ping passes through; an unchanged record reports written: false", async () => {
-		const { calls, run } = fakeCli({ stdout: { outcome: "unchanged", seq: 8, pinged: false, fields: [] } });
-		expect(await writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good, noPing: true })).toEqual({ value: good, written: false, seq: 8 });
-		expect(calls[0].command).toEqual(["tt", "settings", "set", "analytics", "-", "--no-ping", "--json"]);
-	});
-
-	test("dry run validates and runs nothing", async () => {
-		const { calls, run } = fakeCli();
-		expect(await writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good, dryRun: true })).toEqual({ value: good, written: false });
-		expect(calls).toEqual([]);
-		await expect(writeSettings({ gameDir: ".", cli: ["tt"], run, settings: { ...good, recordShare: 3 }, dryRun: true })).rejects.toThrow("recordShare");
-	});
-
-	test("a CLI failure carries the CLI's own message (e.g. no signing keys)", async () => {
-		const { run } = fakeCli({ code: 1, stderr: "\u001b[31merror:\u001b[0m the settings record is signed with both prod keys: run `typetorch keys init`\n" });
-		const error = await writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good }).catch((e) => e);
-		expect(error.message).toContain("typetorch settings set analytics - failed (exit 1)");
-		expect(error.message).toContain("run `typetorch keys init`");
-		expect(error.message).not.toContain("\u001b");
-	});
-
-	test("--force passes through (write although the CLI's endpoint checks failed)", async () => {
-		const { calls, run } = fakeCli({ stdout: { outcome: "written", seq: 2 } });
-		await writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good, noPing: true, force: true });
-		expect(calls[0].command).toEqual(["tt", "settings", "set", "analytics", "-", "--no-ping", "--force", "--json"]);
+	test("--no-ping and --force pass through; an unchanged record reports written: false; http and bad dials are refused first", async () => {
+		const { calls, run } = fakeCli({ stdout: { outcome: "unchanged", settingsSeq: 8 } });
+		expect(await writeBackendSettings({ ...base, cli: ["tt"], run, noPing: true, force: true })).toEqual({ written: false, seq: 8 });
+		expect(calls[0].command).toEqual(["tt", "backend", "setup", "--url", base.url, "--no-ping", "--force", "--json"]);
+		await expect(writeBackendSettings({ ...base, run, url: "http://insecure" })).rejects.toThrow("https");
+		await expect(writeBackendSettings({ ...base, run, recordShare: 3 })).rejects.toThrow("recordShare");
+		expect(calls).toHaveLength(1);
 	});
 
 	test("a refused endpoint check keeps the CLI's whole message: every failing step and its fix, no colors, no passing lines", async () => {
 		const stderr = [
-			"\u001b[2m  ok   fleet url     abc.trycloudflare.com over https\u001b[0m",
-			"\u001b[31merror: refusing to write settings.analytics: 1 check failed, nothing was signed or written",
-			"  FAIL analytics healthz abc.trycloudflare.com/healthz didn't answer (ENOTFOUND)",
-			"       fix: abc.trycloudflare.com no longer exists (quick tunnel URLs die with their cloudflared); start it again on the dev PC: bun run local",
+			"\u001b[2m  ok   backend url     abc.trycloudflare.com over https\u001b[0m",
+			"\u001b[31merror: refusing to write settings.backend: 1 check failed, nothing was signed or written",
+			"  FAIL backend healthz abc.trycloudflare.com/healthz didn't answer (ENOTFOUND)",
+			"       fix: abc.trycloudflare.com no longer exists (quick tunnel URLs die with their cloudflared)",
 			"Fix that and run it again, or pass --force to write it anyway.\u001b[0m",
 		].join("\n");
 		const { run } = fakeCli({ code: 1, stderr });
-		const error = await writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good }).catch((e) => e);
-		expect(error.message).toContain("failed (exit 1): error: refusing to write settings.analytics");
-		expect(error.message).toContain("FAIL analytics healthz");
+		const error = await writeBackendSettings({ ...base, run }).catch((e) => e);
+		expect(error.message).toContain("failed (exit 1): error: refusing to write settings.backend");
+		expect(error.message).toContain("FAIL backend healthz");
 		expect(error.message).toContain("fix: abc.trycloudflare.com no longer exists");
-		expect(error.message).toContain("--force");
-		expect(error.message).not.toContain("fleet url");
+		expect(error.message).not.toContain("backend url");
 		expect(error.message).not.toContain("\u001b");
+		expect(error.message).not.toContain(API);
 	});
 
-	test("an old CLI that prints no JSON is named", async () => {
-		const { run } = fakeCli({ stdout: "Usage: typetorch <command>" });
-		await expect(writeSettings({ gameDir: ".", cli: ["tt"], run, settings: good })).rejects.toThrow("0.8+");
+	test("a CLI failure carries the CLI's own message (e.g. no signing keys)", async () => {
+		const { run } = fakeCli({ code: 1, stderr: "\u001b[31merror:\u001b[0m the settings record is signed with both prod keys: run `typetorch keys init`\n" });
+		const error = await writeBackendSettings({ ...base, run }).catch((e) => e);
+		expect(error.message).toContain("typetorch backend setup --url https://abc.trycloudflare.com failed (exit 1)");
+		expect(error.message).toContain("run `typetorch keys init`");
+	});
+
+	test("a game CLI older than 0.9 (no backend command) is named, with the fix", async () => {
+		const { run } = fakeCli({ code: 2, stderr: '\u001b[31munknown command "backend": did you mean "access"?\u001b[0m\ntypetorch 0.8.1: ...' });
+		const error = await writeBackendSettings({ ...base, run }).catch((e) => e);
+		expect(error.message).toContain("needs @typetorch/cli 0.9+");
+		expect(error.message).toContain("--cli");
+		const { run: noJson } = fakeCli({ stdout: "Usage: typetorch <command>" });
+		await expect(writeBackendSettings({ ...base, run: noJson })).rejects.toThrow("0.9+");
 	});
 
 	test("without cli, the game's node_modules/@typetorch/cli bin runs with this runtime", () => {
@@ -131,20 +129,6 @@ describe("writeSettings (through the game's TypeTorch CLI)", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
-	});
-});
-
-describe("writeFleetSettings", () => {
-	test("runs `typetorch fleet setup --url` with the ingest token in the child's environment only", async () => {
-		const { calls, run } = fakeCli({ stdout: { field: "fleet", url: "https://a.trycloudflare.com", settingsSeq: 9, outcome: "written" } });
-		const token = "ingest-token-not-real-0123456789";
-		expect(await writeFleetSettings({ gameDir: ".", cli: ["tt"], run, url: "https://a.trycloudflare.com", ingestToken: token })).toEqual({ written: true, seq: 9 });
-		expect(calls[0].command).toEqual(["tt", "fleet", "setup", "--url", "https://a.trycloudflare.com", "--json"]);
-		expect(calls[0].env).toEqual({ TYPETORCH_FLEET_INGEST_TOKEN: token });
-		await writeFleetSettings({ gameDir: ".", cli: ["tt"], run, url: "https://a.trycloudflare.com", ingestToken: token, force: true });
-		expect(calls[1].command).toEqual(["tt", "fleet", "setup", "--url", "https://a.trycloudflare.com", "--force", "--json"]);
-		expect(calls[0].command.join(" ")).not.toContain(token);
-		await expect(writeFleetSettings({ gameDir: ".", cli: ["tt"], run, url: "http://insecure", ingestToken: token })).rejects.toThrow("https");
 	});
 });
 

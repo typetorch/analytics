@@ -3,8 +3,9 @@
  * fleet API) live in the signed settings record (kernel 0.3.8, TypeTorch plans/20), which only the CLI can write: it
  * holds the game's signing keys and does the read-check-sign-write. This package never signs anything itself.
  *
- * Secrets never go on the command line: values come in on stdin (`typetorch settings set analytics -`), tokens through
- * the child's environment (TYPETORCH_FLEET_INGEST_TOKEN). The CLI prints no tokens, so its output is safe to show.
+ * Secrets never go on the command line: keys go through the child's environment (`typetorch backend setup` reads
+ * TYPETORCH_API_KEY and TYPETORCH_ADMIN_TOKEN there, CLI 0.9+), values through stdin. The CLI prints no keys, so its
+ * output is safe to show.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -89,6 +90,12 @@ export async function runTypeTorch(options: TypeTorchCliOptions, args: string[],
 	const run = options.run ?? spawnCli;
 	const result = await run(command, { cwd: resolve(options.gameDir), stdin: input.stdin, env: { ...options.env, ...input.env } });
 	if (result.code !== 0) {
+		const unknown = /unknown command "([^"]+)"/.exec(result.stderr.replace(/\u001b\[[0-9;]*m/g, ""));
+		if (unknown) {
+			throw new Error(
+				`the game's TypeTorch CLI has no \`typetorch ${unknown[1]}\` (it needs @typetorch/cli 0.9+): update it in the game repo (bun add -d @typetorch/cli@^0.9), or pass --cli <a cli checkout>/src/index.ts`,
+			);
+		}
 		throw new Error(`typetorch ${args.join(" ")} failed (exit ${result.code}): ${failureText(result.stderr, result.stdout)}`);
 	}
 	const text = result.stdout.trim();
@@ -96,6 +103,6 @@ export async function runTypeTorch(options: TypeTorchCliOptions, args: string[],
 	try {
 		return JSON.parse(start >= 0 ? text.slice(start + 1) : text) as Record<string, unknown>;
 	} catch {
-		throw new Error(`typetorch ${args.join(" ")} printed no JSON (is the game's @typetorch/cli 0.8+?): ${lastLines(text) || "no output"}`);
+		throw new Error(`typetorch ${args.join(" ")} printed no JSON (is the game's @typetorch/cli 0.9+?): ${lastLines(text) || "no output"}`);
 	}
 }
