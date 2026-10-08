@@ -1,0 +1,16 @@
+# dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+*.local
+
+# secrets and local config (the analytics env file stays outside this repo)
+.env
+.env.*
+!.env.example
+*.env
+
+# private working notes (not published)
+CHANGELOG.md
+*.log
+.scratch/
