@@ -240,7 +240,7 @@ describe("roles", () => {
 	test("game routes take the API key (and the previous one) and nothing else", async () => {
 		const routes: [string, unknown][] = [
 			["/v1/ingest", { events: [] }],
-			["/v1/errors", { errors: [] }],
+			["/v1/errors", { j: "job-roles", errors: [] }],
 			["/v1/identity", { identities: [] }],
 			["/v1/fleet/heartbeat", { j: "job-roles" }],
 			["/v1/fleet/report", { s: 1, j: "job-roles", r: "booted" }],
@@ -456,7 +456,7 @@ describe("explorer login", () => {
 		expect((await h.call("/v1/auth/check", { headers: bearer(ADMIN), ip })).status).toBe(429);
 		expect((await h.call("/v1/queries", { headers: bearer(ADMIN), ip: "198.51.100.78" })).status).toBe(200);
 		// Game servers behind the same address are untouched.
-		expect((await h.call("/v1/errors", { ...post(API, { errors: [] }), ip })).status).toBe(202);
+		expect((await h.call("/v1/errors", { ...post(API, { j: "job-login", errors: [] }), ip })).status).toBe(202);
 		// The log names the address, never what was typed.
 		const lines = h.logs.filter((l) => l.includes(ip));
 		expect(lines.length).toBeGreaterThanOrEqual(5);
@@ -525,7 +525,7 @@ describe("admin allow list", () => {
 	});
 
 	test("game routes stay open to any address (they still need the API key); a game key may check itself from anywhere", async () => {
-		expect((await h.call("/v1/errors", { ...post(API, { errors: [] }), ip: OUT })).status).toBe(202);
+		expect((await h.call("/v1/errors", { ...post(API, { j: "job-out", errors: [] }), ip: OUT })).status).toBe(202);
 		expect((await h.call("/v1/fleet/heartbeat", { ...post(API, { j: "job-out" }), ip: OUT })).status).toBe(202);
 		expect((await h.call("/v1/errors", { ...post(undefined, { errors: [] }), ip: OUT })).status).toBe(401);
 		const check = await h.call("/v1/auth/check", { headers: bearer(API), ip: OUT });
@@ -660,7 +660,7 @@ describe("the bus inside the app", () => {
 		const seen: string[] = [];
 		h.app.bus.subscribe("watch", ["error"], (_t, m) => void seen.push(m.items[0]?.fp ?? ""), { mode: "queue" });
 		const off = h.app.bus.subscribe("broken-store", ["error"], () => Promise.reject(new Error("disk full")), { mode: "await" });
-		const res = await h.call("/v1/errors", post(API, { errors: [{ fp: "fp-lost", template: "t", count: 1, firstAt: T0, lastAt: T0, realm: "server" }] }));
+		const res = await h.call("/v1/errors", post(API, { j: "job-lost", errors: [{ fp: "fp-lost", template: "t", count: 1, firstAt: T0, lastAt: T0, realm: "server" }] }));
 		off();
 		expect(res.status).toBe(500);
 		expect(await h.app.bus.idle(2000)).toBe(true);

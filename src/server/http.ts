@@ -118,6 +118,11 @@ export class FailureLimiter {
 		return Math.max(1, Math.ceil((list[0] + this.windowMs - now) / 1000));
 	}
 
+	/** Failures inside the window. */
+	count(key: string): number {
+		return this.recent(key, this.clock()).length;
+	}
+
 	fail(key: string): void {
 		const now = this.clock();
 		if (++this.sweeps % 1000 === 0) for (const k of [...this.failures.keys()]) this.recent(k, now);

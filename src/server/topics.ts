@@ -16,6 +16,8 @@ export interface EventsMessage {
 export interface ErrorMessage extends ErrorBatch {
 	/** Receive time, unix ms. */
 	at: number;
+	/** The sender's address (for the per-sender new-kind quota; never sent to the explorer). */
+	ip?: string;
 }
 
 export interface BackendTopics {

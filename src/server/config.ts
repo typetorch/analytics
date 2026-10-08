@@ -55,6 +55,10 @@ export interface ServerConfig {
 	/** Error logs: days of per-minute counts kept, and the most error kinds stored. */
 	errorKeepDays: number;
 	errorMaxKinds: number;
+	/** POST /v1/errors per address per minute (game servers share egress addresses, so it is generous). */
+	errorsIpPerMinute: number;
+	/** New error count and player rows per UTC day; past it new rows are dropped and counted (/healthz). */
+	errorRowsPerDay: number;
 	/** Gzip body cap and inflated cap, bytes. */
 	maxBodyBytes: number;
 	maxInflateBytes: number;
@@ -258,6 +262,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		busMaxBytes: num(env, "TYPETORCH_BUS_MAX_BYTES", 8 * 1024 * 1024, 1024, 1024 * 1024 * 1024),
 		errorKeepDays: num(env, "TYPETORCH_ERROR_KEEP_DAYS", 30, 1, 3650),
 		errorMaxKinds: num(env, "TYPETORCH_ERROR_MAX_KINDS", 5000, 10, 1_000_000),
+		errorsIpPerMinute: num(env, "TYPETORCH_ERRORS_IP_PER_MINUTE", 1200, 1, 1_000_000),
+		errorRowsPerDay: num(env, "TYPETORCH_ERROR_ROWS_PER_DAY", 2_000_000, 1000, 1_000_000_000),
 		maxBodyBytes: num(env, "TYPETORCH_MAX_BODY", 2 * 1024 * 1024, 1024, 64 * 1024 * 1024),
 		maxInflateBytes: num(env, "TYPETORCH_MAX_INFLATE", 16 * 1024 * 1024, 1024, 256 * 1024 * 1024),
 		ipPerMinute: num(env, "TYPETORCH_IP_PER_MINUTE", 6000, 1, 1_000_000),
