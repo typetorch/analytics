@@ -825,6 +825,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				gate = adminGate(req, ip);
 				if ("response" in gate) return gate.response;
 			} else if (!auth.hasGameKey(req)) return badGameKey(req, ip, "fleet");
+			// Event streams are capped like /v1/live (each holds a connection and a listener).
+			if (path === "/v1/fleet/stream" && method === "GET" && fleet.subscribers >= config.liveMaxClients) {
+				return json(429, { error: "too many fleet streams open" }, { "retry-after": "10" });
+			}
 			// Per-JobId limits and a cap on never-seen JobIds, no per-IP limit: many game servers can share one egress IP.
 			return (
 				(await handleFleet(

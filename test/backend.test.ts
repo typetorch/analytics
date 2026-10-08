@@ -787,3 +787,34 @@ describe("which proxies are believed (TYPETORCH_TRUSTED_PROXIES, TYPETORCH_CLOUD
 		}
 	});
 });
+
+describe("fleet routes: stream cap and route names", () => {
+	test("GET /v1/fleet/stream is capped like /v1/live", async () => {
+		const h = await harness({ TYPETORCH_LIVE_MAX_CLIENTS: "2" });
+		try {
+			const a = await h.call("/v1/fleet/stream", { headers: bearer(ADMIN) });
+			const b = await h.call("/v1/fleet/stream", { headers: bearer(ADMIN) });
+			const c = await h.call("/v1/fleet/stream", { headers: bearer(ADMIN) });
+			expect([a.status, b.status, c.status]).toEqual([200, 200, 429]);
+			await a.body?.cancel();
+			await b.body?.cancel();
+			await Bun.sleep(20);
+			const d = await h.call("/v1/fleet/stream", { headers: bearer(ADMIN) });
+			expect(d.status).toBe(200);
+			await d.body?.cancel();
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("inherited names are not game routes", async () => {
+		const h = await harness();
+		try {
+			for (const name of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+				expect((await h.call(`/v1/fleet/${name}`, post(API, { j: "job-x" }))).status).toBe(401);
+			}
+		} finally {
+			await h.close();
+		}
+	});
+});
