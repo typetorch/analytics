@@ -131,4 +131,15 @@ describe("EventBus", () => {
 		expect(seen.length).toBe(1000);
 		expect(seen[999]).toBe(999);
 	});
+
+	test("idle can give up on a stuck handler instead of hanging a shutdown", async () => {
+		const bus = new EventBus<Topics>();
+		bus.subscribe("stuck", ["a"], () => new Promise<void>(() => {}), { mode: "queue" });
+		await bus.publish("a", { n: 1 });
+		const started = performance.now();
+		expect(await bus.idle(50)).toBe(false);
+		expect(performance.now() - started).toBeLessThan(1000);
+		const quiet = new EventBus<Topics>();
+		expect(await quiet.idle(50)).toBe(true);
+	});
 });

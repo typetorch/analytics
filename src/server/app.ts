@@ -893,7 +893,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			for (const t of timers) clearInterval(t);
 			live.stop();
 			await served.stop();
-			await bus.idle();
+			// Queued subscribers get a moment to finish (a stuck webhook must not hold the shutdown).
+			await bus.idle(3000);
 			if (sandbox) await (await sandbox.catch(() => undefined))?.close();
 			if (warehouse) {
 				await warehouse.load().catch(() => {});

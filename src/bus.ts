@@ -196,16 +196,24 @@ export class EventBus<M extends object> {
 		sub.queuedBytes = 0;
 	}
 
-	/** Resolves when every queue is empty and every drain has finished (tests, shutdown). */
-	async idle(): Promise<void> {
+	/**
+	 * Resolves when every queue is empty and every drain has finished (tests, shutdown). With `timeoutMs` it gives up
+	 * waiting for a stuck handler and answers false.
+	 */
+	async idle(timeoutMs?: number): Promise<boolean> {
+		const deadline = timeoutMs === undefined ? Infinity : Date.now() + timeoutMs;
 		for (let guard = 0; guard < 1000; guard++) {
 			const busy = this.subs.filter((s) => s.draining || s.queue.length - s.head > 0);
-			if (!busy.length) return;
+			if (!busy.length) return true;
+			if (Date.now() >= deadline) return false;
 			for (const sub of busy) {
 				if (!sub.draining) this.schedule(sub);
-				await sub.draining;
+				const wait = deadline - Date.now();
+				if (wait === Infinity) await sub.draining;
+				else await Promise.race([sub.draining, new Promise<void>((done) => setTimeout(done, Math.max(1, wait)))]);
 			}
 		}
+		return false;
 	}
 
 	stats(): BusStats {

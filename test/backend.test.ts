@@ -14,50 +14,7 @@ import { FailureLimiter, clientIp } from "../src/server/http.ts";
 import { ipAllowed, parseIpRules } from "../src/server/ipfilter.ts";
 import { storeConfigFromEnv } from "../src/store/index.ts";
 
-export const API = "game-api-key-for-tests-0123456789abcdef";
-export const PREVIOUS = "previous-api-key-for-tests-0123456789abc";
-export const ADMIN = "admin-token-for-tests-0123456789abcdef0";
-const T0 = Date.UTC(2026, 9, 9, 12, 0, 0);
-
-interface Harness {
-	app: App;
-	dir: string;
-	logs: string[];
-	setNow(ms: number): void;
-	now(): number;
-	/** One request through app.handle, from `ip`. */
-	call(path: string, init?: RequestInit & { ip?: string }): Promise<Response>;
-	close(): Promise<void>;
-}
-
-async function harness(env: Record<string, string> = {}): Promise<Harness> {
-	const dir = mkdtempSync(join(tmpdir(), "tt-backend-"));
-	let now = T0;
-	const logs: string[] = [];
-	const config = loadConfig([], { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: dir, PORT: "0", TYPETORCH_MEMORY_LIMIT: "256MB", TYPETORCH_EXPLORER: "off", ...env });
-	const app = await startApp(config, { clock: () => now, manualJobs: true, log: (l) => logs.push(l) });
-	return {
-		app,
-		dir,
-		logs,
-		setNow: (ms) => (now = ms),
-		now: () => now,
-		call: (path, init = {}) => {
-			const { ip, ...rest } = init;
-			return app.handle(new Request(`http://backend.test${path}`, rest), ip ?? "127.0.0.1");
-		},
-		close: async () => {
-			await app.stop();
-			rmSync(dir, { recursive: true, force: true });
-		},
-	};
-}
-
-const bearer = (token: string): Record<string, string> => ({ authorization: `Bearer ${token}` });
-const json = (body: unknown): { body: string; headers: Record<string, string> } => ({ body: JSON.stringify(body), headers: { "content-type": "application/json" } });
-const post = (token: string | undefined, body: unknown): RequestInit => ({ method: "POST", ...json(body), headers: { "content-type": "application/json", ...(token ? bearer(token) : {}) } });
-const cookieOf = (res: Response): string | undefined => res.headers.getSetCookie().find((c) => c.startsWith("tt_session="))?.split(";")[0];
-const asJson = async (res: Response) => (await res.json()) as Record<string, any>;
+import { ADMIN, API, PREVIOUS, T0, asJson, bearer, cookieOf, harness, json, post, type Harness } from "./harness.ts";
 
 describe("environment", () => {
 	const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_EXPLORER: "off" };
@@ -663,5 +620,51 @@ describe("headers and the explorer's files", () => {
 		} finally {
 			await g.close();
 		}
+	});
+});
+
+describe("the bus inside the app", () => {
+	let h: Harness;
+	beforeAll(async () => {
+		h = await harness();
+	});
+	afterAll(() => h.close());
+
+	test("a stuck subscriber never slows ingest, heartbeats or error logs; its drops are counted and shown in /healthz", async () => {
+		const unstick = h.app.bus.subscribe("stuck", ["events", "heartbeat", "deploy", "alert", "error"], () => new Promise<void>(() => {}), { mode: "queue", maxQueue: 3 });
+		const row = (i: number) => ({ v: 1, t: T0, kind: "custom", name: `n${i}`, job: "job-bus", art: "art-1", pid: "p1", sid: "s1" });
+		const started = performance.now();
+		for (let i = 0; i < 20; i++) {
+			expect((await h.call("/v1/ingest", post(API, { events: [row(i)] }))).status).toBe(202);
+			expect((await h.call("/v1/fleet/heartbeat", post(API, { j: "job-bus", n: i }))).status).toBe(202);
+			expect((await h.call("/v1/errors", post(API, { j: "job-bus", errors: [{ fp: "fp-bus", template: "t", count: 1, firstAt: T0, lastAt: T0, realm: "server" }] }))).status).toBe(202);
+		}
+		expect(performance.now() - started).toBeLessThan(5000);
+		const health = await asJson(await h.call("/healthz", { headers: bearer(ADMIN) }));
+		const stuck = health.bus.subscribers.find((s: { name: string }) => s.name === "stuck");
+		expect(stuck.queued).toBeLessThanOrEqual(3);
+		expect(stuck.dropped).toBeGreaterThan(40);
+		expect(health.bus.dropped).toBe(stuck.dropped);
+		expect(health.bus.published).toMatchObject({ events: 20, heartbeat: 20, error: 20 });
+		// The stores that answer for their data got every message.
+		const byName = (n: string) => health.bus.subscribers.find((s: { name: string }) => s.name === n);
+		expect(byName("duckdb-writer")).toMatchObject({ processed: 20, failed: 0, dropped: 0 });
+		expect(byName("fleet-store")).toMatchObject({ processed: 20, dropped: 0 });
+		expect(byName("error-store")).toMatchObject({ processed: 20, dropped: 0 });
+		expect(h.app.errors.stats.occurrences).toBe(20);
+		expect((await h.app.warehouse?.raw.pendingBytes()) ?? 0).toBeGreaterThan(0);
+		unstick();
+	});
+
+	test("an awaited store that fails answers 500 and nothing else sees the message", async () => {
+		const seen: string[] = [];
+		h.app.bus.subscribe("watch", ["error"], (_t, m) => void seen.push(m.items[0]?.fp ?? ""), { mode: "queue" });
+		const off = h.app.bus.subscribe("broken-store", ["error"], () => Promise.reject(new Error("disk full")), { mode: "await" });
+		const res = await h.call("/v1/errors", post(API, { errors: [{ fp: "fp-lost", template: "t", count: 1, firstAt: T0, lastAt: T0, realm: "server" }] }));
+		off();
+		expect(res.status).toBe(500);
+		expect(await h.app.bus.idle(2000)).toBe(true);
+		expect(seen).not.toContain("fp-lost");
+		expect(JSON.stringify(await res.json())).not.toContain("disk full");
 	});
 });
