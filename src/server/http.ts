@@ -24,12 +24,19 @@ export function tokenIn(given: string | undefined, accepted: readonly (string | 
 	return ok;
 }
 
-/** The client's IP: the TCP peer, or with trustProxy the last X-Forwarded-For hop (what Caddy appends). */
-export function clientIp(req: Request, peer: string, trustProxy: boolean): string {
-	if (trustProxy) {
+/**
+ * The client's IP: the TCP peer, or with trusted proxies the Nth hop from the right of X-Forwarded-For (what the
+ * nearest proxy appended: the address it saw). `trust` = how many proxies sit in front (true = 1, false/0 = none).
+ */
+export function clientIp(req: Request, peer: string, trust: boolean | number): string {
+	const hops = trust === true ? 1 : trust === false ? 0 : trust;
+	if (hops > 0) {
 		const forwarded = req.headers.get("x-forwarded-for");
-		const last = forwarded?.split(",").at(-1)?.trim();
-		if (last) return last;
+		const list = forwarded
+			?.split(",")
+			.map((p) => p.trim())
+			.filter(Boolean);
+		if (list?.length) return list[Math.max(0, list.length - hops)] as string;
 	}
 	return peer;
 }
@@ -49,8 +56,8 @@ export class RateLimiter {
 		const now = this.clock();
 		if (++this.sweeps % 10_000 === 0) this.sweep(now);
 		const bucket = this.buckets.get(key) ?? { tokens: this.perMinute, at: now };
-		bucket.tokens = Math.min(this.perMinute, bucket.tokens + ((now - bucket.at) / 60_000) * this.perMinute);
-		bucket.at = now;
+		bucket.tokens = Math.min(this.perMinute, bucket.tokens + (Math.max(0, now - bucket.at) / 60_000) * this.perMinute);
+		bucket.at = Math.max(bucket.at, now);
 		this.buckets.set(key, bucket);
 		if (bucket.tokens < cost) return false;
 		bucket.tokens -= cost;
@@ -83,4 +90,103 @@ export async function readCapped(req: Request, max: number): Promise<Uint8Array 
 	if (declared > max) return null;
 	const body = new Uint8Array(await req.arrayBuffer());
 	return body.length > max ? null : body;
+}
+
+/** Failures per key (an IP) inside a window; past the limit the key is blocked until its oldest failure ages out. */
+export class FailureLimiter {
+	private failures = new Map<string, number[]>();
+	private sweeps = 0;
+
+	constructor(
+		readonly maxFailures: number,
+		readonly windowMs: number,
+		private readonly clock: () => number = Date.now,
+	) {}
+
+	private recent(key: string, now: number): number[] {
+		const list = (this.failures.get(key) ?? []).filter((t) => now - t < this.windowMs);
+		if (list.length) this.failures.set(key, list);
+		else this.failures.delete(key);
+		return list;
+	}
+
+	/** Seconds until the key may try again; 0 = not blocked. */
+	blocked(key: string): number {
+		const now = this.clock();
+		const list = this.recent(key, now);
+		if (list.length < this.maxFailures) return 0;
+		return Math.max(1, Math.ceil((list[0] + this.windowMs - now) / 1000));
+	}
+
+	fail(key: string): void {
+		const now = this.clock();
+		if (++this.sweeps % 1000 === 0) for (const k of [...this.failures.keys()]) this.recent(k, now);
+		const list = this.recent(key, now);
+		list.push(now);
+		this.failures.set(key, list.slice(-this.maxFailures * 2));
+		// Never track an unbounded number of addresses.
+		if (this.failures.size > 50_000) this.failures.delete(this.failures.keys().next().value as string);
+	}
+
+	reset(key: string): void {
+		this.failures.delete(key);
+	}
+
+	get size(): number {
+		return this.failures.size;
+	}
+}
+
+// Cookies -----------------------------------------------------------------------------------------------------------------
+
+export function readCookie(req: Request, name: string): string | undefined {
+	const header = req.headers.get("cookie");
+	if (!header) return undefined;
+	for (const part of header.split(";")) {
+		const eq = part.indexOf("=");
+		if (eq < 0) continue;
+		if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+	}
+	return undefined;
+}
+
+export interface CookieOptions {
+	maxAgeSeconds?: number;
+	secure: boolean;
+	sameSite: "Strict" | "Lax";
+	path?: string;
+}
+
+/** A Set-Cookie value: always HttpOnly; Secure when the request came over https. */
+export function setCookie(name: string, value: string, o: CookieOptions): string {
+	const parts = [`${name}=${value}`, `Path=${o.path ?? "/"}`, "HttpOnly", `SameSite=${o.sameSite}`];
+	if (o.maxAgeSeconds !== undefined) parts.push(`Max-Age=${Math.floor(o.maxAgeSeconds)}`);
+	if (o.secure) parts.push("Secure");
+	return parts.join("; ");
+}
+
+export function clearCookie(name: string, o: Omit<CookieOptions, "maxAgeSeconds">): string {
+	return setCookie(name, "", { ...o, maxAgeSeconds: 0 });
+}
+
+// Security headers --------------------------------------------------------------------------------------------------------
+
+/** The explorer's CSP: its own scripts and styles only; avatars from Roblox's CDN; it talks to this origin only. */
+export const EXPLORER_CSP =
+	"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.rbxcdn.com; font-src 'self' data:; connect-src 'self'; " +
+	"object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+/** Everything that isn't the explorer's page: JSON and event streams load nothing. */
+export const API_CSP = "default-src 'none'; frame-ancestors 'none'";
+
+/** Returns the response with the security headers added (a copy: the headers of a Response may be immutable). */
+export function withSecurityHeaders(response: Response, o: { https: boolean; csp: string }): Response {
+	const headers = new Headers(response.headers);
+	headers.set("x-content-type-options", "nosniff");
+	headers.set("referrer-policy", "no-referrer");
+	headers.set("x-frame-options", "DENY");
+	headers.set("cross-origin-resource-policy", "same-origin");
+	headers.set("permissions-policy", "camera=(), microphone=(), geolocation=()");
+	if (!headers.has("content-security-policy")) headers.set("content-security-policy", o.csp);
+	if (o.https) headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+	return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }

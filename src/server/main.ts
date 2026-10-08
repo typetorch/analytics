@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
- * typetorch-analytics-server: the DuckDB analytics API and the SQLite fleet API (README "DuckDB server").
- *   bun src/server/main.ts [--env-file analytics.env]
- *   node dist/server/main.js [--env-file analytics.env]
+ * typetorch-backend: the analytics API (DuckDB), the fleet API (SQLite), error logs and the explorer in one process
+ * (README "The backend").
+ *   bun src/server/main.ts [--env-file backend.env]
+ *   node dist/server/main.js [--env-file backend.env]
+ * Settings come from environment variables (TYPETORCH_API_KEY and TYPETORCH_ADMIN_TOKEN are required).
  */
 import { runtimeName } from "../runtime.ts";
 import { startApp } from "./app.ts";
@@ -10,19 +12,19 @@ import { describeConfig, loadConfig } from "./config.ts";
 
 async function main(): Promise<void> {
 	if (process.argv.includes("--help") || process.argv.includes("-h")) {
-		console.log("usage: typetorch-analytics-server [--env-file <file>]\nSettings come from TT_* environment variables; see the README.");
+		console.log("usage: typetorch-backend [--env-file <file>]\nRequired: TYPETORCH_API_KEY and TYPETORCH_ADMIN_TOKEN (32+ random characters each, different). See the README for the rest.");
 		return;
 	}
 	const config = loadConfig();
-	if (!config.adminToken) console.warn("[analytics] TT_ANALYTICS_ADMIN_TOKEN is not set: queries and fleet reads are refused");
+	for (const warning of config.warnings) console.warn(`[backend] ${warning}`);
 	const app = await startApp(config);
-	console.log(`[analytics] listening on ${config.host}:${app.port} (${runtimeName()}); ${describeConfig(config)}`);
+	console.log(`[backend] listening on ${config.host}:${app.port} (${runtimeName()}); ${describeConfig(config)}`);
 	let stopping = false;
 	const stop = async (signal: string) => {
 		if (stopping) return;
 		stopping = true;
-		console.log(`[analytics] ${signal}: loading the last raw files and closing`);
-		await app.stop().catch((e) => console.error(`[analytics] stop failed: ${(e as Error).message}`));
+		console.log(`[backend] ${signal}: loading the last raw files and closing`);
+		await app.stop().catch((e) => console.error(`[backend] stop failed: ${(e as Error).message}`));
 		process.exit(0);
 	};
 	process.on("SIGINT", () => void stop("SIGINT"));
@@ -30,6 +32,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-	console.error(`[analytics] ${(error as Error).message}`);
+	console.error(`[backend] ${(error as Error).message}`);
 	process.exit(1);
 });

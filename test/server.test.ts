@@ -13,6 +13,7 @@ import { Graph } from "../src/graph.ts";
 import { DAY, NOW, generateFixture } from "./fixtures.ts";
 
 const INGEST = "ingest-token-for-tests-0123456789";
+const SECOND = "second-ingest-token-0123456789abcdef";
 const ADMIN = "admin-token-for-tests-0123456789ab";
 const SECRET = "webhook-secret-for-tests";
 const OC_KEY = "open-cloud-key-for-tests-000";
@@ -38,16 +39,17 @@ const ocCalls: string[] = [];
 
 function config(extra: Record<string, string> = {}) {
 	return loadConfig([], {
-		TT_ANALYTICS_DATA: dir,
-		TT_ANALYTICS_PORT: "0",
-		TT_ANALYTICS_INGEST_TOKENS: `${INGEST},second-ingest-token-0123456789`,
-		TT_ANALYTICS_ADMIN_TOKEN: ADMIN,
-		TT_ANALYTICS_WEBHOOK_SECRET: SECRET,
-		TT_ANALYTICS_OPENCLOUD_KEY: OC_KEY,
-		TT_ANALYTICS_UNIVERSE_ID: "4242",
-		TT_ANALYTICS_JOB_PER_MINUTE: "1000",
-		TT_ANALYTICS_MEMORY_LIMIT: "256MB",
-		TT_SERVER_PARTS: "analytics",
+		TYPETORCH_DATA_DIR: dir,
+		PORT: "0",
+		TYPETORCH_API_KEY: INGEST,
+		TYPETORCH_API_KEY_PREVIOUS: SECOND,
+		TYPETORCH_ADMIN_TOKEN: ADMIN,
+		ROBLOX_WEBHOOK_SECRET: SECRET,
+		OPENCLOUD_API_KEY: OC_KEY,
+		TYPETORCH_UNIVERSE_ID: "4242",
+		TYPETORCH_JOB_PER_MINUTE: "1000",
+		TYPETORCH_MEMORY_LIMIT: "256MB",
+		TYPETORCH_PARTS: "analytics",
 		...extra,
 	});
 }
@@ -102,7 +104,7 @@ describe("ingest", () => {
 		expect(r1.status).toBe(202);
 		expect(await r1.json()).toMatchObject({ accepted: half + recordings.length, rejected: 1 });
 		// The second token works too (rotation).
-		const r2 = await post("/v1/ingest", null, { ...ingestHeaders, authorization: "Bearer second-ingest-token-0123456789" }, gz({ events: events.slice(half) }));
+		const r2 = await post("/v1/ingest", null, { ...ingestHeaders, authorization: `Bearer ${SECOND}` }, gz({ events: events.slice(half) }));
 		expect(r2.status).toBe(202);
 		const raw = readdirSync(join(dir, "raw", "incoming"));
 		expect(raw.some((f) => f.startsWith("events-") && f.endsWith(".ndjson.open"))).toBe(true);
@@ -433,7 +435,9 @@ describe("settings and health", () => {
 	test("live dials from data/settings.json", async () => {
 		writeFileSync(join(dir, "settings.json"), JSON.stringify({ recordShare: 0.25, techEvery: 60, token: "never-served-0123456789", events: "x" }));
 		expect((await fetch(`${base}/v1/settings`)).status).toBe(401);
-		const r = await fetch(`${base}/v1/settings`, { headers: { authorization: `Bearer ${INGEST}` } });
+		// Reading is the admin's: the API key writes, it reads nothing.
+		expect((await fetch(`${base}/v1/settings`, { headers: { authorization: `Bearer ${INGEST}` } })).status).toBe(401);
+		const r = await fetch(`${base}/v1/settings`, { headers: admin });
 		expect(await r.json()).toEqual({ recordShare: 0.25, techEvery: 60 });
 	});
 

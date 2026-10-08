@@ -11,8 +11,8 @@ import { FleetService, type FleetEvent } from "../src/fleet/service.ts";
 import { startApp, type App } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 
-const INGEST = "fleet-ingest-token-0123456789abc";
-const ADMIN = "fleet-admin-token-0123456789abcd";
+const INGEST = "fleet-ingest-token-0123456789abcdef0123";
+const ADMIN = "fleet-admin-token-0123456789abcdef01234";
 const ACCESS_CODE = "PRIVATE-ACCESS-CODE-777";
 const T0 = Date.UTC(2026, 9, 5, 12, 0, 0);
 
@@ -37,12 +37,12 @@ let client: ReturnType<typeof createFleetClient>;
 beforeAll(async () => {
 	dir = mkdtempSync(join(tmpdir(), "tt-fleet-"));
 	const config = loadConfig([], {
-		TT_ANALYTICS_DATA: dir,
-		TT_ANALYTICS_PORT: "0",
-		TT_SERVER_PARTS: "fleet",
-		TT_ANALYTICS_INGEST_TOKENS: INGEST,
-		TT_ANALYTICS_ADMIN_TOKEN: ADMIN,
-		TT_FLEET_WEBHOOK_URL: "https://discord.com/api/webhooks/1/abc",
+		TYPETORCH_DATA_DIR: dir,
+		PORT: "0",
+		TYPETORCH_PARTS: "fleet",
+		TYPETORCH_API_KEY: INGEST,
+		TYPETORCH_ADMIN_TOKEN: ADMIN,
+		TYPETORCH_ALERT_WEBHOOK_URL: "https://discord.com/api/webhooks/1/abc",
 	});
 	app = await startApp(config, { clock: () => now, manualJobs: true, log: () => {}, fetch: hookFetch });
 	base = `http://127.0.0.1:${app.port}`;
@@ -158,6 +158,7 @@ describe("alerts", () => {
 	});
 
 	test("critical alerts reach the webhook (Discord format), deduped per (code, branch, artifact)", async () => {
+		await app.bus.idle();
 		await app.notifier?.flush();
 		const sent = hooks.map((h) => (h.body as { content: string }).content);
 		expect(sent.some((c) => c.startsWith("CRITICAL: auto_rollback (prod, art-42, seq 42)"))).toBe(true);
@@ -165,6 +166,7 @@ describe("alerts", () => {
 		expect(sent.some((c) => c.includes("swap_slow"))).toBe(false); // warnings aren't sent by default
 		const before = hooks.length;
 		await client.alert({ level: "critical", code: "auto_rollback", message: "again", b: "prod", a: "art-42" });
+		await app.bus.idle();
 		await app.notifier?.flush();
 		expect(hooks.length).toBe(before);
 		expect(app.notifier?.stats.deduped).toBeGreaterThan(0);
@@ -240,13 +242,13 @@ describe("new-JobId flood limit", () => {
 	beforeAll(async () => {
 		floodDir = mkdtempSync(join(tmpdir(), "tt-fleet-flood-"));
 		const config = loadConfig([], {
-			TT_ANALYTICS_DATA: floodDir,
-			TT_ANALYTICS_PORT: "0",
-			TT_SERVER_PARTS: "fleet",
-			TT_ANALYTICS_INGEST_TOKENS: INGEST,
-			TT_ANALYTICS_ADMIN_TOKEN: ADMIN,
-			TT_FLEET_WEBHOOK_URL: "https://discord.com/api/webhooks/2/def",
-			TT_FLEET_NEW_JOBS_PER_MINUTE: String(LIMIT),
+			TYPETORCH_DATA_DIR: floodDir,
+			PORT: "0",
+			TYPETORCH_PARTS: "fleet",
+			TYPETORCH_API_KEY: INGEST,
+			TYPETORCH_ADMIN_TOKEN: ADMIN,
+			TYPETORCH_ALERT_WEBHOOK_URL: "https://discord.com/api/webhooks/2/def",
+			TYPETORCH_NEW_JOBS_PER_MINUTE: String(LIMIT),
 		});
 		const capture = (async (_input: string | URL | Request, init?: RequestInit) => {
 			floodHooks.push((JSON.parse(String(init?.body)) as { content: string }).content);
@@ -279,6 +281,7 @@ describe("new-JobId flood limit", () => {
 		expect(floods.length).toBe(1);
 		expect(floods[0]).toMatchObject({ level: "critical", source: "server", job: null, details: { limit: LIMIT, windowSeconds: 60, example: "fake-1" } });
 		expect(events.filter((e) => e.type === "alert" && e.alert.code === "fleet_flood").length).toBe(1);
+		await floodApp.bus.idle();
 		await floodApp.notifier?.flush();
 		expect(floodHooks.filter((c) => c.startsWith("CRITICAL: fleet_flood")).length).toBe(1);
 	});
@@ -289,6 +292,7 @@ describe("new-JobId flood limit", () => {
 		expect((await post("heartbeat", hb("fake-5"))).status).toBe(429);
 		expect((await post("heartbeat", hb("fake-6"))).status).toBe(429);
 		expect((await floodAlerts()).length).toBe(2);
+		await floodApp.bus.idle();
 		await floodApp.notifier?.flush();
 		expect(floodHooks.filter((c) => c.startsWith("CRITICAL: fleet_flood")).length).toBe(1);
 	});
@@ -325,7 +329,7 @@ describe("new-JobId flood limit", () => {
 		for (let i = 0; i < 1250; i++) expect(gate.take(`job-${i}`)).toBe("ok");
 		for (let i = 0; i < 1250; i++) gate.take(`job-${i}`);
 		expect(gate.stats).toEqual({ admitted: 1250, refused: 0 });
-		expect(loadConfig([], {}).fleetNewJobsPerMinute).toBe(2000);
+		expect(loadConfig([], { TYPETORCH_API_KEY: INGEST, TYPETORCH_ADMIN_TOKEN: ADMIN }).fleetNewJobsPerMinute).toBe(2000);
 	});
 });
 

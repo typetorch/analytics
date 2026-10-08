@@ -1,0 +1,3 @@
+# The backend tests live in test/. web/ has its own (vitest) tests: `cd web && bun run test`.
+[test]
+root = "test"

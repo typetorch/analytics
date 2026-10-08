@@ -2,14 +2,14 @@
  * Fleet API routes on Web Request/Response only (portable to a Cloudflare Worker). The host passes the auth checks
  * and the rate limiters.
  *
- *   POST /v1/fleet/heartbeat | report | alert | closing | deploy     ingest (write-only) token
+ *   POST /v1/fleet/heartbeat | report | alert | closing | deploy     API key (game role)
  *   GET  /v1/fleet/servers?branch=&maxAge=                          admin token
  *   GET  /v1/fleet/reports?seq=|artifact=|latest&branch=
  *   GET  /v1/fleet/alerts?since=&level=&unacked=&limit=
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
  *   GET  /v1/fleet/stream?branch=&types=server,alert,...            Server-Sent Events
  */
-import { FleetInputError, JOB_ID_MAX, type AlertLevel, type FleetEvent, type FleetService } from "./service.ts";
+import { FleetInputError, JOB_ID_MAX, parseClosing, parseDeploy, parseHeartbeat, parseReport, type AlertLevel, type DeployMessage, type FleetEvent, type FleetService, type HeartbeatMessage } from "./service.ts";
 
 export const FLEET_BODY_LIMIT = 16 * 1024;
 
@@ -82,8 +82,12 @@ export class NewJobLimiter implements NewJobGate {
 
 export interface FleetHttpOptions {
 	service: FleetService;
+	/** The request carries the API key (game role). */
 	isIngest(req: Request): boolean;
+	/** The request is admin (token or session). The host refuses unauthorized mutating requests before this is asked. */
 	isAdmin(req: Request): boolean;
+	/** Where validated heartbeat / closing (topic heartbeat) and report / deploy-start (topic deploy) messages go. Default: straight into the service; the backend passes its bus. */
+	accept?(topic: "heartbeat" | "deploy", message: HeartbeatMessage | DeployMessage): Promise<void>;
 	limiters: Record<keyof typeof FLEET_LIMITS, Limiter>;
 	/** Checked before `limiters` for JobIds without a servers row (not for the CLI's j = "cli"). */
 	newJobs: NewJobGate;
@@ -151,10 +155,13 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 				}
 			}
 			if (!o.limiters[kind].take(key)) return json(429, { error: "rate limited" }, { "retry-after": String(o.limiters[kind].retryAfter(key)) });
-			if (kind === "heartbeat") await o.service.heartbeat(body, req.headers.get("x-tt-job"));
-			else if (kind === "report") await o.service.report(body);
-			else if (kind === "closing") await o.service.closing(body, req.headers.get("x-tt-job"));
-			else if (kind === "deploy") await o.service.deploy(body);
+			const header = req.headers.get("x-tt-job");
+			const accept = o.accept ?? ((_topic, message) => o.service.apply(message));
+			// Validated here, committed by whoever subscribes (the fleet store; the others only watch).
+			if (kind === "heartbeat") await accept("heartbeat", { kind: "heartbeat", heartbeat: parseHeartbeat(body, header) });
+			else if (kind === "report") await accept("deploy", { kind: "report", report: parseReport(body) });
+			else if (kind === "closing") await accept("heartbeat", { kind: "closing", ...parseClosing(body, header) });
+			else if (kind === "deploy") await accept("deploy", { kind: "start", deploy: parseDeploy(body) });
 			else {
 				const alert = await o.service.alert(body);
 				return json(202, { ok: true, id: alert.id });

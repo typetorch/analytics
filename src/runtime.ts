@@ -122,7 +122,19 @@ async function serveNode(options: ServeOptions): Promise<Served> {
 				while (true) {
 					const { done, value } = await reader.read();
 					if (done) break;
-					res.write(value);
+					// A slow client must not make the process buffer: wait for the socket to drain (or close).
+					if (!res.write(value) && !res.destroyed) {
+						await new Promise<void>((resume) => {
+							const done = () => {
+								res.off("drain", done);
+								res.off("close", done);
+								resume();
+							};
+							res.once("drain", done);
+							res.once("close", done);
+						});
+					}
+					if (res.destroyed) break;
 				}
 			} catch {}
 			res.end();

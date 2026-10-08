@@ -142,6 +142,159 @@ function loose(b: Body, key: string): number | null {
 	return null;
 }
 
+// Parsing (the HTTP edge validates; the store only commits what passed) ----------------------------------------------------
+
+/** A heartbeat after validation: the kernel's short keys turned into long names, times in ms. `k` (an access code) is gone. */
+export interface ParsedHeartbeat {
+	job: string;
+	serverType: string | null;
+	branch: string | null;
+	channel: string | null;
+	artifact: string | null;
+	players: number | null;
+	maxPlayers: number | null;
+	startedAt: number | null;
+	lastWrite: number | null;
+	placeId: number | null;
+	experiment: 0 | 1;
+	kernel: string | null;
+	appliedSeq: number | null;
+	generation: number | null;
+	health: string | null;
+	lastError: string | null;
+	serverVersion: number | null;
+	sentAt: number | null;
+}
+
+export interface ParsedReport {
+	seq: number;
+	job: string;
+	result: string;
+	branch: string | null;
+	artifact: string | null;
+	error: string | null;
+	seconds: number | null;
+	t: number | null;
+	generation: number | null;
+	kernel: string | null;
+	players: number | null;
+}
+
+export interface ParsedDeploy {
+	seq: number;
+	branch: string;
+	artifact: string | null;
+	channel: string | null;
+	t: number | null;
+}
+
+/** What goes on the bus' `heartbeat` topic. */
+export type HeartbeatMessage = { kind: "heartbeat"; heartbeat: ParsedHeartbeat } | { kind: "closing"; job: string; heartbeat?: ParsedHeartbeat };
+/** What goes on the bus' `deploy` topic. */
+export type DeployMessage = { kind: "report"; report: ParsedReport } | { kind: "start"; deploy: ParsedDeploy };
+export type FleetMessage = HeartbeatMessage | DeployMessage;
+
+/**
+ * The kernel's fleet status plus j = JobId (kernel src/server/Fleet.luau): { t = server type, b, c?, a?, n, m, s = start
+ * (unix s), u = now (unix s), p, x = 1?, v, q, g, h, e?, sv = 2 }. `k` (an access code) is ignored. The JobId may also
+ * come in the X-TT-Job header. Throws FleetInputError.
+ */
+export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedHeartbeat {
+	const b = asBody(raw);
+	const job = text(b, "j", JOB) ?? (jobHeader ? text({ j: jobHeader }, "j", JOB) : null);
+	if (!job) throw new FleetInputError("j (the JobId) is required");
+	// `t` is the server type (a string); a number there is taken as the send time.
+	return {
+		job,
+		serverType: typeof b.t === "string" ? text(b, "t", 16) : null,
+		branch: text(b, "b", 64),
+		channel: text(b, "c", 16),
+		artifact: text(b, "a", 64),
+		players: int(b, "n"),
+		maxPlayers: int(b, "m"),
+		startedAt: toMs(int(b, "s")),
+		lastWrite: toMs(int(b, "u")),
+		placeId: int(b, "p"),
+		experiment: loose(b, "x") === 1 ? 1 : 0,
+		kernel: text(b, "v", 32),
+		appliedSeq: int(b, "q"),
+		generation: int(b, "g"),
+		health: text(b, "h", 16),
+		lastError: text(b, "e", 500),
+		serverVersion: loose(b, "sv"),
+		sentAt: typeof b.t === "number" ? toMs(int(b, "t")) : null,
+	};
+}
+
+/** The server is shutting down: the heartbeat body plus `closing = true` (BindToClose); `{ j, t }` alone works too. */
+export function parseClosing(raw: unknown, jobHeader?: string | null): { job: string; heartbeat?: ParsedHeartbeat } {
+	const b = asBody(raw);
+	const job = text(b, "j", JOB) ?? (jobHeader ? text({ j: jobHeader }, "j", JOB) : null);
+	if (!job) throw new FleetInputError("j (the JobId) is required");
+	return Object.keys(b).some((k) => !["j", "t", "closing"].includes(k)) ? { job, heartbeat: parseHeartbeat(b, jobHeader) } : { job };
+}
+
+/** `{s,b,a,j,r,e?,d?,t,g,k,p}` (k here is the kernel version). */
+export function parseReport(raw: unknown): ParsedReport {
+	const b = asBody(raw);
+	const seq = int(b, "s", true) as number;
+	const job = text(b, "j", JOB, true) as string;
+	const result = text(b, "r", 32, true) as string;
+	if (!(DEPLOY_RESULTS as readonly string[]).includes(result)) throw new FleetInputError(`r must be one of ${DEPLOY_RESULTS.join(", ")}`);
+	return {
+		seq,
+		job,
+		result,
+		branch: text(b, "b", 64),
+		artifact: text(b, "a", 64),
+		error: text(b, "e", 500),
+		seconds: number(b, "d"),
+		t: int(b, "t"),
+		generation: int(b, "g"),
+		kernel: text(b, "k", 32),
+		players: int(b, "p"),
+	};
+}
+
+/** `{s, b, a, ch, t}` from the CLI when a deploy starts: gives stuck detection a start time. */
+export function parseDeploy(raw: unknown): ParsedDeploy {
+	const b = asBody(raw);
+	return {
+		seq: int(b, "s", true) as number,
+		branch: text(b, "b", 64, true) as string,
+		artifact: text(b, "a", 64),
+		channel: text(b, "ch", 16),
+		t: int(b, "t"),
+	};
+}
+
+export type NewAlert = Omit<Alert, "id" | "createdAt" | "at" | "acked" | "ackedAt" | "ackedBy" | "details"> & { t?: number | null; details: Record<string, unknown> | null };
+
+/** `{level, code, message, j, b, a, s, t, g, k}` from a kernel (source game) or the CLI (source cli, e.g. auto_rollback). */
+export function parseAlert(raw: unknown, source: "game" | "cli" = "game"): NewAlert {
+	const b = asBody(raw);
+	const level = text(b, "level", 16, true);
+	if (!(ALERT_LEVELS as readonly string[]).includes(level ?? "")) throw new FleetInputError("level must be critical, warning or info");
+	const code = text(b, "code", 64, true) as string;
+	if (!/^[a-z0-9_.-]+$/.test(code)) throw new FleetInputError("code must be lowercase letters, digits, _ . -");
+	// The CLI posts with j = "cli" (cli/src/fleet.ts alertBody); auto_rollback only ever comes from the CLI.
+	const fromCli = source === "cli" || code === "auto_rollback" || b.j === "cli";
+	return {
+		level: level as AlertLevel,
+		code,
+		message: text(b, "message", 500, true) as string,
+		job: b.j === "cli" ? null : text(b, "j", JOB),
+		branch: text(b, "b", 64),
+		artifact: text(b, "a", 64),
+		seq: int(b, "s"),
+		t: int(b, "t"),
+		generation: int(b, "g"),
+		kernel: text(b, "k", 32),
+		source: fromCli ? "cli" : "game",
+		details: null,
+	};
+}
+
 // Rows -> API shapes ------------------------------------------------------------------------------------------------------
 
 interface ServerRow {
@@ -278,7 +431,10 @@ CREATE INDEX IF NOT EXISTS deploys_received ON deploys (received);
 export interface FleetServiceOptions {
 	db: FleetDb;
 	clock?: () => number;
+	/** Standalone use: notified directly. In the backend the notifier subscribes to the bus instead. */
 	notifier?: Notifier;
+	/** Called with each stored alert (the backend publishes it on the bus' `alert` topic). */
+	publishAlert?: (alert: Alert) => Promise<void> | void;
 	log?: (line: string) => void;
 }
 
@@ -318,43 +474,25 @@ export class FleetService {
 		}
 	}
 
-	// Ingest (game kernels; the CLI for deploy and auto_rollback) -------------------------------------------------------
+	// Ingest (the bus' fleet-store subscriber; the CLI's deploy and auto_rollback come the same way) -----------------------
 
-	/**
-	 * The kernel's fleet status plus j = JobId (kernel src/server/Fleet.luau): { t = server type, b, c?, a?, n, m,
-	 * s = start (unix s), u = now (unix s), p, x = 1?, v, q, g, h, e?, sv = 2 }. `k` (an access code) is ignored. The
-	 * JobId may also come in the X-TT-Job header.
-	 */
-	async heartbeat(raw: unknown, jobHeader?: string | null): Promise<void> {
-		const b = asBody(raw);
-		const job = text(b, "j", JOB) ?? (jobHeader ? text({ j: jobHeader }, "j", JOB) : null);
-		if (!job) throw new FleetInputError("j (the JobId) is required");
+	/** Commits a validated message from the bus' `heartbeat` or `deploy` topic. */
+	async apply(message: FleetMessage): Promise<void> {
+		if (message.kind === "heartbeat") await this.applyHeartbeat(message.heartbeat);
+		else if (message.kind === "closing") await this.applyClosing(message.job, message.heartbeat);
+		else if (message.kind === "report") await this.applyReport(message.report);
+		else await this.applyDeploy(message.deploy);
+	}
+
+	/** Validate and commit in one call (tests, embedding). */
+	heartbeat(raw: unknown, jobHeader?: string | null): Promise<void> {
+		return this.applyHeartbeat(parseHeartbeat(raw, jobHeader));
+	}
+
+	async applyHeartbeat(p: ParsedHeartbeat): Promise<void> {
 		const now = this.clock();
-		// `t` is the server type (a string); a number there is taken as the send time.
-		const serverType = typeof b.t === "string" ? text(b, "t", 16) : null;
-		const sentAt = typeof b.t === "number" ? toMs(int(b, "t")) : null;
-		const row: SqlValue[] = [
-			job,
-			serverType,
-			text(b, "b", 64),
-			text(b, "c", 16),
-			text(b, "a", 64),
-			int(b, "n"),
-			int(b, "m"),
-			toMs(int(b, "s")),
-			toMs(int(b, "u")),
-			int(b, "p"),
-			loose(b, "x") === 1 ? 1 : 0,
-			text(b, "v", 32),
-			int(b, "q"),
-			int(b, "g"),
-			text(b, "h", 16),
-			text(b, "e", 500),
-			loose(b, "sv"),
-			sentAt,
-			now,
-			now,
-		];
+		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, now, now];
+		const job = p.job;
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
 		await this.db.run(
 			`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, first_seen, last_seen) ` +
@@ -378,78 +516,52 @@ export class FleetService {
 		if (change) this.emit({ type: "server", change, server: serverInfo(after, now) });
 	}
 
-	/** `{s,b,a,j,r,e?,d?,t,g,k,p}` (k here is the kernel version). */
-	async report(raw: unknown): Promise<void> {
-		const b = asBody(raw);
-		const seq = int(b, "s", true) as number;
-		const job = text(b, "j", JOB, true) as string;
-		const result = text(b, "r", 32, true) as string;
-		if (!(DEPLOY_RESULTS as readonly string[]).includes(result)) throw new FleetInputError(`r must be one of ${DEPLOY_RESULTS.join(", ")}`);
-		const branch = text(b, "b", 64);
-		const artifact = text(b, "a", 64);
+	report(raw: unknown): Promise<void> {
+		return this.applyReport(parseReport(raw));
+	}
+
+	async applyReport(r: ParsedReport): Promise<void> {
 		const now = this.clock();
 		await this.db.run(
 			"INSERT INTO reports (seq, branch, artifact, job, result, error, seconds, t, generation, kernel, players, received) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			[seq, branch, artifact, job, result, text(b, "e", 500), number(b, "d"), int(b, "t"), int(b, "g"), text(b, "k", 32), int(b, "p"), now],
+			[r.seq, r.branch, r.artifact, r.job, r.result, r.error, r.seconds, r.t, r.generation, r.kernel, r.players, now],
 		);
 		// A report also tells us a deploy happened (the CLI's POST /v1/fleet/deploy may not have come).
-		await this.db.run("INSERT OR IGNORE INTO deploys (seq, branch, artifact, channel, t, received) VALUES (?, ?, ?, NULL, NULL, ?)", [seq, branch, artifact, now]);
-		this.emit({ type: "report", seq, job, result, branch });
+		await this.db.run("INSERT OR IGNORE INTO deploys (seq, branch, artifact, channel, t, received) VALUES (?, ?, ?, NULL, NULL, ?)", [r.seq, r.branch, r.artifact, now]);
+		this.emit({ type: "report", seq: r.seq, job: r.job, result: r.result, branch: r.branch });
 	}
 
-	/** `{s, b, a, ch, t}` from the CLI when a deploy starts: gives stuck detection a start time. */
-	async deploy(raw: unknown): Promise<void> {
-		const b = asBody(raw);
-		const seq = int(b, "s", true) as number;
-		const branch = text(b, "b", 64, true);
-		const artifact = text(b, "a", 64);
+	deploy(raw: unknown): Promise<void> {
+		return this.applyDeploy(parseDeploy(raw));
+	}
+
+	async applyDeploy(d: ParsedDeploy): Promise<void> {
 		const now = this.clock();
 		await this.db.run(
 			"INSERT INTO deploys (seq, branch, artifact, channel, t, received) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(seq) DO UPDATE SET branch = excluded.branch, " +
 				"artifact = COALESCE(excluded.artifact, deploys.artifact), channel = excluded.channel, t = excluded.t, received = MIN(deploys.received, excluded.received)",
-			[seq, branch, artifact, text(b, "ch", 16), int(b, "t"), now],
+			[d.seq, d.branch, d.artifact, d.channel, d.t, now],
 		);
-		this.emit({ type: "deploy", seq, branch, artifact });
+		this.emit({ type: "deploy", seq: d.seq, branch: d.branch, artifact: d.artifact });
 	}
 
-	/**
-	 * The server is shutting down (no "server lost" alert for it). The kernel sends its heartbeat body plus
-	 * `closing = true` from BindToClose; `{ j, t }` alone works too.
-	 */
-	async closing(raw: unknown, jobHeader?: string | null): Promise<void> {
-		const b = asBody(raw);
-		const job = text(b, "j", JOB) ?? (jobHeader ? text({ j: jobHeader }, "j", JOB) : null);
-		if (!job) throw new FleetInputError("j (the JobId) is required");
-		if (Object.keys(b).some((k) => !["j", "t", "closing"].includes(k))) await this.heartbeat(b, jobHeader);
+	closing(raw: unknown, jobHeader?: string | null): Promise<void> {
+		const c = parseClosing(raw, jobHeader);
+		return this.applyClosing(c.job, c.heartbeat);
+	}
+
+	/** The server is shutting down (no "server lost" alert for it). */
+	async applyClosing(job: string, heartbeat?: ParsedHeartbeat): Promise<void> {
+		if (heartbeat) await this.applyHeartbeat(heartbeat);
 		const now = this.clock();
 		await this.db.run("UPDATE servers SET closed_at = ?, last_seen = ? WHERE job = ?", [now, now, job]);
 		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
 		if (row) this.emit({ type: "server", change: "closed", server: serverInfo(row, now) });
 	}
 
-	/** `{level, code, message, j, b, a, s, t, g, k}` from a kernel (source game) or the CLI (source cli, e.g. auto_rollback). */
+	/** Validates and stores an alert; stored alerts go to the SSE stream, the notifier and the bus' `alert` topic. */
 	async alert(raw: unknown, source: "game" | "cli" = "game"): Promise<Alert> {
-		const b = asBody(raw);
-		const level = text(b, "level", 16, true);
-		if (!(ALERT_LEVELS as readonly string[]).includes(level ?? "")) throw new FleetInputError("level must be critical, warning or info");
-		const code = text(b, "code", 64, true) as string;
-		if (!/^[a-z0-9_.-]+$/.test(code)) throw new FleetInputError("code must be lowercase letters, digits, _ . -");
-		// The CLI posts with j = "cli" (cli/src/fleet.ts alertBody); auto_rollback only ever comes from the CLI.
-		const fromCli = source === "cli" || code === "auto_rollback" || b.j === "cli";
-		return this.addAlert({
-			level: level as AlertLevel,
-			code,
-			message: text(b, "message", 500, true) as string,
-			job: b.j === "cli" ? null : text(b, "j", JOB),
-			branch: text(b, "b", 64),
-			artifact: text(b, "a", 64),
-			seq: int(b, "s"),
-			t: int(b, "t"),
-			generation: int(b, "g"),
-			kernel: text(b, "k", 32),
-			source: fromCli ? "cli" : "game",
-			details: null,
-		});
+		return this.addAlert(parseAlert(raw, source));
 	}
 
 	/** Whether a servers row exists for this JobId (live, closed or lost; rows go a day after a server is gone). */
@@ -479,7 +591,7 @@ export class FleetService {
 		});
 	}
 
-	private async addAlert(a: Omit<Alert, "id" | "createdAt" | "at" | "acked" | "ackedAt" | "ackedBy" | "details"> & { t?: number | null; details: Record<string, unknown> | null }): Promise<Alert> {
+	private async addAlert(a: NewAlert): Promise<Alert> {
 		const now = this.clock();
 		const { lastId } = await this.db.run(
 			"INSERT INTO alerts (level, code, message, job, branch, artifact, seq, t, generation, kernel, source, details, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -488,6 +600,7 @@ export class FleetService {
 		const alert = alertOf((await this.db.first<AlertRow>("SELECT * FROM alerts WHERE id = ?", [lastId])) as AlertRow);
 		this.emit({ type: "alert", alert });
 		this.options.notifier?.notify(alert);
+		await this.options.publishAlert?.(alert);
 		return alert;
 	}
 

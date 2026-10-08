@@ -1,25 +1,60 @@
 /**
- * Server settings from the environment and an optional env file (`--env-file <path>` or TT_ANALYTICS_ENV_FILE; real
+ * Backend settings from the environment and an optional env file (`--env-file <path>` or TYPETORCH_ENV_FILE; real
  * environment variables win). Values stay in this object and are never printed; only names are.
+ *
+ * Required: TYPETORCH_API_KEY (game servers write with it) and TYPETORCH_ADMIN_TOKEN (the CLI and the explorer read and
+ * manage with it), 32+ characters each and different. Everything else is optional; the tuning knobs keep their defaults.
+ * The names from before the rename (TT_ANALYTICS_*, TT_FLEET_*, TT_SERVER_PARTS, TYPETORCH_FLEET_*) are still read for
+ * one release, each with a one-line warning that names the new one (`config.warnings`).
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { FLEET_NEW_JOBS_PER_MINUTE } from "../fleet/http.ts";
+import { applyLegacyEnv } from "../legacy-env.ts";
+import { parseIpRules, type IpRule } from "./ipfilter.ts";
 
 export type ServerPart = "analytics" | "fleet";
+
+/** Shortest accepted API key and admin token. */
+export const MIN_SECRET_LENGTH = 32;
 
 export interface ServerConfig {
 	dataDir: string;
 	host: string;
 	port: number;
-	/** Which parts run: the DuckDB analytics API, the SQLite fleet API, or both (default). */
+	/** Which parts run: the DuckDB analytics API, the SQLite fleet API, or both (default). Error logs are always on. */
 	parts: Set<ServerPart>;
-	/** Write-only tokens accepted by ingest endpoints (several, for rotation). */
-	ingestTokens: string[];
-	/** The read token (queries, settings, fleet reads, erasure by pid). */
-	adminToken?: string;
-	/** Use X-Forwarded-For's last hop as the client IP (behind Caddy on the same box). */
-	trustProxy: boolean;
+	/** The API key game servers write with, then the previous one while it is rotated (accepted too). */
+	apiKeys: string[];
+	/** The admin token: reads and manages (the CLI, the explorer's token login). */
+	adminToken: string;
+	/** Only these addresses may reach admin routes and the login (everything else gets 404). Undefined = any. */
+	adminAllowIps?: IpRule[];
+	/** Explorer login with the admin token (TYPETORCH_TOKEN_LOGIN=off hides and refuses it). */
+	tokenLogin: boolean;
+	/** Sign in with Roblox: the OAuth app's client id and secret. Both set = on. */
+	robloxOAuth?: { clientId: string; clientSecret: string };
+	/** The public https URL of this backend (no trailing slash): OAuth redirect, Secure cookies, origin checks. */
+	publicUrl?: string;
+	/** Proxies in front whose X-Forwarded-For hops are trusted (0 = none: the TCP peer is the client). */
+	trustProxy: number;
+	/** The built explorer (web/dist) served at /; undefined = not served. */
+	webDir?: string;
+	/** Explorer sessions: idle and absolute lifetimes, ms. */
+	sessionIdleMs: number;
+	sessionMaxMs: number;
+	/** Failed logins per IP before a 429 and the window they count in, ms. */
+	loginMaxFailures: number;
+	loginWindowMs: number;
+	/** Concurrent GET /v1/live streams. */
+	liveMaxClients: number;
+	/** Bus: messages (and bytes) a queued subscriber may hold before it drops. */
+	busMaxQueue: number;
+	busMaxBytes: number;
+	/** Error logs: days of per-minute counts kept, and the most error kinds stored. */
+	errorKeepDays: number;
+	errorMaxKinds: number;
 	/** Gzip body cap and inflated cap, bytes. */
 	maxBodyBytes: number;
 	maxInflateBytes: number;
@@ -46,13 +81,15 @@ export interface ServerConfig {
 	openCloudKey?: string;
 	universeId?: number;
 	erasureDeleteLink: boolean;
-	// Fleet
+	// SQLite (fleet, identities, error logs, owners)
 	fleetDb: string;
-	fleetWebhookUrl?: string;
-	fleetWebhookFormat?: "discord" | "slack" | "json";
-	fleetWebhookLevels: Set<"critical" | "warning" | "info">;
+	alertWebhookUrl?: string;
+	alertWebhookFormat?: "discord" | "slack" | "json";
+	alertWebhookLevels: Set<"critical" | "warning" | "info">;
 	/** Never-seen JobIds the fleet API accepts per minute (429 and one fleet_flood alert past it). */
 	fleetNewJobsPerMinute: number;
+	/** One line per old variable name that was read: "OLD is deprecated: use NEW". Never holds a value. */
+	warnings: string[];
 }
 
 export function parseDotEnv(text: string): Record<string, string> {
@@ -79,87 +116,182 @@ function num(env: Record<string, string | undefined>, name: string, fallback: nu
 	return n;
 }
 
+const TRUE = ["1", "true", "yes", "on"];
+const FALSE = ["0", "false", "no", "off"];
+
 function flag(env: Record<string, string | undefined>, name: string, fallback = false): boolean {
 	const raw = env[name];
 	if (raw === undefined || raw === "") return fallback;
-	return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+	const v = raw.toLowerCase();
+	if (TRUE.includes(v)) return true;
+	if (FALSE.includes(v)) return false;
+	throw new Error(`${name} is on or off (1/0, true/false, yes/no, on/off)`);
 }
 
-function token(env: Record<string, string | undefined>, name: string): string | undefined {
+function secret(env: Record<string, string | undefined>, name: string, required: boolean): string | undefined {
 	const raw = env[name];
-	if (!raw) return undefined;
-	if (raw.length < 24) throw new Error(`${name} must be at least 24 characters (use a random value, e.g. openssl rand -hex 32)`);
+	if (!raw) {
+		if (required) throw new Error(`${name} is required: a random value of ${MIN_SECRET_LENGTH}+ characters (e.g. openssl rand -hex 32)`);
+		return undefined;
+	}
+	if (raw.length < MIN_SECRET_LENGTH) throw new Error(`${name} must be at least ${MIN_SECRET_LENGTH} characters (use a random value, e.g. openssl rand -hex 32)`);
 	return raw;
 }
 
-/** Reads the config. `env` defaults to the env file (if any) under the real environment. */
+/** Reads the config. `realEnv` defaults to process.env; an env file (if any) sits under it. */
 export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Record<string, string | undefined> = process.env): ServerConfig {
-	let envFile = realEnv.TT_ANALYTICS_ENV_FILE;
 	const at = argv.indexOf("--env-file");
-	if (at >= 0) envFile = argv[at + 1];
+	const nonEmpty = Object.fromEntries(Object.entries(realEnv).filter(([, v]) => v !== undefined && v !== ""));
+	const first = applyLegacyEnv(nonEmpty);
+	const envFile = at >= 0 ? argv[at + 1] : first.env.TYPETORCH_ENV_FILE;
 	const fileEnv = envFile ? parseDotEnv(readFileSync(resolve(envFile), "utf8")) : {};
-	const env: Record<string, string | undefined> = { ...fileEnv, ...Object.fromEntries(Object.entries(realEnv).filter(([, v]) => v !== undefined && v !== "")) };
-	const dataDir = resolve(env.TT_ANALYTICS_DATA ?? "data");
+	const fromFile = applyLegacyEnv(fileEnv);
+	// The real environment wins over the file; legacy names in the file lose to new names anywhere.
+	const merged = { ...fromFile.env, ...first.env };
+	const warnings = [...first.warnings, ...fromFile.warnings.map((w) => `${w} (in the env file)`)];
+
+	// TT_ANALYTICS_INGEST_TOKENS was a comma-separated list: every entry stays accepted.
+	const legacyList = (nonEmpty.TT_ANALYTICS_INGEST_TOKENS ?? fileEnv.TT_ANALYTICS_INGEST_TOKENS ?? "")
+		.split(",")
+		.map((t) => t.trim())
+		.filter(Boolean);
+	if (legacyList.length) {
+		if (merged.TYPETORCH_API_KEY) warnings.push("TT_ANALYTICS_INGEST_TOKENS is ignored because TYPETORCH_API_KEY is set; remove it");
+		else {
+			warnings.push("TT_ANALYTICS_INGEST_TOKENS is deprecated: use TYPETORCH_API_KEY (and TYPETORCH_API_KEY_PREVIOUS while rotating)");
+			merged.TYPETORCH_API_KEY = legacyList[0];
+			if (legacyList[1] && !merged.TYPETORCH_API_KEY_PREVIOUS) merged.TYPETORCH_API_KEY_PREVIOUS = legacyList[1];
+		}
+	}
+	const env = merged;
+
+	const apiKey = secret(env, "TYPETORCH_API_KEY", true) as string;
+	const previous = secret(env, "TYPETORCH_API_KEY_PREVIOUS", false);
+	const adminToken = secret(env, "TYPETORCH_ADMIN_TOKEN", true) as string;
+	if (apiKey === adminToken) throw new Error("TYPETORCH_API_KEY and TYPETORCH_ADMIN_TOKEN must be different values (the API key lives in game servers; the admin token must not)");
+	if (previous && previous === adminToken) throw new Error("TYPETORCH_API_KEY_PREVIOUS must differ from TYPETORCH_ADMIN_TOKEN");
+	// Further keys of an old comma list stay accepted for the release the old names are read.
+	const apiKeys = [apiKey, ...(previous ? [previous] : []), ...legacyList.slice(2)].filter((k, i, all) => all.indexOf(k) === i);
+	for (const key of apiKeys) {
+		if (key.length < MIN_SECRET_LENGTH) throw new Error(`each TT_ANALYTICS_INGEST_TOKENS entry must be at least ${MIN_SECRET_LENGTH} characters`);
+		if (key === adminToken) throw new Error("an API key equals TYPETORCH_ADMIN_TOKEN; they must be different values");
+	}
+
+	const dataDir = resolve(env.TYPETORCH_DATA_DIR ?? "data");
 	const parts = new Set<ServerPart>(
-		(env.TT_SERVER_PARTS ?? "analytics,fleet")
+		(env.TYPETORCH_PARTS ?? "analytics,fleet")
 			.split(",")
 			.map((p) => p.trim())
 			.filter(Boolean) as ServerPart[],
 	);
-	for (const p of parts) if (p !== "analytics" && p !== "fleet") throw new Error('TT_SERVER_PARTS lists "analytics" and/or "fleet"');
-	if (parts.size === 0) throw new Error("TT_SERVER_PARTS is empty");
-	const ingestTokens = (env.TT_ANALYTICS_INGEST_TOKENS ?? "")
-		.split(",")
-		.map((t) => t.trim())
-		.filter(Boolean);
-	for (const t of ingestTokens) if (t.length < 24) throw new Error("each TT_ANALYTICS_INGEST_TOKENS entry must be at least 24 characters");
-	const universe = env.TT_ANALYTICS_UNIVERSE_ID;
-	const format = env.TT_FLEET_WEBHOOK_FORMAT;
-	if (format && !["discord", "slack", "json"].includes(format)) throw new Error("TT_FLEET_WEBHOOK_FORMAT is discord, slack or json");
+	for (const p of parts) if (p !== "analytics" && p !== "fleet") throw new Error('TYPETORCH_PARTS lists "analytics" and/or "fleet"');
+	if (parts.size === 0) throw new Error("TYPETORCH_PARTS is empty");
+	const universe = env.TYPETORCH_UNIVERSE_ID;
+	const format = env.TYPETORCH_ALERT_WEBHOOK_FORMAT;
+	if (format && !["discord", "slack", "json"].includes(format)) throw new Error("TYPETORCH_ALERT_WEBHOOK_FORMAT is discord, slack or json");
 	const levels = new Set(
-		(env.TT_FLEET_WEBHOOK_LEVELS ?? "critical")
+		(env.TYPETORCH_ALERT_WEBHOOK_LEVELS ?? "critical")
 			.split(",")
 			.map((l) => l.trim())
 			.filter(Boolean),
 	) as Set<"critical" | "warning" | "info">;
+
+	// TYPETORCH_TRUST_PROXY: on/off, or the number of proxy hops in front (Coolify's Traefik = 1).
+	const trustRaw = env.TYPETORCH_TRUST_PROXY;
+	let trustProxy = 0;
+	if (trustRaw !== undefined && trustRaw !== "") {
+		if (/^\d{1,2}$/.test(trustRaw)) trustProxy = Number(trustRaw);
+		else trustProxy = flag(env, "TYPETORCH_TRUST_PROXY") ? 1 : 0;
+	}
+
+	let publicUrl: string | undefined;
+	if (env.TYPETORCH_PUBLIC_URL) {
+		let u: URL;
+		try {
+			u = new URL(env.TYPETORCH_PUBLIC_URL);
+		} catch {
+			throw new Error("TYPETORCH_PUBLIC_URL must be a URL, e.g. https://backend.example.com");
+		}
+		if (u.protocol !== "https:" && u.protocol !== "http:") throw new Error("TYPETORCH_PUBLIC_URL must start with https:// (http:// is for local runs)");
+		if (u.username || u.password) throw new Error("TYPETORCH_PUBLIC_URL must not hold credentials");
+		publicUrl = `${u.protocol}//${u.host}`;
+	}
+
+	let adminAllowIps: IpRule[] | undefined;
+	if (env.TYPETORCH_ADMIN_ALLOW_IPS) {
+		try {
+			adminAllowIps = parseIpRules(env.TYPETORCH_ADMIN_ALLOW_IPS);
+		} catch (error) {
+			throw new Error(`TYPETORCH_ADMIN_ALLOW_IPS: ${(error as Error).message}`);
+		}
+		if (!adminAllowIps.length) adminAllowIps = undefined;
+	}
+
+	const oauthId = env.ROBLOX_OAUTH_CLIENT_ID;
+	const oauthSecret = env.ROBLOX_OAUTH_CLIENT_SECRET;
+	if (Boolean(oauthId) !== Boolean(oauthSecret)) warnings.push("Sign in with Roblox is off: ROBLOX_OAUTH_CLIENT_ID and ROBLOX_OAUTH_CLIENT_SECRET must both be set");
+	if (oauthId && oauthSecret && !publicUrl) warnings.push("Sign in with Roblox is off: set TYPETORCH_PUBLIC_URL (the redirect is <public url>/v1/auth/roblox/callback)");
+	const robloxOAuth = oauthId && oauthSecret && publicUrl ? { clientId: oauthId, clientSecret: oauthSecret } : undefined;
+
+	// The explorer: TYPETORCH_WEB_DIR, else web/dist next to src/ (or dist/) when it has been built.
+	let webDir: string | undefined;
+	if (flag(env, "TYPETORCH_EXPLORER", true)) {
+		const dir = resolve(env.TYPETORCH_WEB_DIR ?? fileURLToPath(new URL("../../web/dist", import.meta.url)));
+		if (existsSync(resolve(dir, "index.html"))) webDir = dir;
+	}
+
 	const config: ServerConfig = {
 		dataDir,
-		host: env.TT_ANALYTICS_HOST ?? "127.0.0.1",
-		port: num(env, "TT_ANALYTICS_PORT", 8787, 0, 65535),
+		host: env.HOST ?? "127.0.0.1",
+		port: num(env, "PORT", 8787, 0, 65535),
 		parts,
-		ingestTokens,
-		trustProxy: flag(env, "TT_ANALYTICS_TRUST_PROXY"),
-		maxBodyBytes: num(env, "TT_ANALYTICS_MAX_BODY", 2 * 1024 * 1024, 1024, 64 * 1024 * 1024),
-		maxInflateBytes: num(env, "TT_ANALYTICS_MAX_INFLATE", 16 * 1024 * 1024, 1024, 256 * 1024 * 1024),
-		ipPerMinute: num(env, "TT_ANALYTICS_IP_PER_MINUTE", 6000, 1, 1_000_000),
-		jobPerMinute: num(env, "TT_ANALYTICS_JOB_PER_MINUTE", 60, 1, 100_000),
-		memoryLimit: env.TT_ANALYTICS_MEMORY_LIMIT ?? "400MB",
-		threads: num(env, "TT_ANALYTICS_THREADS", 2, 1, 64),
-		loadSeconds: num(env, "TT_ANALYTICS_LOAD_SECONDS", 5, 0.2, 3600),
-		keepDays: num(env, "TT_ANALYTICS_KEEP_DAYS", 400, 0, 100_000),
-		rawKeepDays: num(env, "TT_ANALYTICS_RAW_KEEP_DAYS", 14, 0, 100_000),
-		compactMb: num(env, "TT_ANALYTICS_COMPACT_MB", 256, 1, 1_000_000),
-		queryTimeoutSeconds: num(env, "TT_ANALYTICS_QUERY_TIMEOUT", 60, 1, 3600),
-		queryConcurrency: num(env, "TT_ANALYTICS_QUERY_CONCURRENCY", 2, 1, 16),
-		fsyncMs: num(env, "TT_ANALYTICS_FSYNC_MS", 1000, 0, 60_000),
-		sql: flag(env, "TT_ANALYTICS_SQL", true),
-		sqlMemoryLimit: env.TT_ANALYTICS_SQL_MEMORY ?? "256MB",
-		erasureDeleteLink: flag(env, "TT_ANALYTICS_ERASURE_DELETE_LINK"),
-		fleetDb: resolve(env.TT_FLEET_DB ?? resolve(dataDir, "fleet.sqlite")),
-		fleetWebhookLevels: levels,
-		fleetNewJobsPerMinute: num(env, "TT_FLEET_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),
+		apiKeys,
+		adminToken,
+		tokenLogin: flag(env, "TYPETORCH_TOKEN_LOGIN", true),
+		trustProxy,
+		sessionIdleMs: num(env, "TYPETORCH_SESSION_IDLE_HOURS", 12, 0.01, 24 * 30) * 3_600_000,
+		sessionMaxMs: num(env, "TYPETORCH_SESSION_MAX_DAYS", 7, 0.01, 90) * 86_400_000,
+		loginMaxFailures: num(env, "TYPETORCH_LOGIN_MAX_FAILURES", 5, 1, 1000),
+		loginWindowMs: num(env, "TYPETORCH_LOGIN_WINDOW_MINUTES", 15, 0.01, 24 * 60) * 60_000,
+		liveMaxClients: num(env, "TYPETORCH_LIVE_MAX_CLIENTS", 20, 1, 1000),
+		busMaxQueue: num(env, "TYPETORCH_BUS_MAX_QUEUE", 1000, 1, 1_000_000),
+		busMaxBytes: num(env, "TYPETORCH_BUS_MAX_BYTES", 8 * 1024 * 1024, 1024, 1024 * 1024 * 1024),
+		errorKeepDays: num(env, "TYPETORCH_ERROR_KEEP_DAYS", 30, 1, 3650),
+		errorMaxKinds: num(env, "TYPETORCH_ERROR_MAX_KINDS", 5000, 10, 1_000_000),
+		maxBodyBytes: num(env, "TYPETORCH_MAX_BODY", 2 * 1024 * 1024, 1024, 64 * 1024 * 1024),
+		maxInflateBytes: num(env, "TYPETORCH_MAX_INFLATE", 16 * 1024 * 1024, 1024, 256 * 1024 * 1024),
+		ipPerMinute: num(env, "TYPETORCH_IP_PER_MINUTE", 6000, 1, 1_000_000),
+		jobPerMinute: num(env, "TYPETORCH_JOB_PER_MINUTE", 60, 1, 100_000),
+		memoryLimit: env.TYPETORCH_MEMORY_LIMIT ?? "400MB",
+		threads: num(env, "TYPETORCH_THREADS", 2, 1, 64),
+		loadSeconds: num(env, "TYPETORCH_LOAD_SECONDS", 5, 0.2, 3600),
+		keepDays: num(env, "TYPETORCH_KEEP_DAYS", 400, 0, 100_000),
+		rawKeepDays: num(env, "TYPETORCH_RAW_KEEP_DAYS", 14, 0, 100_000),
+		compactMb: num(env, "TYPETORCH_COMPACT_MB", 256, 1, 1_000_000),
+		queryTimeoutSeconds: num(env, "TYPETORCH_QUERY_TIMEOUT", 60, 1, 3600),
+		queryConcurrency: num(env, "TYPETORCH_QUERY_CONCURRENCY", 2, 1, 16),
+		fsyncMs: num(env, "TYPETORCH_FSYNC_MS", 1000, 0, 60_000),
+		sql: flag(env, "TYPETORCH_SQL", true),
+		sqlMemoryLimit: env.TYPETORCH_SQL_MEMORY ?? "256MB",
+		erasureDeleteLink: flag(env, "TYPETORCH_ERASURE_DELETE_LINK"),
+		fleetDb: resolve(env.TYPETORCH_SQLITE ?? resolve(dataDir, "fleet.sqlite")),
+		alertWebhookLevels: levels,
+		fleetNewJobsPerMinute: num(env, "TYPETORCH_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),
+		warnings,
 	};
-	const admin = token(env, "TT_ANALYTICS_ADMIN_TOKEN");
-	if (admin) config.adminToken = admin;
-	if (env.TT_ANALYTICS_WEBHOOK_SECRET) config.webhookSecret = env.TT_ANALYTICS_WEBHOOK_SECRET;
-	if (env.TT_ANALYTICS_OPENCLOUD_KEY) config.openCloudKey = env.TT_ANALYTICS_OPENCLOUD_KEY;
+	if (adminAllowIps) config.adminAllowIps = adminAllowIps;
+	if (robloxOAuth) config.robloxOAuth = robloxOAuth;
+	if (publicUrl) config.publicUrl = publicUrl;
+	if (webDir) config.webDir = webDir;
+	if (env.ROBLOX_WEBHOOK_SECRET) config.webhookSecret = env.ROBLOX_WEBHOOK_SECRET;
+	if (env.OPENCLOUD_API_KEY) config.openCloudKey = env.OPENCLOUD_API_KEY;
 	if (universe) {
 		const u = Number(universe);
-		if (!Number.isSafeInteger(u) || u <= 0) throw new Error("TT_ANALYTICS_UNIVERSE_ID must be a positive integer");
+		if (!Number.isSafeInteger(u) || u <= 0) throw new Error("TYPETORCH_UNIVERSE_ID must be a positive integer");
 		config.universeId = u;
 	}
-	if (env.TT_FLEET_WEBHOOK_URL) config.fleetWebhookUrl = env.TT_FLEET_WEBHOOK_URL;
-	if (format) config.fleetWebhookFormat = format as "discord" | "slack" | "json";
+	if (env.TYPETORCH_ALERT_WEBHOOK_URL) config.alertWebhookUrl = env.TYPETORCH_ALERT_WEBHOOK_URL;
+	if (format) config.alertWebhookFormat = format as "discord" | "slack" | "json";
 	return config;
 }
 
@@ -169,11 +301,16 @@ export function describeConfig(config: ServerConfig): string {
 	return [
 		`parts=${[...config.parts].join("+")}`,
 		`data=${config.dataDir}`,
-		`ingest tokens=${config.ingestTokens.length}`,
-		`admin token=${yes(config.adminToken)}`,
+		`api keys=${config.apiKeys.length}`,
+		`explorer=${config.webDir ? "served at /" : "not served"}`,
+		`token login=${config.tokenLogin ? "on" : "off"}`,
+		`roblox sign-in=${config.robloxOAuth ? "on" : "off"}`,
+		`admin allow list=${config.adminAllowIps ? `${config.adminAllowIps.length} rule(s)` : "off"}`,
+		`trust proxy=${config.trustProxy || "off"}`,
+		`public url=${config.publicUrl ?? "not set"}`,
 		`erasure webhook secret=${yes(config.webhookSecret)}`,
 		`open cloud key=${yes(config.openCloudKey)}`,
-		`fleet webhook=${yes(config.fleetWebhookUrl)}`,
+		`alert webhook=${yes(config.alertWebhookUrl)}`,
 		`duckdb memory_limit=${config.memoryLimit} threads=${config.threads}`,
 		`ad-hoc sql=${config.sql ? `on (memory_limit=${config.sqlMemoryLimit})` : "off"}`,
 	].join(", ");

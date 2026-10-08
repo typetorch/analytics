@@ -1,23 +1,43 @@
 /**
- * The TypeTorch analytics server: the DuckDB analytics API and/or the SQLite fleet API in one process.
+ * The TypeTorch backend: analytics (DuckDB), the fleet API (SQLite), error logs, the event bus, the explorer, in one
+ * process. Two roles (server/auth.ts): `game` (the API key) writes; `admin` (the admin token, or an explorer session)
+ * reads and manages.
  *
- *   POST /v1/ingest                 game servers: gzip JSON { events, recordings }, ingest token -> 202 after the raw write
- *   POST /v1/query/<name>           { filters, options } -> { result }       admin token
- *   GET  /v1/queries                the query list                           admin token
- *   GET  /v1/rollups/<daily|players|edges>?from=&to=&pid=&limit=             admin token
- *   POST /v1/sql                    { sql, limit? } -> { columns, rows, truncated }: one read-only SELECT   admin token
- *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)   ingest token
- *   GET  /v1/identity?pid=|uid=     pid <-> UserId; no parameter: count and whether a backfill is possible   admin token
- *   POST /v1/identity/backfill      fill pid <-> UserId from the game's DataStore links (Open Cloud key)   admin token
- *   GET  /v1/storage                bytes and files per part of the data folder, rows, growth (cached 30 s)  admin token
- *   GET  /v1/settings               live dials from data/settings.json       ingest or admin token
+ *   game routes (API key)
+ *   POST /v1/ingest                 gzip JSON { events, recordings, identities? } -> 202 after the raw write
+ *   POST /v1/errors                 { j?, errors: [{ fp, template, stack?, count, firstAt, lastAt, branch, build, realm, pids }] }
+ *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)
+ *   POST /v1/fleet/heartbeat | report | alert | closing | deploy      (fleet/http.ts)
+ *
+ *   admin routes (admin token as Bearer, or the explorer's session cookie)
+ *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
+ *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=
+ *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
+ *   GET  /v1/storage                bytes and files per part of the data folder
+ *   GET  /v1/settings               live dials from data/settings.json
+ *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
+ *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind
+ *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
+ *   GET  /v1/fleet/servers | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
+ *   GET  /v1/access, PUT /v1/access { seq, owners } (admin token only): the owners who may sign in with Roblox
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
- *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts
- *   /v1/fleet/...                   the fleet API (fleet/http.ts)
+ *
+ *   open
+ *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
+ *   GET  /v1/auth/check             which role the credentials have (no side effects); 401 says which logins are on
+ *   POST /v1/auth/login | logout    explorer session by pasting the admin token
+ *   GET  /v1/auth/roblox/start | callback   Sign in with Roblox (owners only)
+ *   GET  /                          the built explorer (web/dist) and its files
+ *
+ * The explorer calls /api/<route> (its dev proxy's prefix); the backend takes that prefix off, so one build works both ways.
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { EventBus } from "../bus.ts";
+import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
+import { handleErrorReads } from "../errors/http.ts";
+import { ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { openSqlite } from "../fleet/db.ts";
@@ -29,12 +49,20 @@ import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
 import { runtimeName, serve, type Served } from "../runtime.ts";
 import { validateSettings } from "../settings.ts";
 import { BatchShapeError, validateBatch } from "../validate.ts";
+import { PACKAGE } from "../version.ts";
+import { AccessError, AccessStore } from "./access.ts";
+import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type Principal } from "./auth.ts";
 import type { ServerConfig } from "./config.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
-import { RateLimiter, bearer, clientIp, json, readCapped, tokenIn, tooMany } from "./http.ts";
-import { SqlInputError, SqlSandbox } from "./sql.ts";
-import { measureStorage, type StorageReport } from "./storage.ts";
+import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie, clientIp, json, readCapped, readCookie, setCookie, tokenIn, tooMany, withSecurityHeaders } from "./http.ts";
+import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
+import { LiveHub } from "./live.ts";
+import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
+import { SqlInputError, SqlSandbox } from "./sql.ts";
+import { StaticSite } from "./static.ts";
+import { measureStorage, type StorageReport } from "./storage.ts";
+import type { BackendBus, BackendTopics } from "./topics.ts";
 import { Warehouse } from "./warehouse.ts";
 
 export interface AppOptions {
@@ -42,6 +70,7 @@ export interface AppOptions {
 	log?: (line: string) => void;
 	/** Don't start the loader / nightly / sweep timers (tests drive them). */
 	manualJobs?: boolean;
+	/** The fetch for outgoing calls: Open Cloud, the alert webhook, Roblox sign-in. */
 	fetch?: typeof fetch;
 	backend?: "bun" | "node";
 }
@@ -51,6 +80,12 @@ export interface App {
 	readonly warehouse?: Warehouse;
 	readonly fleet?: FleetService;
 	readonly notifier?: Notifier;
+	readonly bus: BackendBus;
+	readonly errors: ErrorStore;
+	readonly access: AccessStore;
+	readonly live: LiveHub;
+	/** Explorer sessions open right now. */
+	sessionCount(): number;
 	handle(req: Request, ip?: string): Promise<Response>;
 	/** One loader tick. */
 	load(): Promise<{ files: number; rows: number }>;
@@ -59,10 +94,21 @@ export interface App {
 }
 
 const LIVE_DIALS = ["flushSeconds", "recordShare", "techEvery", "experiments"] as const;
+/** POST /v1/errors: smaller than ingest (a batch is a few hundred items at most). */
+const ERRORS_MAX_BODY = 512 * 1024;
+const ERRORS_MAX_INFLATE = 2 * 1024 * 1024;
+/** The OAuth state cookie. */
+const OAUTH_COOKIE = "tt_oauth";
+const OAUTH_PATH = "/v1/auth/roblox";
+const FLEET_GAME_ROUTES = new Set(Object.keys(FLEET_LIMITS));
 
 export async function startApp(config: ServerConfig, options: AppOptions = {}): Promise<App> {
 	const clock = options.clock ?? Date.now;
-	const log = options.log ?? ((line: string) => console.log(`[analytics] ${line}`));
+	const log = options.log ?? ((line: string) => console.log(`[backend] ${line}`));
+
+	// One bus for the whole process. Stores that answer for their data are awaited subscribers; the rest are queued.
+	const bus: BackendBus = new EventBus<BackendTopics>({ maxQueue: config.busMaxQueue, maxBytes: config.busMaxBytes, log });
+
 	const warehouse = config.parts.has("analytics")
 		? await Warehouse.open({
 				dataDir: config.dataDir,
@@ -78,20 +124,54 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				log,
 			})
 		: undefined;
-	const notifier = config.fleetWebhookUrl
-		? createNotifier({ url: config.fleetWebhookUrl, ...(config.fleetWebhookFormat ? { format: config.fleetWebhookFormat } : {}), levels: config.fleetWebhookLevels, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}) })
+	const notifier = config.alertWebhookUrl
+		? createNotifier({ url: config.alertWebhookUrl, ...(config.alertWebhookFormat ? { format: config.alertWebhookFormat } : {}), levels: config.alertWebhookLevels, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}) })
 		: undefined;
-	// One SQLite file for the fleet tables and pid <-> UserId (identities live here for DuckDB and Basin games alike).
+	// One SQLite file for the fleet tables, pid <-> UserId and the error logs.
 	const sqlite = await openSqlite(config.fleetDb);
 	const identities = await IdentityStore.open(sqlite);
-	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, ...(notifier ? { notifier } : {}) }) : undefined;
+	const errors = await ErrorStore.open(sqlite, { clock, keepDays: config.errorKeepDays, maxKinds: config.errorMaxKinds });
+	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
+	const access = AccessStore.at(config.dataDir, clock);
+
+	// Subscribers ------------------------------------------------------------------------------------------------------
+	// The DuckDB writer: appends the batch to the raw file before the 202 (a 202 means "on disk").
+	if (warehouse) {
+		bus.subscribe(
+			"duckdb-writer",
+			["events"],
+			async (_topic, m) => {
+				if (m.events.length) await warehouse.raw.append("events", m.events.map((r) => `${JSON.stringify({ ...r, rt: m.rt })}\n`).join(""));
+				if (m.recordings.length) await warehouse.raw.append("recordings", m.recordings.map((r) => `${JSON.stringify({ ...r, rt: m.rt })}\n`).join(""));
+			},
+			{ mode: "await" },
+		);
+	}
+	if (fleet) bus.subscribe("fleet-store", ["heartbeat", "deploy"], (_topic, m) => fleet.apply(m), { mode: "await" });
+	bus.subscribe("error-store", ["error"], async (_topic, m) => void (await errors.record(m)), { mode: "await" });
+	// The webhook is slow and remote: queued, so a stuck Discord never holds a heartbeat up.
+	if (notifier) bus.subscribe("alert-notifier", ["alert"], (_topic, alert) => notifier.notify(alert), { mode: "queue", maxQueue: 200 });
+	const live = new LiveHub(bus, { maxClients: config.liveMaxClients, clock });
+	live.start();
+
+	// Auth -------------------------------------------------------------------------------------------------------------
+	const sessions = new Sessions({ adminToken: config.adminToken, idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
+	const auth = new Auth({ adminToken: config.adminToken, apiKeys: config.apiKeys, sessions, isOwner: (id) => access.isOwner(id) });
+	const proxyOpts = { trustProxy: config.trustProxy, ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}) };
+	const authFailures = new FailureLimiter(config.loginMaxFailures, config.loginWindowMs, clock);
+	const checkLimiter = new RateLimiter(120, clock);
+	const oauthLimiter = new RateLimiter(20, clock);
+	const oauth = config.robloxOAuth && config.publicUrl
+		? new RobloxOAuth({ clientId: config.robloxOAuth.clientId, clientSecret: config.robloxOAuth.clientSecret, redirectUri: `${config.publicUrl}/v1/auth/roblox/callback`, clock, ...(options.fetch ? { fetch: options.fetch } : {}) })
+		: undefined;
+	const site = config.webDir ? new StaticSite(config.webDir) : undefined;
+	const adminIpOk = (ip: string) => !config.adminAllowIps || ipAllowed(config.adminAllowIps, ip);
 
 	const ipLimiter = new RateLimiter(config.ipPerMinute, clock);
 	const jobLimiter = new RateLimiter(config.jobPerMinute, clock);
+	const errorJobLimiter = new RateLimiter(30, clock);
 	const fleetLimiters = Object.fromEntries(Object.entries(FLEET_LIMITS).map(([k, n]) => [k, new RateLimiter(n, clock)])) as Record<keyof typeof FLEET_LIMITS, RateLimiter>;
 	const newFleetJobs = new NewJobLimiter(config.fleetNewJobsPerMinute, clock);
-	const isAdmin = (req: Request) => tokenIn(bearer(req), [config.adminToken]);
-	const isIngest = (req: Request) => tokenIn(bearer(req), config.ingestTokens);
 	const keepOpen = new WeakMap<Request, () => void>();
 
 	let settingsCache: { mtime: number; value: Record<string, unknown> } | undefined;
@@ -109,29 +189,36 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return value;
 	}
 
-	async function ingest(req: Request, ip: string): Promise<Response> {
-		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
-		if (!config.ingestTokens.length) return json(503, { error: "ingest is not configured (TT_ANALYTICS_INGEST_TOKENS)" });
-		if (!isIngest(req)) return json(401, { error: "ingest token required" });
-		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
-		const body = await readCapped(req, config.maxBodyBytes);
-		if (!body) return json(413, { error: `body over ${config.maxBodyBytes} bytes` });
+	/** A gzip-or-plain JSON body within the caps, or the response to send. */
+	async function readJsonBody(req: Request, maxBody: number, maxInflate: number): Promise<{ value: unknown; bytes: number } | Response> {
+		const body = await readCapped(req, maxBody);
+		if (!body) return json(413, { error: `body over ${maxBody} bytes` });
 		let bytes: Uint8Array = body;
 		if (req.headers.get("content-encoding") === "gzip" || (body[0] === 0x1f && body[1] === 0x8b)) {
 			try {
-				bytes = gunzipSync(body, { maxOutputLength: config.maxInflateBytes });
+				bytes = gunzipSync(body, { maxOutputLength: maxInflate });
 			} catch (error) {
-				if ((error as { code?: string }).code === "ERR_BUFFER_TOO_LARGE" || (error as Error).name === "RangeError") return json(413, { error: `inflated body over ${config.maxInflateBytes} bytes` });
+				if ((error as { code?: string }).code === "ERR_BUFFER_TOO_LARGE" || (error as Error).name === "RangeError") return json(413, { error: `inflated body over ${maxInflate} bytes` });
 				return json(400, { error: "body is not valid gzip" });
 			}
-			if (bytes.length > config.maxInflateBytes) return json(413, { error: `inflated body over ${config.maxInflateBytes} bytes` });
+			if (bytes.length > maxInflate) return json(413, { error: `inflated body over ${maxInflate} bytes` });
 		}
-		let parsed: unknown;
 		try {
-			parsed = JSON.parse(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8"));
+			return { value: JSON.parse(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8")), bytes: bytes.length };
 		} catch {
 			return json(400, { error: "body is not JSON" });
 		}
+	}
+
+	// Game routes -------------------------------------------------------------------------------------------------------
+
+	async function ingest(req: Request, ip: string): Promise<Response> {
+		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		if (!auth.hasGameKey(req)) return json(401, { error: "API key required" });
+		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		const read = await readJsonBody(req, config.maxBodyBytes, config.maxInflateBytes);
+		if (read instanceof Response) return read;
+		const parsed = read.value;
 		let batch;
 		try {
 			batch = validateBatch(parsed);
@@ -145,9 +232,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const who = parseIdentities(isRecordLike(parsed) ? parsed.identities : undefined, clock());
 		const known = who.rows.filter((r) => !warehouse.isErased(r.pid));
 		if (known.length) await identities.upsert(known);
-		const rt = clock();
-		if (batch.events.length) await warehouse.raw.append("events", batch.events.map((r) => `${JSON.stringify({ ...r, rt })}\n`).join(""));
-		if (batch.recordings.length) await warehouse.raw.append("recordings", batch.recordings.map((r) => `${JSON.stringify({ ...r, rt })}\n`).join(""));
+		// The writer (awaited) puts the rows in the raw file; the live view and others get the same message.
+		await bus.publish("events", { events: batch.events, recordings: batch.recordings, rejected: batch.rejected, rt: clock() }, read.bytes);
 		return json(202, {
 			accepted: batch.events.length + batch.recordings.length,
 			rejected: batch.rejected,
@@ -156,10 +242,28 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		});
 	}
 
-	/** POST /v1/identity (ingest token): identity rows from Basin games (the framework posts them to the fleet API). */
+	/** POST /v1/errors (API key): error logs, templated and fingerprinted by the game. */
+	async function postErrors(req: Request, ip: string): Promise<Response> {
+		if (!auth.hasGameKey(req)) return json(401, { error: "API key required" });
+		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		const read = await readJsonBody(req, Math.min(config.maxBodyBytes, ERRORS_MAX_BODY), Math.min(config.maxInflateBytes, ERRORS_MAX_INFLATE));
+		if (read instanceof Response) return read;
+		const at = clock();
+		let batch;
+		try {
+			batch = parseErrorBatch(read.value, at);
+		} catch (error) {
+			if (error instanceof ErrorInputError) return json(400, { error: error.message });
+			throw error;
+		}
+		if (batch.job && !errorJobLimiter.take(`job:${batch.job}`)) return tooMany(errorJobLimiter.retryAfter(`job:${batch.job}`));
+		if (batch.items.length) await bus.publish("error", { ...batch, at }, read.bytes);
+		return json(202, { accepted: batch.items.length, rejected: batch.rejected, ...(batch.errors.length ? { errors: batch.errors } : {}) });
+	}
+
+	/** POST /v1/identity (API key): identity rows from Basin games (the framework posts them to the fleet API). */
 	async function postIdentity(req: Request, ip: string): Promise<Response> {
-		if (!config.ingestTokens.length) return json(503, { error: "ingest is not configured (TT_ANALYTICS_INGEST_TOKENS)" });
-		if (!isIngest(req)) return json(401, { error: "ingest token required" });
+		if (!auth.hasGameKey(req)) return json(401, { error: "API key required" });
 		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
 		const raw = await readCapped(req, 256 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
@@ -175,6 +279,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (known.length) await identities.upsert(known);
 		return json(202, { accepted: known.length, rejected: who.rejected });
 	}
+
+	// Admin routes ------------------------------------------------------------------------------------------------------
 
 	/** GET /v1/identity (admin): ?pid= or ?uid=, or the count and whether a backfill can run. */
 	async function getIdentity(url: URL): Promise<Response> {
@@ -196,7 +302,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
 	async function backfill(req: Request): Promise<Response> {
 		if (!config.openCloudKey || !config.universeId) {
-			return json(409, { error: "no DataStore access: set TT_ANALYTICS_OPENCLOUD_KEY (universe-datastores.objects:list and :read) and TT_ANALYTICS_UNIVERSE_ID" });
+			return json(409, { error: "no DataStore access: set OPENCLOUD_API_KEY (universe-datastores.objects:list and :read) and TYPETORCH_UNIVERSE_ID" });
 		}
 		const raw = await readCapped(req, 16 * 1024);
 		let body: { pageToken?: unknown; maxEntries?: unknown } = {};
@@ -306,7 +412,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	async function adhocSql(req: Request): Promise<Response> {
 		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
-		if (!config.sql) return json(404, { error: "ad-hoc SQL is off on this server (TT_ANALYTICS_SQL=0)" });
+		if (!config.sql) return json(404, { error: "ad-hoc SQL is off on this server (TYPETORCH_SQL=0)" });
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: { sql?: unknown; limit?: unknown };
@@ -366,7 +472,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return json(200, { rows: rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v instanceof Date ? v.toISOString().slice(0, 10) : v]))) });
 	}
 
-	async function erasure(req: Request): Promise<Response> {
+	/** POST /v1/erasure: the Roblox webhook (signed), or the admin token / an admin session erasing by pid. */
+	async function erasure(req: Request, ip: string): Promise<Response> {
 		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
@@ -377,7 +484,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		} catch {
 			return json(400, { error: "body is not JSON" });
 		}
-		if (bearer(req) && isAdmin(req)) {
+		const principal = adminIpOk(ip) ? auth.principal(req) : undefined;
+		if (principal?.role === "admin") {
+			if (principal.via === "cookie") {
+				const problem = cookieMutationProblem(req, proxyOpts);
+				if (problem) return json(403, { error: problem });
+			}
 			const b = body as { pid?: unknown; pids?: unknown };
 			const pids = (Array.isArray(b.pids) ? b.pids : [b.pid]).filter((p): p is string => typeof p === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(p));
 			if (!pids.length) return json(400, { error: "give pid or pids" });
@@ -412,7 +524,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			}
 		} else if (!pids.length) {
 			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no identity row and no Open Cloud key for the DataStore lookup" });
-			return json(202, { ok: true, pending: "no pid known for this UserId: configure TT_ANALYTICS_OPENCLOUD_KEY and TT_ANALYTICS_UNIVERSE_ID, or erase by pid with the admin token" });
+			return json(202, { ok: true, pending: "no pid known for this UserId: configure OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID, or erase by pid with the admin token" });
 		}
 		if (!pids.length) {
 			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no pid link (already anonymous)" });
@@ -427,10 +539,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return json(200, { ok: true, erased: pids.length });
 	}
 
-	async function health(req: Request): Promise<Response> {
-		if (!isAdmin(req)) return json(200, { ok: true });
+	async function health(req: Request, ip: string): Promise<Response> {
+		const principal = adminIpOk(ip) ? auth.principal(req) : undefined;
+		if (principal?.role !== "admin") return json(200, { ok: true });
 		const memory = process.memoryUsage();
-		const out: Record<string, unknown> = { ok: true, runtime: runtimeName(), uptimeSeconds: Math.round(process.uptime()), rssMb: Math.round(memory.rss / 1048576), heapMb: Math.round(memory.heapUsed / 1048576) };
+		const out: Record<string, unknown> = {
+			ok: true,
+			version: PACKAGE.version,
+			runtime: runtimeName(),
+			uptimeSeconds: Math.round(process.uptime()),
+			rssMb: Math.round(memory.rss / 1048576),
+			heapMb: Math.round(memory.heapUsed / 1048576),
+		};
 		if (warehouse) {
 			const oldest = warehouse.raw.oldestPending();
 			out.analytics = {
@@ -441,45 +561,269 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			};
 		}
 		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier ? { webhook: notifier.stats } : {}) };
+		// The bus: per subscriber what was handled, what is waiting and what was dropped (full queue).
+		out.bus = bus.stats();
+		out.live = live.stats;
+		out.errors = errors.stats;
+		out.sessions = sessions.size;
 		return json(200, out);
 	}
 
-	async function handle(req: Request, peer = ""): Promise<Response> {
-		const url = new URL(req.url);
-		const ip = clientIp(req, peer, config.trustProxy);
-		const path = url.pathname;
+	// Auth routes -------------------------------------------------------------------------------------------------------
+
+	const loginOptions = () => ({ token: config.tokenLogin, roblox: Boolean(oauth) });
+	const secureCookie = (req: Request) => isHttps(req, proxyOpts);
+	const notFound = () => json(404, { error: "not found" });
+	const blockedResponse = (ip: string): Response | undefined => {
+		const wait = authFailures.blocked(ip);
+		return wait ? tooMany(wait) : undefined;
+	};
+	function failedAuth(ip: string, what: string): void {
+		authFailures.fail(ip);
+		log(`${what} failed from ${ip}`);
+		if (authFailures.blocked(ip)) log(`${ip} is blocked for ${Math.ceil(config.loginWindowMs / 60_000)} min after ${config.loginMaxFailures} failed attempts`);
+	}
+	function sessionCookie(req: Request, value: string): string {
+		return setCookie(SESSION_COOKIE, value, { secure: secureCookie(req), sameSite: "Strict", maxAgeSeconds: config.sessionMaxMs / 1000 });
+	}
+	const describeUser = (p: Principal) => ("user" in p ? p.user : undefined);
+
+	/** GET /v1/auth/check: which role these credentials have. No side effects (a rejected Bearer only counts toward the limit). */
+	function authCheck(req: Request, ip: string): Response {
+		const gameOnly = auth.hasGameKey(req);
+		// Behind the allow list the admin side doesn't exist for other addresses; a game key may still check itself.
+		if (!adminIpOk(ip) && !gameOnly) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		if (!checkLimiter.take(ip)) return tooMany(checkLimiter.retryAfter(ip));
+		const principal = auth.principal(req);
+		if (principal && (principal.role === "game" || adminIpOk(ip))) {
+			const user = describeUser(principal);
+			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version });
+		}
+		if (bearer(req) !== undefined) failedAuth(ip, "token check");
+		return json(401, { error: "sign in required", login: loginOptions() });
+	}
+
+	async function login(req: Request, ip: string): Promise<Response> {
+		if (!adminIpOk(ip)) return notFound();
+		if (!config.tokenLogin) return json(404, { error: "token login is off on this server" });
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		const problem = cookieMutationProblem(req, proxyOpts);
+		if (problem) return json(403, { error: problem });
+		if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON: { token }" });
+		const raw = await readCapped(req, 4096);
+		let token: unknown;
 		try {
-			if (path === "/healthz" && req.method === "GET") return await health(req);
-			if (path === "/v1/ingest") return req.method === "POST" ? await ingest(req, ip) : json(405, { error: "POST only" });
-			if (path === "/v1/identity" && req.method === "POST") return await postIdentity(req, ip);
-			if (path.startsWith("/v1/fleet/")) {
-				if (!fleet) return json(404, { error: "the fleet part is off on this server" });
-				// Per-JobId limits and a cap on never-seen JobIds, no per-IP limit: many game servers can share one egress IP.
-				return (
-					(await handleFleet(req, url, { service: fleet, isAdmin, isIngest, limiters: fleetLimiters, newJobs: newFleetJobs, keepOpen: (r) => keepOpen.get(r)?.() }, ip)) ??
-					json(404, { error: "not found" })
-				);
+			token = raw ? (JSON.parse(Buffer.from(raw).toString("utf8")) as { token?: unknown }).token : undefined;
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		if (typeof token !== "string" || !tokenIn(token, [config.adminToken])) {
+			failedAuth(ip, "admin login");
+			return json(401, { error: "wrong token" });
+		}
+		authFailures.reset(ip);
+		const id = sessions.create({ kind: "token" });
+		return json(200, { ok: true, role: "admin", via: "cookie", user: { kind: "token" } }, { "set-cookie": sessionCookie(req, id) });
+	}
+
+	function logout(req: Request): Response {
+		const cookie = readCookie(req, SESSION_COOKIE);
+		if (cookie && sessions.get(cookie)) {
+			const problem = cookieMutationProblem(req, proxyOpts);
+			if (problem) return json(403, { error: problem });
+			sessions.destroy(cookie);
+		}
+		return json(200, { ok: true }, { "set-cookie": clearCookie(SESSION_COOKIE, { secure: secureCookie(req), sameSite: "Strict" }) });
+	}
+
+	const redirect = (location: string, cookies: string[] = []): Response => {
+		const headers = new Headers({ location, "cache-control": "no-store" });
+		for (const c of cookies) headers.append("set-cookie", c);
+		return new Response(null, { status: 302, headers });
+	};
+
+	async function robloxStart(req: Request, ip: string): Promise<Response> {
+		if (!oauth) return json(404, { error: "Sign in with Roblox is off on this server" });
+		if (!adminIpOk(ip)) return notFound();
+		if (!oauthLimiter.take(`start:${ip}`)) return tooMany(oauthLimiter.retryAfter(`start:${ip}`));
+		try {
+			const { url, state } = await oauth.start();
+			const cookie = setCookie(OAUTH_COOKIE, state, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: 600, path: OAUTH_PATH });
+			return redirect(url, [cookie]);
+		} catch (error) {
+			log(`roblox sign-in could not start: ${error instanceof OAuthError ? error.detail : "unexpected error"}`);
+			return redirect("/?login_error=failed");
+		}
+	}
+
+	async function robloxCallback(req: Request, url: URL, ip: string): Promise<Response> {
+		if (!oauth) return json(404, { error: "Sign in with Roblox is off on this server" });
+		if (!adminIpOk(ip)) return notFound();
+		if (!oauthLimiter.take(`callback:${ip}`)) return tooMany(oauthLimiter.retryAfter(`callback:${ip}`));
+		const clear = clearCookie(OAUTH_COOKIE, { secure: secureCookie(req), sameSite: "Lax", path: OAUTH_PATH });
+		try {
+			const who = await oauth.complete(
+				{ code: url.searchParams.get("code"), state: url.searchParams.get("state"), error: url.searchParams.get("error") },
+				readCookie(req, OAUTH_COOKIE),
+			);
+			if (!access.isOwner(who.userId)) {
+				log(`roblox sign-in refused from ${ip}: user ${who.userId} is not an owner`);
+				return redirect("/?login_error=not_owner", [clear]);
 			}
-			if (path === "/v1/erasure") return req.method === "POST" ? await erasure(req) : json(405, { error: "POST only" });
-			if (path === "/v1/settings" && req.method === "GET") {
-				if (!isAdmin(req) && !isIngest(req)) return json(401, { error: "token required" });
-				return json(200, liveDials());
+			const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) });
+			return redirect("/", [clear, sessionCookie(req, id)]);
+		} catch (error) {
+			if (error instanceof OAuthError) {
+				log(`roblox sign-in failed from ${ip}: ${error.code}: ${error.detail}`);
+				return redirect(`/?login_error=${error.code}`, [clear]);
 			}
-			if (!isAdmin(req)) return json(path.startsWith("/v1/") ? 401 : 404, { error: path.startsWith("/v1/") ? "admin token required" : "not found" });
-			if (path === "/v1/queries" && req.method === "GET") return json(200, { queries: describeQueries() });
-			if (path === "/v1/sql") return req.method === "POST" ? await adhocSql(req) : json(405, { error: "POST only" });
-			if (path === "/v1/storage" && req.method === "GET") return json(200, await storage());
-			if (path === "/v1/identity" && req.method === "GET") return await getIdentity(url);
-			if (path === "/v1/identity/backfill") return req.method === "POST" ? await backfill(req) : json(405, { error: "POST only" });
+			log(`roblox sign-in failed from ${ip}: unexpected error`);
+			return redirect("/?login_error=failed", [clear]);
+		}
+	}
+
+	/** PUT /v1/access (the admin token only: the CLI sends the signed access list's owners). */
+	async function putAccess(req: Request, principal: Principal): Promise<Response> {
+		if (principal.via !== "bearer") return json(403, { error: "the owner list is set with the admin token (the CLI), not from the explorer" });
+		const raw = await readCapped(req, 64 * 1024);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: unknown;
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8"));
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		try {
+			const result = access.put(body);
+			// Owners who were removed (or never were) lose their sessions at once.
+			const ended = sessions.endWhere((s) => s.user.kind === "roblox" && !access.isOwner(s.user.userId));
+			if (result.changed) log(`owner list updated to seq ${result.record.seq}: ${result.record.owners.length} owner(s)${ended ? `, ${ended} session(s) ended` : ""}`);
+			return json(200, { ...result.record, changed: result.changed, sessionsEnded: ended });
+		} catch (error) {
+			if (error instanceof AccessError) return json(error.status, { error: error.message, ...(error.seq !== undefined ? { seq: error.seq } : {}) });
+			throw error;
+		}
+	}
+
+	// Routing -----------------------------------------------------------------------------------------------------------
+
+	/** The admin gate: allow list, failure limit, credentials, and the cookie's extra checks. Returns the principal or the answer. */
+	function adminGate(req: Request, ip: string): { principal: Principal & { role: "admin" } } | { response: Response } {
+		if (!adminIpOk(ip)) return { response: notFound() };
+		const blocked = blockedResponse(ip);
+		if (blocked) return { response: blocked };
+		const principal = auth.principal(req);
+		if (!principal) {
+			if (bearer(req) !== undefined) failedAuth(ip, "admin request");
+			return { response: json(401, { error: "admin token required" }) };
+		}
+		if (principal.role !== "admin") return { response: json(401, { error: "admin token required (the API key can write, not read)" }) };
+		if (principal.via === "cookie") {
+			const problem = cookieMutationProblem(req, proxyOpts);
+			if (problem) return { response: json(403, { error: problem }) };
+		}
+		return { principal };
+	}
+
+	async function route(req: Request, url: URL, path: string, ip: string): Promise<Response> {
+		const method = req.method;
+		if (method === "OPTIONS") return json(405, { error: "no CORS here: use the same origin or a Bearer token" });
+		if (path === "/healthz" && method === "GET") return health(req, ip);
+
+		// Open: who am I, log in and out, Sign in with Roblox.
+		if (path === "/v1/auth/check") return method === "GET" ? authCheck(req, ip) : json(405, { error: "GET only" });
+		if (path === "/v1/auth/login") return method === "POST" ? login(req, ip) : json(405, { error: "POST only" });
+		if (path === "/v1/auth/logout") return method === "POST" ? logout(req) : json(405, { error: "POST only" });
+		if (path === "/v1/auth/roblox/start") return method === "GET" ? robloxStart(req, ip) : json(405, { error: "GET only" });
+		if (path === "/v1/auth/roblox/callback") return method === "GET" ? robloxCallback(req, url, ip) : json(405, { error: "GET only" });
+
+		// Game routes (API key).
+		if (path === "/v1/ingest") return method === "POST" ? ingest(req, ip) : json(405, { error: "POST only" });
+		if (path === "/v1/errors" && method === "POST") return postErrors(req, ip);
+		if (path === "/v1/identity" && method === "POST") return postIdentity(req, ip);
+		if (path.startsWith("/v1/fleet/")) {
+			if (!fleet) return json(404, { error: "the fleet part is off on this server" });
+			const gameWrite = method === "POST" && FLEET_GAME_ROUTES.has(path.slice("/v1/fleet/".length));
+			let gate: ReturnType<typeof adminGate> | undefined;
+			if (!gameWrite) {
+				gate = adminGate(req, ip);
+				if ("response" in gate) return gate.response;
+			}
+			// Per-JobId limits and a cap on never-seen JobIds, no per-IP limit: many game servers can share one egress IP.
+			return (
+				(await handleFleet(
+					req,
+					url,
+					{
+						service: fleet,
+						isAdmin: () => gate !== undefined,
+						isIngest: (r) => auth.hasGameKey(r),
+						limiters: fleetLimiters,
+						newJobs: newFleetJobs,
+						keepOpen: (r) => keepOpen.get(r)?.(),
+						accept: (topic, message) => bus.publish(topic, message as never),
+					},
+					ip,
+				)) ?? json(404, { error: "not found" })
+			);
+		}
+		if (path === "/v1/erasure") return method === "POST" ? erasure(req, ip) : json(405, { error: "POST only" });
+
+		// Everything else under /v1 reads or manages: admin only.
+		if (path.startsWith("/v1/")) {
+			const gate = adminGate(req, ip);
+			if ("response" in gate) return gate.response;
+			if (path === "/v1/settings" && method === "GET") return json(200, liveDials());
+			if (path === "/v1/queries" && method === "GET") return json(200, { queries: describeQueries() });
+			if (path === "/v1/sql") return method === "POST" ? adhocSql(req) : json(405, { error: "POST only" });
+			if (path === "/v1/storage" && method === "GET") return json(200, await storage());
+			if (path === "/v1/identity" && method === "GET") return getIdentity(url);
+			if (path === "/v1/identity/backfill") return method === "POST" ? backfill(req) : json(405, { error: "POST only" });
+			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: config.errorKeepDays });
+			if (path === "/v1/live" && method === "GET") return live.connect(req, url, () => keepOpen.get(req)?.());
+			if (path === "/v1/access") {
+				if (method === "GET") return json(200, access.get());
+				if (method === "PUT") return putAccess(req, gate.principal);
+				return json(405, { error: "GET or PUT only" });
+			}
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
-			if (q) return req.method === "POST" ? await query(req, q[1]) : json(405, { error: "POST only" });
+			if (q) return method === "POST" ? query(req, q[1]) : json(405, { error: "POST only" });
 			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);
-			if (r && req.method === "GET") return await rollups(url, r[1]);
-			return json(404, { error: "not found" });
+			if (r && method === "GET") return rollups(url, r[1]);
+			return notFound();
+		}
+
+		// The explorer (open to the allow list's addresses; its data still needs the admin role).
+		if (site && adminIpOk(ip)) {
+			const page = await site.serve(method, path);
+			if (page) return page;
+		}
+		return notFound();
+	}
+
+	async function handle(req: Request, peer = ""): Promise<Response> {
+		const original = new URL(req.url);
+		const ip = clientIp(req, peer, config.trustProxy);
+		// The explorer's base path is /api (its dev proxy strips it); take it off here too.
+		let path = original.pathname;
+		let url = original;
+		if (path.startsWith("/api/")) {
+			path = path.slice(4);
+			url = new URL(original);
+			url.pathname = path;
+		}
+		let response: Response;
+		try {
+			response = await route(req, url, path, ip);
 		} catch (error) {
 			log(`${req.method} ${path} failed: ${((error as Error).message ?? String(error)).slice(0, 300)}`);
-			return json(500, { error: "internal error" });
+			response = json(500, { error: "internal error" });
 		}
+		const html = (response.headers.get("content-type") ?? "").startsWith("text/html");
+		return withSecurityHeaders(response, { https: isHttps(req, proxyOpts), csp: html ? EXPLORER_CSP : API_CSP });
 	}
 
 	const served: Served = await serve({
@@ -492,11 +836,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			keepOpen.set(req, () => ctx.timeout(0));
 			return handle(req, ctx.ip);
 		},
-		error: () => json(500, { error: "internal error" }),
+		error: () => withSecurityHeaders(json(500, { error: "internal error" }), { https: false, csp: API_CSP }),
 	});
 
 	// Jobs: the loader every loadSeconds, the nightly export when the UTC day changes (and every 6 h for late rows), the
-	// fleet sweep every 10 s, the erasure rewrite after each erasure and at start.
+	// fleet sweep every 10 s, the erasure rewrite after each erasure and at start, the error-log prune hourly.
 	const timers: ReturnType<typeof setInterval>[] = [];
 	let lastNightlyDay = -1;
 	let lastNightlyAt = 0;
@@ -528,6 +872,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
 		}
 		if (fleet) timers.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
+		timers.push(setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000));
 		for (const t of timers) t.unref?.();
 	}
 
@@ -536,12 +881,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		...(warehouse ? { warehouse } : {}),
 		...(fleet ? { fleet } : {}),
 		...(notifier ? { notifier } : {}),
+		bus,
+		errors,
+		access,
+		live,
+		sessionCount: () => sessions.size,
 		handle,
 		load: () => (warehouse ? warehouse.load() : Promise.resolve({ files: 0, rows: 0 })),
 		nightly: () => (warehouse ? warehouse.nightly() : Promise.resolve({ days: [], pruned: 0, compacted: false })),
 		async stop() {
 			for (const t of timers) clearInterval(t);
+			live.stop();
 			await served.stop();
+			await bus.idle();
 			if (sandbox) await (await sandbox.catch(() => undefined))?.close();
 			if (warehouse) {
 				await warehouse.load().catch(() => {});
@@ -557,3 +909,6 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 function isRecordLike(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+// Kept for callers that import the header name.
+export { CSRF_HEADER };

@@ -4,6 +4,7 @@
  *   { backend: "duckdb", url, token }                      -> a TypeTorch analytics server (admin token)
  *   { backend: "duckdb", dataDir }                         -> a local copy of a server's data folder (read-only)
  */
+import { applyLegacyEnv, LEGACY_CLIENT_ENV } from "../legacy-env.ts";
 import { BasinStore, type BasinStoreConfig } from "./basin.ts";
 import { openDuckDbStore, type LocalDuckDbOptions } from "./duckdb.ts";
 import { RemoteStore, type RemoteStoreConfig } from "./remote.ts";
@@ -26,15 +27,18 @@ export async function createStore(config: StoreConfig): Promise<Store> {
 
 /**
  * A store config from environment variables (names only; values are never printed):
- *   TT_ANALYTICS_URL + TT_ANALYTICS_ADMIN_TOKEN                       -> the DuckDB server
+ *   TYPETORCH_BACKEND_URL + TYPETORCH_ADMIN_TOKEN                     -> the TypeTorch backend (DuckDB)
+ *   (TT_ANALYTICS_URL and TT_ANALYTICS_ADMIN_TOKEN still work for one release, with a warning on stderr)
  *   CLOUDFLARE_ACCOUNT_ID + TT_BASIN_BUCKET + TT_BASIN_SQL_TOKEN      -> Basin (WRANGLER_BASIN_SQL_AUTH_TOKEN works too)
  * Optional: TT_BASIN_NAMESPACE. `backend` picks one when both are set.
  */
-export function storeConfigFromEnv(env: Record<string, string | undefined>, backend?: "basin" | "duckdb"): StoreConfig {
-	const want = backend ?? (env.TT_ANALYTICS_URL ? "duckdb" : "basin");
+export function storeConfigFromEnv(rawEnv: Record<string, string | undefined>, backend?: "basin" | "duckdb", warn: (line: string) => void = (line) => console.warn(line)): StoreConfig {
+	const { env, warnings } = applyLegacyEnv(rawEnv, LEGACY_CLIENT_ENV);
+	for (const w of warnings) warn(w);
+	const want = backend ?? (env.TYPETORCH_BACKEND_URL ? "duckdb" : "basin");
 	if (want === "duckdb") {
-		if (!env.TT_ANALYTICS_URL || !env.TT_ANALYTICS_ADMIN_TOKEN) throw new Error("set TT_ANALYTICS_URL and TT_ANALYTICS_ADMIN_TOKEN");
-		return { backend: "duckdb", url: env.TT_ANALYTICS_URL, token: env.TT_ANALYTICS_ADMIN_TOKEN };
+		if (!env.TYPETORCH_BACKEND_URL || !env.TYPETORCH_ADMIN_TOKEN) throw new Error("set TYPETORCH_BACKEND_URL and TYPETORCH_ADMIN_TOKEN");
+		return { backend: "duckdb", url: env.TYPETORCH_BACKEND_URL, token: env.TYPETORCH_ADMIN_TOKEN };
 	}
 	const token = env.TT_BASIN_SQL_TOKEN ?? env.WRANGLER_BASIN_SQL_AUTH_TOKEN;
 	if (!env.CLOUDFLARE_ACCOUNT_ID || !env.TT_BASIN_BUCKET || !token) {
