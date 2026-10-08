@@ -1,29 +1,350 @@
-# @typetorch/analytics
+# @typetorch/backend
 
-The read side of TypeTorch analytics (plan: `plans/16-analytics.md`):
+The TypeTorch backend: one server for everything a game's TypeTorch needs from the outside (plans: `plans/16-analytics.md`,
+`plans/20-signed-settings.md`, `plans/21-backend-and-config.md`):
 
-- the shared **row format** the game writes (`AnalyticsEngine` in `@typetorch/framework`), with validation;
-- **stores** that answer the same logical queries on **Cloudflare Basin** (Basin SQL) or **DuckDB**;
-- the **analytics server** (DuckDB, for a 1 GB VPS) and the **fleet API** (SQLite: live game-server status, deploy
-  reports, alerts), one Bun/Node process, each part usable alone;
+- the **fleet API** (SQLite): live game-server status, deploy reports, alerts;
+- **analytics** on **DuckDB** (your own server) or **Cloudflare Basin**: the shared row format, the stores, the logical
+  queries, the server for a 1 GB VPS;
+- **error logs**: game servers post error kinds (names and ids already replaced), the backend counts them per minute;
+- an in-process **event bus** between them, and a live stream of it (`GET /v1/live`);
+- the **web explorer** (`web/`), served at `/`, with login (the admin token, or Sign in with Roblox for owners);
 - a small programmatic API for the CLI: `createStore`, `store.query`, `writeSettings` / `writeFleetSettings` (through
   the game's TypeTorch CLI), `createFleetClient`, `graph.toMermaid()`.
 
-Runs on Bun and on Node 20+ (the fleet part needs Node 22.5+ for `node:sqlite`, or Bun).
+Two keys, nothing else to remember: game servers write with **`TYPETORCH_API_KEY`**; the CLI and the explorer read and
+manage with **`TYPETORCH_ADMIN_TOKEN`**. Runs on Bun and on Node 20+ (the fleet part needs Node 22.5+ for `node:sqlite`,
+or Bun). Ships as one Docker image that works as a Coolify app.
 
 ## Contents
 
+- [Quick start (local)](#quick-start-local)
+- [Settings](#settings)
+- [Security](#security)
+- [Routes and roles](#routes-and-roles)
+- [Deploy on Coolify](#deploy-on-coolify)
+- [The event bus](#the-event-bus)
+- [Error logs](#error-logs)
+- [The explorer](#the-explorer)
 - [Row format](#row-format)
 - [Programmatic API](#programmatic-api)
 - [Queries](#queries) (with example output)
 - [Cloudflare Basin setup](#cloudflare-basin-setup)
-- [The analytics server (DuckDB)](#the-analytics-server-duckdb)
+- [The analytics part (DuckDB)](#the-analytics-part-duckdb)
 - [The fleet API (SQLite)](#the-fleet-api-sqlite)
 - [Privacy](#privacy)
-- [Deploy on a 1 GB VPS](#deploy-on-a-1-gb-vps)
+- [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
 - [Development](#development)
 - [Open issues](#open-issues)
+
+## Quick start (local)
+
+The test place without Coolify: the backend on this PC, a Cloudflare quick tunnel so game servers can reach it, and the
+game's settings written for you.
+
+1. In the **game repo's `.env`** (gitignored) set two random values, 32+ characters each and different
+   (`openssl rand -hex 32` makes one):
+
+   ```
+   TYPETORCH_API_KEY=<random>
+   TYPETORCH_ADMIN_TOKEN=<random>
+   ```
+
+   For Sign in with Roblox add the OAuth app's `ROBLOX_OAUTH_CLIENT_ID` and `ROBLOX_OAUTH_CLIENT_SECRET` (see
+   [Sign in with Roblox](#sign-in-with-roblox)); without them that button is simply off.
+2. Build the explorer once: `bun run web:install && bun run web:build`.
+3. Run it, pointing at the game repo:
+
+   ```sh
+   bun install
+   bun run local -- --game ../template
+   ```
+
+   It reads the keys from that `.env` (a missing one stops with a red error that says what to add), keeps its data in this
+   repo's `data/`, serves the explorer at <http://localhost:8787> (sign in with the admin token), opens the tunnel, and
+   writes the game's settings through the game's own CLI (`typetorch fleet setup`, `typetorch settings set analytics -`,
+   which sign with the game's keys: `typetorch keys init` first). `--port`, `--public-url`, `--no-settings`, `--cli <entry>`
+   and `--cloudflared <path>` exist. Ctrl+C stops the tunnel and the server it started. Without `--game` it still runs but
+   says in red that game servers were NOT told about it.
+
+Working on the explorer itself: `bun run web:dev` is `vite dev` in `web/`; pass `--game <repo>` (see
+[The explorer](#the-explorer)).
+
+## Settings
+
+Everything is an environment variable (a Docker/Coolify env, a systemd `EnvironmentFile`, or `--env-file <file>` /
+`TYPETORCH_ENV_FILE` for a local file; real variables win over the file). Values are never printed; the startup line and
+`/healthz` only say whether something is set. The server **refuses to start** without the two required values.
+
+| Variable | Required | What |
+|---|---|---|
+| `TYPETORCH_API_KEY` | yes | The game role: game servers write events, heartbeats, deploy reports, alerts and error logs with it. 32+ characters. It reads nothing. |
+| `TYPETORCH_ADMIN_TOKEN` | yes | The admin role: the CLI (Bearer) and the explorer's token login read and manage with it. 32+ characters, **different** from the API key. |
+| `TYPETORCH_API_KEY_PREVIOUS` | no | Also accepted as a game key, for a rotation without downtime: put the old key here, update the games, remove it. |
+| `TYPETORCH_DATA_DIR` | no | Where the data lives. `/data` in Docker, `./data` otherwise. |
+| `PORT`, `HOST` | no | Listen address (8787; `127.0.0.1`, `0.0.0.0` in Docker). |
+| `TYPETORCH_PUBLIC_URL` | no | The public https address, no trailing slash. Used for the Roblox sign-in redirect, `Secure` cookies and origin checks. |
+| `TYPETORCH_TRUST_PROXY` | no | `1` when one proxy sits in front (Coolify, Caddy): client addresses come from `X-Forwarded-For`. A number counts the proxies (`2` = two hops). Off by default. |
+| `TYPETORCH_ADMIN_ALLOW_IPS` | no | Comma-separated addresses and CIDR ranges. When set, admin routes, the explorer and the login answer 404 to every other address. Game routes stay open. |
+| `TYPETORCH_TOKEN_LOGIN` | no | `off` hides and refuses the admin-token login in the browser (the CLI's Bearer token still works). Default `on`. |
+| `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
+| `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
+| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill. |
+| `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests). |
+| `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https). |
+
+<details><summary>Advanced (defaults suit a 1 GB machine)</summary>
+
+| Variable | Default | What |
+|---|---|---|
+| `TYPETORCH_PARTS` | `analytics,fleet` | Which parts run. A game on Basin runs `fleet` only. Error logs are always on. |
+| `TYPETORCH_MEMORY_LIMIT`, `TYPETORCH_THREADS` | `400MB`, `2` | DuckDB's memory cap and threads. |
+| `TYPETORCH_LOAD_SECONDS` | `5` | Seconds between loader ticks (raw files into DuckDB). |
+| `TYPETORCH_KEEP_DAYS`, `TYPETORCH_RAW_KEEP_DAYS` | `400`, `14` | Days of day files and of raw archives kept. |
+| `TYPETORCH_COMPACT_MB` | `256` | Rewrite `live.duckdb` after the nightly export when it passes this. |
+| `TYPETORCH_QUERY_TIMEOUT`, `TYPETORCH_QUERY_CONCURRENCY` | `60`, `2` | Query timeout (s) and queries at once. |
+| `TYPETORCH_SQL`, `TYPETORCH_SQL_MEMORY` | `1`, `256MB` | Ad-hoc SQL on/off and its sandbox's memory. |
+| `TYPETORCH_FSYNC_MS` | `1000` | fdatasync interval of the raw files (0 = every write). |
+| `TYPETORCH_MAX_BODY`, `TYPETORCH_MAX_INFLATE` | 2 MB, 16 MB | Ingest body caps (gzip, inflated). |
+| `TYPETORCH_IP_PER_MINUTE`, `TYPETORCH_JOB_PER_MINUTE` | `6000`, `60` | Ingest rate limits per address and per JobId. |
+| `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds the fleet API lets in per minute. |
+| `TYPETORCH_SQLITE` | `<data dir>/fleet.sqlite` | The SQLite file (fleet, identities, error logs). |
+| `TYPETORCH_ALERT_WEBHOOK_FORMAT`, `TYPETORCH_ALERT_WEBHOOK_LEVELS` | detected, `critical` | `discord`, `slack` or `json`; which levels are sent. |
+| `TYPETORCH_ERASURE_DELETE_LINK` | `0` | `1` also deletes the DataStore link on erasure. |
+| `TYPETORCH_ERROR_KEEP_DAYS`, `TYPETORCH_ERROR_MAX_KINDS` | `30`, `5000` | Error log retention and the most kinds stored. |
+| `TYPETORCH_SESSION_IDLE_HOURS`, `TYPETORCH_SESSION_MAX_DAYS` | `12`, `7` | Explorer session lifetime. |
+| `TYPETORCH_LOGIN_MAX_FAILURES`, `TYPETORCH_LOGIN_WINDOW_MINUTES` | `5`, `15` | Failed logins per address before 429. |
+| `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
+| `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams. |
+| `TYPETORCH_WEB_DIR`, `TYPETORCH_EXPLORER` | `web/dist`, `on` | Where the built explorer is; `off` serves the API only. |
+
+</details>
+
+**Old names** (`TT_ANALYTICS_*`, `TT_FLEET_*`, `TT_SERVER_PARTS`, `TYPETORCH_FLEET_TOKEN`,
+`TYPETORCH_FLEET_INGEST_TOKEN`) still work for this release: each one read prints a one-line warning that names the new
+variable (`TT_ANALYTICS_INGEST_TOKENS` was a list: every entry stays accepted). Remove them. See the CHANGELOG for the map.
+
+## Security
+
+The model in plain words. The backend is meant to sit on a public https address (Coolify's proxy, or Caddy).
+
+**Two keys, two roles.** A game server holds the **API key**. It lets a server *write* (events, heartbeats, deploy reports,
+alerts, error logs) and nothing else: no read route accepts it, so a leaked game key can't read your data. The **admin
+token** lives on your PC (the game repo's `.env`) and in the explorer's login; it reads and manages. The two must differ
+and be 32+ random characters, or the server won't start. Tokens are compared in constant time and are only accepted in
+the `Authorization: Bearer` header, never in a URL. `GET /v1/auth/check` tells a caller which role its token has (no side
+effects; the CLI checks before it signs settings).
+
+**The explorer's login.** You paste the admin token once (or sign in with Roblox, below); the backend answers with a
+session cookie and forgets the token. The session is a random 32-byte id kept in memory on the server, ending after 12 hours
+idle or 7 days at most, bound to the admin token it was made with (changing `TYPETORCH_ADMIN_TOKEN` and restarting ends every
+session; so does any restart). The cookie is `HttpOnly`, `SameSite=Strict`, `Path=/` and `Secure` whenever the request
+came over https (also behind a trusted proxy that says so, or with an https `TYPETORCH_PUBLIC_URL`). Sign out ends it on the
+server. A request that changes something and is authenticated by the cookie must also carry the header `X-TypeTorch: 1`
+(a web page on another site can't send it) and, when the browser sends an `Origin`, that must be this site. Bearer requests
+(the CLI) need neither: a browser can't attach them by itself.
+
+**Guessing.** Failed logins and bad Bearer tokens on admin routes are counted per client address: after 5 in 15 minutes the
+address gets `429` with `Retry-After` (even for the right token) until the oldest failure ages out. Each failure is logged
+with the address only, never what was typed. `GET /v1/auth/check` and the Roblox start/callback are rate limited too.
+
+**Who may reach the admin side.** `TYPETORCH_ADMIN_ALLOW_IPS` (addresses and CIDR ranges) makes admin routes, the explorer
+and the login answer `404` to every other address. Game routes stay open to any address (Roblox servers' addresses vary)
+but need the API key. Client addresses come from the TCP peer, or from `X-Forwarded-For` only when the proxy is trusted
+(`TYPETORCH_TRUST_PROXY`; set it to `1` on Coolify, leave it off when nothing sits in front).
+
+**Browser hardening.** Every answer carries `Content-Security-Policy` (the explorer: its own scripts, styles and fonts only,
+no inline scripts, connections to itself, avatars from Roblox's CDN; the API: nothing), `X-Frame-Options: DENY` with
+`frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Strict-Transport-Security` on
+https. There is **no CORS**: a preflight is refused and no `Access-Control-*` header is ever sent.
+
+**What is public.** `GET /healthz` answers only `{ ok: true }` without the admin role (memory, loader lag and the bus
+counters need it). The explorer's files are public (they hold no data); its data needs the admin role. `GET /v1/auth/check`
+and the login routes only say yes or no.
+
+### Sign in with Roblox
+
+Only the game's **owners** get in this way (no admins): the owner list is the access list in the game's signed settings
+record, which the CLI sends to the backend with the admin token whenever it writes the settings (`PUT /v1/access`, below).
+The admin-token login stays as the way in before any owner list has reached the backend, and for the CLI;
+`TYPETORCH_TOKEN_LOGIN=off` hides it in the browser.
+
+1. On <https://create.roblox.com/dashboard/credentials> create an **OAuth 2.0 app** (a confidential client). Scopes:
+   **`openid`** and **`profile`** only. Redirect URL: `<your public URL>/v1/auth/roblox/callback`, e.g.
+   `https://backend.example.com/v1/auth/roblox/callback` (add `http://localhost:8787/v1/auth/roblox/callback` for
+   `bun run local`). Copy the client id and generate a client secret.
+2. Set `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` and `TYPETORCH_PUBLIC_URL` (Coolify: environment variables of
+   the app; the secret as a secret). The login page shows **Sign in with Roblox** only when all three are set.
+3. Send the owners: the CLI does it on every settings write; by hand, `curl -X PUT -H "Authorization: Bearer
+   $TYPETORCH_ADMIN_TOKEN" -H 'content-type: application/json' -d '{"seq":1,"owners":[1234567]}' https://<host>/v1/access`.
+
+The flow is the standard authorization code with PKCE (S256), `state` (bound to a short-lived `HttpOnly`, `SameSite=Lax`
+cookie: `Lax` is what lets the cookie come back with Roblox's redirect) and `nonce`, using the endpoints from Roblox's
+OpenID discovery document (cached with its signing keys). The callback checks the state and the cookie, exchanges the code
+with the client secret and the PKCE verifier, verifies the ID token (signature against Roblox's keys, issuer, audience = your
+client id, expiry, nonce), takes `sub` as the Roblox user id, checks it is an owner, and starts the same kind of session as the
+token login (with the user's name and avatar for the explorer's header). Roblox's own access and refresh tokens are dropped
+unread. A failure goes back to the login page with a plain sentence, never a stack. Removing an owner (a higher-`seq`
+`PUT /v1/access` without them) ends their sessions at once.
+
+### On Coolify: the short list
+
+1. https on (a domain on the app; Coolify's proxy gets the certificate).
+2. `TYPETORCH_API_KEY` and `TYPETORCH_ADMIN_TOKEN`: two different random values of 32+ characters.
+3. `TYPETORCH_TRUST_PROXY=1` (the compose file already defaults to it) and `TYPETORCH_PUBLIC_URL=https://<your domain>`.
+4. Optional: `TYPETORCH_ADMIN_ALLOW_IPS=<your IP or range>` to hide the admin side from everyone else.
+5. Optional: the Roblox OAuth variables above.
+
+The full steps are in [Deploy on Coolify](#deploy-on-coolify).
+
+## Routes and roles
+
+**game** = the API key (or the previous key). **admin** = the admin token as a Bearer header, or an explorer session cookie.
+**open** = no credentials.
+
+| Route | Role | What |
+|---|---|---|
+| `POST /v1/ingest` | game | gzip JSON `{ events, recordings, identities? }`. Appended to a raw file, then `202 { accepted, rejected }` |
+| `POST /v1/errors` | game | error logs (see [Error logs](#error-logs)) |
+| `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
+| `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `deploy` | game | the kernel's fleet posts and the CLI's deploy start / alerts |
+| `POST /v1/query/<name>`, `GET /v1/queries` | admin | the logical queries |
+| `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin | the nightly rollup tables |
+| `POST /v1/sql` | admin | one read-only SELECT |
+| `GET /v1/storage` | admin | what the data folder holds |
+| `GET /v1/settings` | admin | live dials from `data/settings.json` |
+| `GET /v1/identity`, `POST /v1/identity/backfill` | admin | pid <-> UserId lookups and backfill |
+| `GET /v1/errors`, `GET /v1/errors/<fp>` | admin | error kinds with counts; one kind |
+| `GET /v1/live` | admin | Server-Sent Events of the event bus |
+| `GET /v1/fleet/servers`, `reports`, `alerts`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads and alert acknowledgement |
+| `GET /v1/access` | admin | the owner list |
+| `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
+| `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin", via, user? }`; `401 { login: { token, roblox } }` without valid credentials |
+| `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
+| `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
+| `GET /healthz` | open | `{ ok }`; with the admin role: memory, loader lag, row counts, the bus |
+| `GET /` and the explorer's files | open | the built explorer (404 when it isn't built) |
+
+The explorer calls `/api/<route>` (its dev proxy's prefix); the backend takes `/api` off, so both reach the same routes.
+
+## Deploy on Coolify
+
+The backend builds from this repo into one container: the root `Dockerfile` builds the explorer and runs the server;
+`compose.yaml` adds the data volume, the health check on `/healthz` and port 8787. Not run on this machine (no Docker
+here): the files are checked by tests that read them, so expect to fix a typo on the first deploy.
+
+1. In Coolify create a new resource from this repository: **Docker Compose** (Docker Compose Location `/compose.yaml`) or
+   **Dockerfile**. With Dockerfile, add a persistent storage (volume) mounted at `/data`, and set the exposed port to 8787.
+2. Give the app your domain (e.g. `backend.example.com`) with https on.
+3. Environment variables (secrets as secrets):
+   - `TYPETORCH_API_KEY` and `TYPETORCH_ADMIN_TOKEN`: two different random values of 32+ characters
+     (`openssl rand -hex 32`). **The compose file refuses to start without them.**
+   - `TYPETORCH_PUBLIC_URL=https://backend.example.com`
+   - `TYPETORCH_TRUST_PROXY=1` (default in `compose.yaml`; with the Dockerfile app set it yourself)
+   - optional: `TYPETORCH_ADMIN_ALLOW_IPS`, `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`, `ROBLOX_WEBHOOK_SECRET`,
+     `OPENCLOUD_API_KEY`, `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_ALERT_WEBHOOK_URL`
+4. Deploy. The health check is `GET /healthz` inside the container (30 s start period); `docker logs` shows the startup
+   line (what is set, never the values) and any old-variable warnings.
+5. Check: `curl https://backend.example.com/healthz` -> `{"ok":true}`;
+   `curl -H "Authorization: Bearer $TYPETORCH_API_KEY" https://backend.example.com/v1/auth/check` -> `"role":"game"`;
+   open `https://backend.example.com/` and sign in.
+6. Point the game at it: put the same two values in the game repo's `.env`, set the backend URL in `typetorch.json`, and run
+   the CLI's backend setup (today `typetorch fleet setup` and `typetorch settings set analytics -`; `typetorch backend setup`
+   replaces both in CLI 0.9).
+7. Roblox "Right to erasure" webhook: `https://backend.example.com/v1/erasure` with `ROBLOX_WEBHOOK_SECRET`.
+
+Things to know: the container runs as the non-root `bun` user (uid 1000), so a **bind-mounted** `/data` must be writable by
+it (`chown 1000:1000`; a named volume just works). The server loads the last raw files and checkpoints DuckDB on `SIGTERM`
+(60 s grace). Give the container at least 1 GB; DuckDB takes `TYPETORCH_MEMORY_LIMIT` (400 MB) of it. Back up the volume
+(`events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `access.json`). Rotating the API key: put the new one in
+`TYPETORCH_API_KEY`, the old in `TYPETORCH_API_KEY_PREVIOUS`, update the games (`typetorch backend setup`), then remove the
+old one. Locally, `docker compose -f compose.yaml -f compose.local.yaml up --build` publishes 127.0.0.1:8787.
+
+## The event bus
+
+`src/bus.ts`: in-process publish/subscribe, no broker. Ingest publishes on five topics; subscribers consume them.
+
+| Topic | Published by | Subscribers |
+|---|---|---|
+| `events` | `POST /v1/ingest` (validated rows) | `duckdb-writer` (raw file), `live` |
+| `heartbeat` | fleet heartbeat and closing posts | `fleet-store` (SQLite), `live` |
+| `deploy` | deploy reports and deploy starts | `fleet-store`, `live` |
+| `alert` | the fleet store, for every stored alert (game, CLI, the server's own sweeps) | `alert-notifier` (webhook), `live` |
+| `error` | `POST /v1/errors` | `error-store` (kinds, counts, players), `live` |
+
+Two kinds of subscriber. The stores that answer for their data are **awaited**: a `202` still means the batch is in the raw
+file / the SQLite row, as before (a failing store makes the request a 500 and nobody else sees the message). Everything else is
+**queued**: the message goes into a bounded queue (1,000 messages and 8 MB by default) and a handler drains it on its own,
+so a slow webhook or a slow browser never holds ingest up. A full queue drops new messages and counts them. `GET /healthz`
+(admin) shows, per subscriber, what was handled, what is waiting and what was dropped, plus the published count per topic and
+the live stream's clients:
+
+```json
+"bus": { "published": { "events": 4120, "heartbeat": 960 },
+  "subscribers": [ { "name": "duckdb-writer", "mode": "await", "processed": 4120, "failed": 0, "dropped": 0 },
+                   { "name": "live", "mode": "queue", "queued": 0, "dropped": 0, "maxQueue": 256 } ], "dropped": 0 }
+```
+
+**`GET /v1/live`** (admin, Server-Sent Events, `?topics=events,heartbeat,deploy,alert,error`, default all). `events` and
+`heartbeat` are summed up and sent at most once a second (`events` `{ batches, events, recordings, rejected, kinds }`,
+`heartbeat` `{ servers: [{ job, branch, artifact, players, health }], more }`); `deploy`, `alert` and `error` go out at once. Each
+browser has its own 64-message buffer (full = dropped and counted), at most 20 streams at once. `GET /v1/fleet/stream` (the
+CLI's `--watch`) is unchanged.
+
+## Error logs
+
+Game servers (kernel and framework) post error kinds; the game has already replaced every player's name, display name and
+UserId in the message (`<player.name>`, `<player.display_name>`, `<player.user_id>`) and fingerprinted it, so one kind is one
+`fp`. Players are counted by the pseudonymous analytics id (`pid`), never a name or UserId.
+
+`POST /v1/errors` with the API key, JSON (gzip allowed, `Content-Encoding: gzip`), 512 KB at most (2 MB inflated):
+
+```json
+{ "v": 1, "j": "<JobId>", "errors": [
+  { "fp": "9f3a1c...", "template": "Script <player.name> failed: attempt to index nil",
+    "stack": "Workspace.Game.Round:42\nWorkspace.Game.Main:7",
+    "count": 3, "firstAt": 1791547140000, "lastAt": 1791547200000,
+    "branch": "prod", "build": "a1b2c3d-000042", "realm": "server", "pids": ["p1", "p2"] } ] }
+```
+
+| Field | Rule |
+|---|---|
+| `errors` | at most 200 items (a bare array works too); the body must be an object or an array, else `400` |
+| `fp` | 1-64 characters of `A-Za-z0-9_.:-` |
+| `template` | 1-1,000 characters |
+| `stack` | optional, up to 4,000; the first one stored per kind is kept |
+| `count` | whole number 1 to 1,000,000 |
+| `firstAt`, `lastAt` | unix ms (below 1e11: seconds), `firstAt <= lastAt`, within the last 7 days and at most 10 minutes ahead |
+| `branch`, `build` | optional, up to 64 |
+| `realm` | `server` or `client` |
+| `pids` | optional, up to 50 ids of `A-Za-z0-9_-` (others dropped) |
+
+A bad item is dropped and counted: `202 { accepted, rejected, errors?: [first 5 reasons] }`. Limits: 30 requests a minute per
+JobId (`j`), the ingest rate limit per address. Storage (in the SQLite file): one row per kind (fingerprint, template, first
+and last seen, one sample stack, total), counts per minute by branch, build and side (an item that spans minutes is spread
+evenly over them, up to an hour), and the pids per day. Counts and pids older than 30 days go (`TYPETORCH_ERROR_KEEP_DAYS`);
+more than 5,000 kinds are dropped and counted (`/healthz` -> `errors.droppedKinds`).
+
+Reads (admin): `GET /v1/errors?window=24h&realm=server&branch=prod&build=...&q=text&limit=100&bucket=300` (also
+`from=` / `to=` in unix ms or ISO) answers `{ window: { from, to, bucketSeconds, buckets }, kinds: [{ fp, template, topFrame,
+realm, count, players, firstAt, lastAt, total, spark: [..] }], totals: { count, kinds, players }, more }`; `GET /v1/errors/<fp>`
+adds the sample `stack`, the dense `series` and `byBuild`, `byBranch`, `byRealm`. `players` counts distinct ids over the days the
+window touches. The explorer's **Errors** page shows both.
+
+## The explorer
+
+`web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
+web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
+Roblox, Retention, Funnels, Players, Flow, Experiments, First session, Events, Fleet, **Errors**, Query. The header shows who is
+signed in (Roblox name and avatar, or "admin token") and a Sign out button.
+
+Working on it: `bun run web:dev` (or `cd web && bun run dev -- --game <game repo>`) starts Vite with a proxy: `/api` goes to the
+backend with the admin token **from the game repo's `.env`** (`TYPETORCH_ADMIN_TOKEN`, or `TYPETORCH_ENV_FILE`), at the URL in the
+game's `typetorch.json` (`backend.url`, else the old `fleet.url`), or `--url http://127.0.0.1:8787`. The token never reaches the
+browser; the proxy forwards only the endpoints the explorer uses, only from its own origin, and refuses plain http to another
+machine. With the proxy there is no login page (the proxy is the login). `.explorer.local` and the `fleet.env` default are gone.
 
 ## Row format
 
@@ -69,7 +390,7 @@ import { createStore, writeSettings, createFleetClient } from "@typetorch/analyt
 
 // Basin (Cloudflare's SQL API), an analytics server, or a local copy of a server's data folder:
 const store = await createStore({ backend: "basin", accountId, bucket: "typetorch-analytics", token });
-// const store = await createStore({ backend: "duckdb", url: "https://analytics.example.com", token: adminToken });
+// const store = await createStore({ backend: "duckdb", url: "https://backend.example.com", token: adminToken });
 // const store = await createStore({ backend: "duckdb", dataDir: "./backup/data" });
 
 const numbers = await store.query("roblox", { from: "2026-09-01", to: "2026-09-30", dev: "phone" });
@@ -79,15 +400,16 @@ console.log(graph.toMermaid());          // or JSON.stringify(graph)
 // The game's settings: the `analytics` field of its signed settings record (kernel 0.3.8), written by the game's
 // own TypeTorch CLI (it holds the signing keys); gameDir is the game repo.
 await writeSettings({ gameDir, settings: { backend: "basin", events, recordings, token: sendToken, recordShare: 0.5 } });
-await writeFleetSettings({ gameDir, url: "https://analytics.example.com", ingestToken }); // = typetorch fleet setup
+await writeFleetSettings({ gameDir, url: "https://backend.example.com", ingestToken }); // = typetorch fleet setup
 
 // Live game servers (the fleet API).
-const fleet = createFleetClient({ url: "https://analytics.example.com", token: adminToken, ingestToken });
+const fleet = createFleetClient({ url: "https://backend.example.com", token: adminToken, ingestToken });
 const { servers } = await fleet.servers({ branch: "prod" });
 ```
 
-- `storeConfigFromEnv(process.env)` builds a store config from `TT_ANALYTICS_URL` + `TT_ANALYTICS_ADMIN_TOKEN`, or
-  `CLOUDFLARE_ACCOUNT_ID` + `TT_BASIN_BUCKET` + `TT_BASIN_SQL_TOKEN` (or `WRANGLER_BASIN_SQL_AUTH_TOKEN`).
+- `storeConfigFromEnv(process.env)` builds a store config from `TYPETORCH_BACKEND_URL` + `TYPETORCH_ADMIN_TOKEN`, or
+  `CLOUDFLARE_ACCOUNT_ID` + `TT_BASIN_BUCKET` + `TT_BASIN_SQL_TOKEN` (or `WRANGLER_BASIN_SQL_AUTH_TOKEN`). The old
+  `TT_ANALYTICS_URL` / `TT_ANALYTICS_ADMIN_TOKEN` still work for one release, with a warning on stderr.
 - `store.render(name, filters, options)` (Basin and DuckDB stores) returns the SQL without running it.
 - **Filters** (every query): `from`, `to` (unix ms, ISO time, or a date; a date-only `to` includes that day), `art`,
   `branch`, `channel`, `dev`, `players` (`"new"` = first-ever sessions, `"returning"`), `variant`
@@ -98,7 +420,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
   game's keys, signs the change with both prod keys, writes it and pings servers: kernel 0.3.8 servers switch within
   seconds, no publish. It needs the game's signing keys (`typetorch keys init`, `--fallback`) and its Open Cloud key
   (DataStore read/create/update, messaging); a failure carries the CLI's own message. Returns `{ value, written, seq,
-  pinged }`. **writeFleetSettings** runs `typetorch fleet setup --url <url>` with the ingest token in the child's
+  pinged }`. **writeFleetSettings** runs `typetorch fleet setup --url <url>` with the API key in the child's
   environment (`TYPETORCH_FLEET_INGEST_TOKEN`). This package never signs anything. Settings, as the framework reads them (SCHEMA.md "Sink settings"): `{ backend: "basin" | "duckdb", events,
   recordings?, token?, flushSeconds? (5-300), recordShare? (0-1), techEvery? (15-3600), experiments?: { name: {
   active?, weights?, variant? } } }`. URLs must be https here (the framework also takes http).
@@ -232,7 +554,7 @@ accounts or tokens for you.
    ```
 6. Write the game's settings with `writeSettings({ gameDir, settings: { backend: "basin", events, recordings, token:
    <send token> } })` (or `typetorch settings set analytics -` in the game folder, the JSON on stdin).
-   For live server status, run only the fleet part of the server (`TT_SERVER_PARTS=fleet`, below): Basin is minutes
+   For live server status, run only the fleet part of the server (`TYPETORCH_PARTS=fleet`, below): Basin is minutes
    behind.
 
 | Value | Where it lives |
@@ -257,47 +579,49 @@ Basin facts this package relies on (from the docs, 2026-10-05; live checks need 
   `iceberg` extension on unpartitioned tables). For Right to Erasure, deleting the player's `p/<UserId>` DataStore
   link makes their Basin rows anonymous.
 
-## The analytics server (DuckDB)
+## The analytics part (DuckDB)
+
+It runs inside the backend (`TYPETORCH_PARTS` includes `analytics`, the default):
 
 ```sh
-bun src/server/main.ts --env-file analytics.env    # or, after bun run build: node dist/server/main.js --env-file analytics.env
+bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   (settings: see Settings)
 ```
 
-| Endpoint | Token | What |
+| Endpoint | Role | What |
 |---|---|---|
-| `POST /v1/ingest` | ingest | gzip JSON `{ events, recordings }` from game servers. Appended to a raw file, then `202 { accepted, rejected }` |
+| `POST /v1/ingest` | game | gzip JSON `{ events, recordings }` from game servers. Appended to a raw file, then `202 { accepted, rejected }` |
 | `POST /v1/query/<name>` | admin | `{ filters, options }` -> `{ result, ms }` (input errors 400, timeouts 504) |
 | `GET /v1/queries` | admin | the query list |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>?from=&to=&pid=&limit=` | admin | the nightly rollup tables |
 | `POST /v1/sql` | admin | `{ sql, limit? }` -> `{ columns, rows, truncated, ms }`: one read-only SELECT (below) |
 | `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), free disk space; measured at most every 30 s |
-| `GET /v1/settings` | ingest or admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
+| `GET /v1/settings` | admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
-| `GET /healthz` | none / admin | `{ ok }`; with the admin token: memory, loader lag, row counts, fleet counts |
-| `POST /v1/identity` | ingest | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
+| `GET /healthz` | open / admin | `{ ok }`; with the admin role: memory, loader lag, row counts, fleet counts, the bus, error log counts |
+| `POST /v1/identity` | game | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
 | `GET /v1/identity?pid=` / `?uid=` | admin | pid <-> UserId (`{ identities: [{ pid, uid, firstSeen, lastSeen }] }`); no parameter: `{ count, backfill }` |
-| `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `TT_ANALYTICS_OPENCLOUD_KEY` with `universe-datastores.objects:list` and `:read`) |
+| `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `OPENCLOUD_API_KEY` with `universe-datastores.objects:list` and `:read`) |
 
 How it works:
 
 - **Raw files first.** Each accepted batch is appended to `data/raw/incoming/<table>-<ms>-<n>.ndjson` before the 202
   (fdatasync every second). A spike fills files, not the database, and nothing accepted is lost on a restart.
-- **Loader** (every `TT_ANALYTICS_LOAD_SECONDS`, 5): rotates the raw files, inserts them into `data/live.duckdb` in one
+- **Loader** (every `TYPETORCH_LOAD_SECONDS`, 5): rotates the raw files, inserts them into `data/live.duckdb` in one
   transaction (up to 256 MB per insert), gzips them into `data/raw/archive/YYYY-MM-DD/`, and deletes them.
 - **Nightly** (after UTC midnight, and every 6 h for late rows): each finished day goes to
   `data/events/YYYY-MM-DD.parquet` (and `recordings/`), sorted by pid and time, zstd. Late rows of an exported day
   are merged into its file. Then rollups (`rollups/daily`, `player_days`, `edges`, `players.parquet`), pruning
-  (`TT_ANALYTICS_KEEP_DAYS` 400, raw archives `TT_ANALYTICS_RAW_KEEP_DAYS` 14), and a rewrite of `live.duckdb`
-  when it passes `TT_ANALYTICS_COMPACT_MB` (DuckDB doesn't reliably give space back after deletes).
+  (`TYPETORCH_KEEP_DAYS` 400, raw archives `TYPETORCH_RAW_KEEP_DAYS` 14), and a rewrite of `live.duckdb`
+  when it passes `TYPETORCH_COMPACT_MB` (DuckDB doesn't reliably give space back after deletes).
 - **Queries** read today's file plus only the day files in the range.
 - **Limits:** body 2 MB gzip / 16 MB inflated, 6,000 requests a minute per IP, 60 per JobId, a query timeout of
   60 s, 2 queries at once. DuckDB: `memory_limit` 400MB, 2 threads, spill folder `data/tmp`.
 
 **Right to Erasure.** In Creator Hub > Webhooks, add `https://<your host>/v1/erasure` for "Right to erasure request"
-with a secret (`TT_ANALYTICS_WEBHOOK_SECRET`). The server checks `roblox-signature` (`t=<unix s>,v1=<base64
-HMAC-SHA256(secret, "<t>.<raw body>")>`, 10 minute window), ignores other games (`TT_ANALYTICS_UNIVERSE_ID`), and maps
-the UserId to its pids through the identity table (below), and also, when `TT_ANALYTICS_OPENCLOUD_KEY` is set (an API
-key with `universe-datastores.objects:read` on the universe, plus `:delete` with `TT_ANALYTICS_ERASURE_DELETE_LINK=1`
+with a secret (`ROBLOX_WEBHOOK_SECRET`). The server checks `roblox-signature` (`t=<unix s>,v1=<base64
+HMAC-SHA256(secret, "<t>.<raw body>")>`, 10 minute window), ignores other games (`TYPETORCH_UNIVERSE_ID`), and maps
+the UserId to its pids through the identity table (below), and also, when `OPENCLOUD_API_KEY` is set (an API
+key with `universe-datastores.objects:read` on the universe, plus `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`
 to also delete the link), through the game's DataStore entry `TypeTorchAnalytics` / `p/<UserId>`. It deletes the rows,
 then the identity rows of that UserId. The pid's rows leave the live file at once; Parquet files, rollups and raw archives are rewritten in the background, and later rows of that pid are dropped
 at load. The CLI can erase by pid: `POST /v1/erasure { "pid": "..." }` with the admin token. `data/erasure/log.jsonl`
@@ -311,11 +635,11 @@ when known; `timeline`, `player-graph` and `events` take `uid` instead of `pid` 
 who joined before identity rows existed are mapped by `POST /v1/identity/backfill` (DataStore links, Open Cloud key) or
 not at all.
 
-**Ad-hoc SQL** (`POST /v1/sql`, admin token; `TT_ANALYTICS_SQL=0` turns it off). One SELECT or WITH statement over two
+**Ad-hoc SQL** (`POST /v1/sql`, admin token; `TYPETORCH_SQL=0` turns it off). One SELECT or WITH statement over two
 views, `events` and `recordings` (every day file plus a Parquet snapshot of today's live rows, taken again only when
 the live tables changed). Answers `{ columns: [{ name, type }], rows: [[...]], truncated, ms }`: at most `limit` rows
 (default 1,000, at most 10,000), within the query timeout. It runs in a separate DuckDB instance
-(`TT_ANALYTICS_SQL_MEMORY`, 256MB, 1 thread, one query at a time) on an empty READ_ONLY database file, with
+(`TYPETORCH_SQL_MEMORY`, 256MB, 1 thread, one query at a time) on an empty READ_ONLY database file, with
 `enable_external_access = false` (only the data folders allowed), no extension install or load, and
 `lock_configuration = true`. Before it runs, a query must start with SELECT or WITH; hold no ATTACH, COPY, PRAGMA,
 INSTALL, LOAD, SET, CREATE, ... outside strings, quoted names and comments; parse (`json_serialize_sql`) to one SELECT
@@ -323,18 +647,18 @@ that reads only `events`, `recordings` or its own CTEs (no file paths, no schema
 `range`, `generate_series`, `unnest`, `json_each`, `json_tree`; and prepare as a SELECT. `fleet` rows show no props (a
 heartbeat's props can hold a private server's access code). Refusals and SQL errors answer 400 with the reason. The
 sandbox opens on the first query and its memory comes on top of the main instance's (on a 1 GB VPS, lower
-`TT_ANALYTICS_SQL_MEMORY` or turn it off if the nightly export and ad-hoc queries may overlap).
+`TYPETORCH_SQL_MEMORY` or turn it off if the nightly export and ad-hoc queries may overlap).
 
-Settings (environment or `--env-file`; values are never printed): see `server/analytics.env.example`.
+Settings: see [Settings](#settings) and `server/backend.env.example`.
 
 ## The fleet API (SQLite)
 
 Live game-server status with near-zero latency, for `typetorch servers`, `report`, `alerts` and `deploy --wait`.
 Kernels post to it directly (`kernel/src/server/Fleet.luau`, settings in the signed settings record's field
 `fleet = { url, token }`, kernel 0.3.8), so it works even when a game's code is broken. One row per server in
-`data/fleet.sqlite` (WAL). `TT_SERVER_PARTS=fleet` runs it alone (a game on Basin needs only this).
+`data/fleet.sqlite` (WAL). `TYPETORCH_PARTS=fleet` runs it alone (a game on Basin needs only this).
 
-| Endpoint | Token | Body / answer |
+| Endpoint | Role | Body / answer |
 |---|---|---|
 | `POST /v1/fleet/heartbeat` | ingest | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, x?, v, q, g, h, e?, sv }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `k` is ignored: never stored or returned |
 | `POST /v1/fleet/report` | ingest | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
@@ -366,17 +690,17 @@ Rows use long names (`job`, `serverType`, `branch`, `artifact`, `players`, `maxP
 message (one alert per branch and artifact per sweep, listing the JobIds; critical when 3 or more), and
 `server_stuck` (warning) when, 3 minutes after a deploy started, live servers on its branch are still below its seq
 with no report for it (it lists those JobIds and says nothing about the build). **Notifications:**
-`TT_FLEET_WEBHOOK_URL` (Discord, Slack or generic JSON, detected from the URL or `TT_FLEET_WEBHOOK_FORMAT`), critical
-only by default (`TT_FLEET_WEBHOOK_LEVELS`), the same (code, branch, artifact) at most once per 10 minutes, at most
+`TYPETORCH_ALERT_WEBHOOK_URL` (Discord, Slack or generic JSON, detected from the URL or `TYPETORCH_ALERT_WEBHOOK_FORMAT`), critical
+only by default (`TYPETORCH_ALERT_WEBHOOK_LEVELS`), the same (code, branch, artifact) at most once per 10 minutes, at most
 20 posts a minute. Reports are kept 30 days, alerts 90 days. Per-JobId limits (40 a minute) sit above the kernel's
 own 30.
 
-**New JobIds** (`TT_FLEET_NEW_JOBS_PER_MINUTE`, 2,000): JobIds without a `servers` row are let in at most 2,000 per
+**New JobIds** (`TYPETORCH_NEW_JOBS_PER_MINUTE`, 2,000): JobIds without a `servers` row are let in at most 2,000 per
 clock minute across all senders, enough for a 1,250-server fleet (50k CCU) restarting within one minute. Past that,
 ingest requests from never-seen JobIds get 429 (`retry-after`: the rest of the minute) and the first refusal of the
 minute raises one `fleet_flood` alert (critical, source `server`, `details: { limit, windowSeconds, example }`), which
 reaches the webhook (deduped like any alert) and the SSE stream. Known JobIds (a `servers` row: live, closed or lost
-in the last day) and the CLI's `j = "cli"` are never limited by it. Why: anyone with the ingest token (any code in the
+in the last day) and the CLI's `j = "cli"` are never limited by it. Why: anyone with the API key (any code in the
 universe that reads the settings record) could otherwise grow the `servers` table and the per-JobId limiters with
 made-up JobIds. The limiter holds at most that many JobIds and forgets them each minute; a JobId over 64 characters
 gets 400 before any limiter sees it.
@@ -396,9 +720,10 @@ so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durab
 - Turning it off: the framework option `identity: false` stops sending identity rows; deleting
   `data/fleet.sqlite`'s `identities` rows (or the file, which also holds fleet history) forgets the mapping.
 
-## Deploy on a 1 GB VPS
+## Run it on a VPS without Docker
 
-On a fresh Debian 12 / Ubuntu 24.04 VPS (1 vCPU, 1 GB RAM, 25 GB disk), with a DNS A record for your host:
+Coolify or Docker is the easier road ([Deploy on Coolify](#deploy-on-coolify)). On a fresh Debian 12 / Ubuntu 24.04 VPS
+(1 vCPU, 1 GB RAM, 25 GB disk), with a DNS A record for your host:
 
 ```sh
 # Swap: absorbs DuckDB spikes (nightly export, big queries).
@@ -412,35 +737,34 @@ sudo ufw allow OpenSSH && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp && sud
 
 # Bun, a service user, folders.
 curl -fsSL https://bun.sh/install | sudo BUN_INSTALL=/opt/bun bash && sudo ln -sf /opt/bun/bin/bun /usr/local/bin/bun
-sudo useradd --system --home /var/lib/typetorch-analytics --shell /usr/sbin/nologin typetorch
-sudo mkdir -p /var/lib/typetorch-analytics /etc/typetorch && sudo chown typetorch:typetorch /var/lib/typetorch-analytics
+sudo useradd --system --home /var/lib/typetorch-backend --shell /usr/sbin/nologin typetorch
+sudo mkdir -p /var/lib/typetorch-backend /etc/typetorch && sudo chown typetorch:typetorch /var/lib/typetorch-backend
 
-# The code (or copy this folder over with scp).
-sudo git clone https://github.com/typetorch/analytics /opt/typetorch-analytics
-cd /opt/typetorch-analytics && sudo bun install --frozen-lockfile --production
+# The code (or copy this folder over with scp), its dependencies, and the explorer.
+sudo git clone <this repository> /opt/typetorch-backend
+cd /opt/typetorch-backend && sudo bun install --frozen-lockfile --production
+sudo bun run web:install && sudo bun run web:build    # the explorer, served at /
 
-# Settings: fill in the tokens (openssl rand -hex 32 for each).
-sudo cp server/analytics.env.example /etc/typetorch/analytics.env
-sudo chown root:typetorch /etc/typetorch/analytics.env && sudo chmod 640 /etc/typetorch/analytics.env
-sudo nano /etc/typetorch/analytics.env
+# Settings: fill in the two secrets (openssl rand -hex 32 for each), the public URL, TRUST_PROXY=1.
+sudo cp server/backend.env.example /etc/typetorch/backend.env
+sudo chown root:typetorch /etc/typetorch/backend.env && sudo chmod 640 /etc/typetorch/backend.env
+sudo nano /etc/typetorch/backend.env
 
 # The service.
-sudo cp server/typetorch-analytics.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now typetorch-analytics
-journalctl -u typetorch-analytics -f
+sudo cp server/typetorch-backend.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now typetorch-backend
+journalctl -u typetorch-backend -f
 
 # TLS: Caddy (automatic Let's Encrypt). Install it from caddyserver.com/docs/install, then:
-sudo cp server/Caddyfile /etc/caddy/Caddyfile && sudo sed -i 's/analytics.example.com/<your host>/' /etc/caddy/Caddyfile
+sudo cp server/Caddyfile /etc/caddy/Caddyfile && sudo sed -i 's/backend.example.com/<your host>/' /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 curl https://<your host>/healthz
 ```
 
-Or with Docker: `docker build -f server/Dockerfile -t typetorch-analytics .` (commands in the Dockerfile's header).
-
-Then: the game's settings point at `https://<your host>/v1/ingest` with an ingest token (`writeSettings`), the
-settings record's `fleet` at `https://<your host>` (the CLI's `fleet setup`), the Roblox erasure webhook at
-`https://<your host>/v1/erasure`. Back up `events/`, `recordings/`, `rollups/` and `raw/archive/` off the VPS (e.g.
-`rclone sync` to object storage, nightly).
+Then: the game's settings point at `https://<your host>/v1/ingest` with the API key (`writeSettings`), the settings record's
+`fleet` at `https://<your host>` (the CLI's `fleet setup`), the Roblox erasure webhook at `https://<your host>/v1/erasure`. Back
+up `events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite` and `access.json` off the VPS (e.g. `rclone sync` to
+object storage, nightly).
 
 ## Load tests
 
@@ -483,15 +807,18 @@ these synthetic ones.
 
 ```sh
 bun install
-bun test                       # ~150 tests on a real DuckDB; TT_TEST_HTTP_BACKEND=node runs them on node:http
+bun test                       # ~300 tests on a real DuckDB; TT_TEST_HTTP_BACKEND=node runs them on node:http
 bun run typecheck
 bun run build                  # dist/ for Node
 node scripts/smoke.mjs         # the built server under Node: ingest, loader, query, fleet
 bun run basin:schemas          # regenerate basin/*.schema.json after changing src/schema.ts
+bun run web:install            # the explorer's dependencies (web/)
+bun run web:build              # web/dist, served by the backend at /
+cd web && bun run test         # the explorer's tests (vitest); bun run typecheck there too
 ```
 
-The same commands work in PowerShell 5.1 and bash. Tests use temp folders and fake Open Cloud / Basin / webhook
-endpoints; nothing reaches a real service.
+The same commands work in PowerShell 5.1 and bash. Tests use temp folders and fake Open Cloud / Basin / webhook / Roblox sign-in
+endpoints with made-up keys; nothing reaches a real service. `bun test` runs only `test/` (`bunfig.toml`); the explorer has its own.
 
 ## Open issues
 
@@ -502,7 +829,9 @@ endpoints; nothing reaches a real service.
   ones mark every column required; both accept what the framework sends).
 - **Basin erasure** deletes only the DataStore link (anonymous rows stay); a DuckDB `iceberg` DELETE job is possible
   later.
-- **Not run here:** the Dockerfile (Docker Desktop was off), the systemd unit and the Caddyfile (no VPS). The server
-  itself runs under Bun and Node 22 (tests, smoke test, load tests).
+- **Not run here:** the `Dockerfile` and `compose.yaml` (no Docker on this machine; tests read them), the systemd unit and the
+  Caddyfile (no VPS), a real Coolify deploy, and Sign in with Roblox against Roblox itself (tests use a fake Roblox with a
+  generated key pair; check the live flow once with your OAuth app). The server itself runs under Bun and Node 22 (tests, smoke
+  test, load tests), and the built explorer was driven in a browser against it.
 - The CLI's own fleet client and this API agree on paths and fields (see the fleet table); `servers` rows carry no
   `hasAccessCode` (the kernel never sends `k`).
