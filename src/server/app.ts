@@ -723,7 +723,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!adminIpOk(ip)) return notFound();
 		if (!oauthLimiter.take(`start:${ip}`)) return tooMany(oauthLimiter.retryAfter(`start:${ip}`));
 		try {
-			const { url, state } = await oauth.start();
+			const { url, state } = await oauth.start(ip);
 			const cookie = setCookie(OAUTH_COOKIE, state, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: 600, path: OAUTH_PATH });
 			return redirect(url, [cookie]);
 		} catch (error) {

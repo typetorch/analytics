@@ -128,6 +128,27 @@ describe("Sign in with Roblox", () => {
 	});
 	afterAll(() => h.close());
 
+	test("churning sign-in starts can't evict someone else's sign-in in progress (5 per address; the biggest holder loses first)", async () => {
+		// The owner starts a sign-in...
+		const mine = await start("10.99.0.1");
+		// ...one address starts many: only its own 5 newest stay.
+		const flood: Started[] = [];
+		const was = h.now();
+		for (let i = 0; i < 20; i++) flood.push(await start("10.99.0.2"));
+		h.setNow(was + 60_000); // past the 20 starts a minute
+		for (let i = 0; i < 20; i++) flood.push(await start("10.99.0.2"));
+		// 1,000+ starts from 200 other addresses (5 each) fill the table; the owner's single one is never the biggest holder.
+		for (let a = 0; a < 200; a++) for (let i = 0; i < 5; i++) await start(`10.98.${Math.floor(a / 250)}.${(a % 250) + 1}`);
+		const code = roblox.approve(mine.authorizeUrl);
+		const res = await callback({ code, state: mine.state }, mine.cookie, "10.99.0.1");
+		expect(res.headers.get("location")).toBe("/");
+		// The flooding address' oldest states are gone.
+		const old = flood[0] as Started;
+		const gone = await callback({ code: roblox.approve(old.authorizeUrl), state: old.state }, old.cookie, "10.99.0.2");
+		expect(gone.headers.get("location")).toBe("/?login_error=state");
+		h.setNow(was);
+	});
+
 	test("the login page learns that Roblox sign-in is on", async () => {
 		expect((await asJson(await h.call("/v1/auth/check"))).login).toEqual({ token: true, roblox: true });
 	});
