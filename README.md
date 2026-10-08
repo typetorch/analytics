@@ -221,7 +221,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin", via, user? }`; `401 { login: { token, roblox } }` without valid credentials |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
 | `GET /healthz` | open | `{ ok }`; with the admin role: memory, loader lag, row counts, the bus |
