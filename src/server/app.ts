@@ -165,6 +165,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const sessions = new Sessions({ adminToken: config.adminToken, idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
 	const auth = new Auth({ adminToken: config.adminToken, apiKeys: config.apiKeys, sessions, isOwner: (id) => access.isOwner(id) });
 	const proxyOpts = { trustProxy: config.trustProxy, ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}) };
+	const proxyTrust = { hops: config.trustProxy, ...(config.trustedProxies ? { proxies: config.trustedProxies } : {}), ...(config.cloudflareIps ? { cloudflare: config.cloudflareIps } : {}) };
 	const authFailures = new FailureLimiter(config.loginMaxFailures, config.loginWindowMs, clock);
 	// Wrong API keys per address (game routes). Only wrong keys are refused past it, so a real game server behind the same
 	// egress address is never blocked.
@@ -878,7 +879,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	async function handle(req: Request, peer = ""): Promise<Response> {
 		const original = new URL(req.url);
-		const ip = clientIp(req, peer, config.trustProxy);
+		const ip = clientIp(req, peer, proxyTrust);
 		// The explorer's base path is /api (its dev proxy strips it); take it off here too.
 		let path = original.pathname;
 		let url = original;

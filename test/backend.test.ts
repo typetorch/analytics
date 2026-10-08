@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { startApp, type App } from "../src/server/app.ts";
 import { Sessions } from "../src/server/auth.ts";
 import { applyLegacyEnv, LEGACY_CLIENT_ENV } from "../src/legacy-env.ts";
-import { loadConfig, MIN_SECRET_LENGTH } from "../src/server/config.ts";
+import { CLOUDFLARE_IPS, loadConfig, MIN_SECRET_LENGTH } from "../src/server/config.ts";
 import { FailureLimiter, clientIp } from "../src/server/http.ts";
 import { ipAllowed, parseIpRules } from "../src/server/ipfilter.ts";
 import { storeConfigFromEnv } from "../src/store/index.ts";
@@ -45,7 +45,9 @@ describe("environment", () => {
 	test("the previous key is accepted too; defaults", () => {
 		const c = loadConfig([], { ...base, TYPETORCH_API_KEY_PREVIOUS: PREVIOUS });
 		expect(c.apiKeys).toEqual([API, PREVIOUS]);
-		expect(c).toMatchObject({ host: "127.0.0.1", port: 8787, tokenLogin: true, trustProxy: 0, warnings: [] });
+		expect(c).toMatchObject({ host: "127.0.0.1", port: 8787, tokenLogin: true, trustProxy: 0 });
+		// The only warning: remove the previous key once the rotation is done.
+		expect(c.warnings).toEqual([expect.stringContaining("TYPETORCH_API_KEY_PREVIOUS is set")]);
 		expect(c.sessionIdleMs).toBe(12 * 3_600_000);
 		expect(c.sessionMaxMs).toBe(7 * 86_400_000);
 		expect(c.loginMaxFailures).toBe(5);
@@ -723,6 +725,63 @@ describe("wrong tokens on /healthz and the game routes are counted (no free toke
 			// No key at all is a plain 401 and not counted.
 			expect((await h.call("/v1/errors", { ...post(undefined, { j: "job-x", errors: [] }), ip: "203.0.113.96" })).status).toBe(401);
 			expect(h.logs.some((l) => l.includes("203.0.113.96"))).toBe(false);
+		} finally {
+			await h.close();
+		}
+	});
+});
+
+describe("which proxies are believed (TYPETORCH_TRUSTED_PROXIES, TYPETORCH_CLOUDFLARE)", () => {
+	const req = (headers: Record<string, string> = {}) => new Request("http://x/", { headers });
+
+	test("with a trusted proxy list, X-Forwarded-For only counts when the peer is a listed proxy", () => {
+		const proxies = parseIpRules("10.0.0.0/8");
+		// Through the proxy: the address it appended.
+		expect(clientIp(req({ "x-forwarded-for": "198.51.100.7" }), "10.0.1.2", { hops: 1, proxies })).toBe("198.51.100.7");
+		// Straight to the port from the internet: the forged header is ignored.
+		expect(clientIp(req({ "x-forwarded-for": "10.0.0.1" }), "203.0.113.77", { hops: 1, proxies })).toBe("203.0.113.77");
+		// Two hops: the inner hop must be trusted too, else it is the client.
+		const two = parseIpRules("10.0.0.0/8, 162.158.0.0/15");
+		expect(clientIp(req({ "x-forwarded-for": "198.51.100.7, 162.158.1.1" }), "10.0.1.2", { hops: 2, proxies: two })).toBe("198.51.100.7");
+		expect(clientIp(req({ "x-forwarded-for": "10.9.9.9, 203.0.113.5" }), "10.0.1.2", { hops: 2, proxies: two })).toBe("203.0.113.5");
+		// Without a list, the old rule (the Nth hop from the right) stands.
+		expect(clientIp(req({ "x-forwarded-for": "10.0.0.1" }), "203.0.113.77", { hops: 1 })).toBe("10.0.0.1");
+	});
+
+	test("Cloudflare: CF-Connecting-IP replaces an address inside Cloudflare's ranges, never another one", () => {
+		const cloudflare = parseIpRules(CLOUDFLARE_IPS.join(","));
+		// Cloudflare -> Traefik (which saw the edge) -> the backend.
+		expect(clientIp(req({ "x-forwarded-for": "162.158.10.20", "cf-connecting-ip": "198.51.100.9" }), "10.0.1.2", { hops: 1, cloudflare })).toBe("198.51.100.9");
+		// Someone who reaches Traefik directly can't use the header.
+		expect(clientIp(req({ "x-forwarded-for": "203.0.113.66", "cf-connecting-ip": "10.0.0.1" }), "10.0.1.2", { hops: 1, cloudflare })).toBe("203.0.113.66");
+		// A header that isn't an address is ignored.
+		expect(clientIp(req({ "x-forwarded-for": "162.158.10.20", "cf-connecting-ip": "nonsense" }), "10.0.1.2", { hops: 1, cloudflare })).toBe("162.158.10.20");
+		expect(clientIp(req({ "cf-connecting-ip": "2001:db8::5" }), "2606:4700::1", { hops: 0, cloudflare })).toBe("2001:db8::5");
+	});
+
+	test("env: the lists parse; a trusted proxy on a public HOST without a list warns; the previous API key warns", () => {
+		const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_EXPLORER: "off" };
+		const c = loadConfig([], { ...base, TYPETORCH_TRUSTED_PROXIES: "10.0.0.0/8, 172.16.0.0/12", TYPETORCH_CLOUDFLARE: "on", HOST: "0.0.0.0", TYPETORCH_TRUST_PROXY: "1" });
+		expect(c.trustedProxies?.length).toBe(2);
+		expect(c.cloudflareIps?.length).toBe(CLOUDFLARE_IPS.length);
+		expect(c.warnings).toEqual([]);
+		expect(() => loadConfig([], { ...base, TYPETORCH_TRUSTED_PROXIES: "nope" })).toThrow("TYPETORCH_TRUSTED_PROXIES");
+		expect(loadConfig([], { ...base, HOST: "0.0.0.0", TYPETORCH_TRUST_PROXY: "1" }).warnings.join("\n")).toContain("Ports Mappings");
+		expect(loadConfig([], { ...base, TYPETORCH_TRUST_PROXY: "1" }).warnings).toEqual([]);
+		const rotated = loadConfig([], { ...base, TYPETORCH_API_KEY_PREVIOUS: PREVIOUS });
+		expect(rotated.warnings.join("\n")).toContain("TYPETORCH_API_KEY_PREVIOUS is set");
+		expect(rotated.warnings.join("\n")).not.toContain(PREVIOUS);
+	});
+
+	test("through the app: a client reaching the port directly can't pass the allow list or dodge the lockout with X-Forwarded-For", async () => {
+		const h = await harness({ TYPETORCH_TRUST_PROXY: "1", TYPETORCH_TRUSTED_PROXIES: "10.0.0.0/8", TYPETORCH_ADMIN_ALLOW_IPS: "198.51.100.0/24" });
+		try {
+			const forged = { ...bearer(ADMIN), "x-forwarded-for": "198.51.100.5" };
+			expect((await h.call("/v1/settings", { headers: forged, ip: "203.0.113.77" })).status).toBe(404);
+			expect((await h.call("/v1/settings", { headers: forged, ip: "10.0.1.2" })).status).toBe(200);
+			// Rotating forged addresses from one direct peer: the lockout still counts the peer.
+			for (let i = 0; i < 5; i++) await h.call("/v1/settings", { headers: { authorization: "Bearer wrong-token-0123456789abcdef0123456789", "x-forwarded-for": `198.51.100.${i + 10}` }, ip: "198.51.100.200" });
+			expect((await h.call("/v1/settings", { headers: { ...bearer(ADMIN), "x-forwarded-for": "198.51.100.99" }, ip: "198.51.100.200" })).status).toBe(429);
 		} finally {
 			await h.close();
 		}

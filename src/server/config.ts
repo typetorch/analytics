@@ -16,6 +16,35 @@ import { parseIpRules, type IpRule } from "./ipfilter.ts";
 
 export type ServerPart = "analytics" | "fleet";
 
+/**
+ * Cloudflare's published edge ranges (https://www.cloudflare.com/ips/), for TYPETORCH_CLOUDFLARE=on;
+ * TYPETORCH_CLOUDFLARE_IPS replaces the list. A range missing here only means that edge's address is taken as the client.
+ */
+export const CLOUDFLARE_IPS = [
+	"173.245.48.0/20",
+	"103.21.244.0/22",
+	"103.22.200.0/22",
+	"103.31.4.0/22",
+	"141.101.64.0/18",
+	"108.162.192.0/18",
+	"190.93.240.0/20",
+	"188.114.96.0/20",
+	"197.234.240.0/22",
+	"198.41.128.0/17",
+	"162.158.0.0/15",
+	"104.16.0.0/13",
+	"104.24.0.0/14",
+	"172.64.0.0/13",
+	"131.0.72.0/22",
+	"2400:cb00::/32",
+	"2606:4700::/32",
+	"2803:f800::/32",
+	"2405:b500::/32",
+	"2405:8100::/32",
+	"2a06:98c0::/29",
+	"2c0f:f248::/32",
+] as const;
+
 /** Shortest accepted API key and admin token. */
 export const MIN_SECRET_LENGTH = 32;
 
@@ -39,6 +68,10 @@ export interface ServerConfig {
 	publicUrl?: string;
 	/** Proxies in front whose X-Forwarded-For hops are trusted (0 = none: the TCP peer is the client). */
 	trustProxy: number;
+	/** TYPETORCH_TRUSTED_PROXIES: X-Forwarded-For is only read from these peers (undefined = from any peer). */
+	trustedProxies?: IpRule[];
+	/** TYPETORCH_CLOUDFLARE=on: Cloudflare's edge ranges, whose CF-Connecting-IP header names the client. */
+	cloudflareIps?: IpRule[];
 	/** The built explorer (web/dist) served at /; undefined = not served. */
 	webDir?: string;
 	/** Explorer sessions: idle and absolute lifetimes, ms. */
@@ -221,6 +254,31 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		publicUrl = `${u.protocol}//${u.host}`;
 	}
 
+	let trustedProxies: IpRule[] | undefined;
+	if (env.TYPETORCH_TRUSTED_PROXIES) {
+		try {
+			trustedProxies = parseIpRules(env.TYPETORCH_TRUSTED_PROXIES);
+		} catch (error) {
+			throw new Error(`TYPETORCH_TRUSTED_PROXIES: ${(error as Error).message}`);
+		}
+		if (!trustedProxies.length) trustedProxies = undefined;
+	}
+	let cloudflareIps: IpRule[] | undefined;
+	if (flag(env, "TYPETORCH_CLOUDFLARE")) {
+		try {
+			cloudflareIps = parseIpRules(env.TYPETORCH_CLOUDFLARE_IPS ?? CLOUDFLARE_IPS.join(","));
+		} catch (error) {
+			throw new Error(`TYPETORCH_CLOUDFLARE_IPS: ${(error as Error).message}`);
+		}
+	}
+	const host = env.HOST ?? "127.0.0.1";
+	if (trustProxy > 0 && !trustedProxies && !["127.0.0.1", "::1", "localhost"].includes(host)) {
+		warnings.push(
+			`TYPETORCH_TRUST_PROXY is on and HOST=${host}: only the proxy may reach port ${env.PORT ?? 8787} (no published port, no Coolify "Ports Mappings"), or any client can choose its address; TYPETORCH_TRUSTED_PROXIES=<the proxy's addresses> enforces it`,
+		);
+	}
+	if (env.TYPETORCH_API_KEY_PREVIOUS) warnings.push("TYPETORCH_API_KEY_PREVIOUS is set: the old API key still works; remove it once every game server uses TYPETORCH_API_KEY");
+
 	let adminAllowIps: IpRule[] | undefined;
 	if (env.TYPETORCH_ADMIN_ALLOW_IPS) {
 		try {
@@ -246,7 +304,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 
 	const config: ServerConfig = {
 		dataDir,
-		host: env.HOST ?? "127.0.0.1",
+		host,
 		port: num(env, "PORT", 8787, 0, 65535),
 		parts,
 		apiKeys,
@@ -286,6 +344,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		warnings,
 	};
 	if (adminAllowIps) config.adminAllowIps = adminAllowIps;
+	if (trustedProxies) config.trustedProxies = trustedProxies;
+	if (cloudflareIps) config.cloudflareIps = cloudflareIps;
 	if (robloxOAuth) config.robloxOAuth = robloxOAuth;
 	if (publicUrl) config.publicUrl = publicUrl;
 	if (webDir) config.webDir = webDir;
@@ -312,7 +372,8 @@ export function describeConfig(config: ServerConfig): string {
 		`token login=${config.tokenLogin ? "on" : "off"}`,
 		`roblox sign-in=${config.robloxOAuth ? "on" : "off"}`,
 		`admin allow list=${config.adminAllowIps ? `${config.adminAllowIps.length} rule(s)` : "off"}`,
-		`trust proxy=${config.trustProxy || "off"}`,
+		`trust proxy=${config.trustProxy || "off"}${config.trustedProxies ? ` (from ${config.trustedProxies.length} proxy rule(s))` : ""}`,
+		`cloudflare=${config.cloudflareIps ? "on" : "off"}`,
 		`public url=${config.publicUrl ?? "not set"}`,
 		`erasure webhook secret=${yes(config.webhookSecret)}`,
 		`open cloud key=${yes(config.openCloudKey)}`,

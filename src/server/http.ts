@@ -1,5 +1,6 @@
 /** Small HTTP helpers shared by the analytics and fleet routes: JSON answers, bearer tokens, rate limits. */
 import { createHash, timingSafeEqual } from "node:crypto";
+import { ipAllowed, parseIp, type IpRule } from "./ipfilter.ts";
 
 export function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers } });
@@ -24,21 +25,46 @@ export function tokenIn(given: string | undefined, accepted: readonly (string | 
 	return ok;
 }
 
+/** Which proxies are believed about the client's address. */
+export interface ProxyTrust {
+	/** How many proxies sit in front (Coolify's Traefik = 1); 0 = the TCP peer is the client. */
+	hops: number;
+	/** When set, X-Forwarded-For is only read when the TCP peer is one of these (and only trusted hops are walked). */
+	proxies?: readonly IpRule[];
+	/** When set and the address found so far is one of these (Cloudflare's edge), CF-Connecting-IP is the client. */
+	cloudflare?: readonly IpRule[];
+}
+
 /**
  * The client's IP: the TCP peer, or with trusted proxies the Nth hop from the right of X-Forwarded-For (what the
- * nearest proxy appended: the address it saw). `trust` = how many proxies sit in front (true = 1, false/0 = none).
+ * nearest proxy appended: the address it saw). `trust` = how many proxies sit in front (true = 1, false/0 = none), or
+ * a ProxyTrust: with `proxies`, a peer outside that list is the client whatever headers it sends (so a client that
+ * reaches the port directly can't choose its address), and hops are walked right to left only while they are trusted.
+ * With `cloudflare`, an address inside Cloudflare's ranges is replaced by the CF-Connecting-IP header.
  */
-export function clientIp(req: Request, peer: string, trust: boolean | number): string {
-	const hops = trust === true ? 1 : trust === false ? 0 : trust;
-	if (hops > 0) {
+export function clientIp(req: Request, peer: string, trust: boolean | number | ProxyTrust): string {
+	const t: ProxyTrust = typeof trust === "object" ? trust : { hops: trust === true ? 1 : trust === false ? 0 : trust };
+	let ip = peer;
+	if (t.hops > 0 && (!t.proxies || ipAllowed(t.proxies, peer))) {
 		const forwarded = req.headers.get("x-forwarded-for");
 		const list = forwarded
 			?.split(",")
 			.map((p) => p.trim())
 			.filter(Boolean);
-		if (list?.length) return list[Math.max(0, list.length - hops)] as string;
+		if (list?.length) {
+			if (!t.proxies) ip = list[Math.max(0, list.length - t.hops)] as string;
+			else {
+				let i = list.length - 1;
+				for (let hop = 1; hop < t.hops && i > 0 && ipAllowed(t.proxies, list[i] as string); hop++) i--;
+				ip = list[i] as string;
+			}
+		}
 	}
-	return peer;
+	if (t.cloudflare && ipAllowed(t.cloudflare, ip)) {
+		const real = req.headers.get("cf-connecting-ip")?.trim();
+		if (real && parseIp(real)) ip = real;
+	}
+	return ip;
 }
 
 /** Token buckets per key: `perMinute` requests, refilled continuously. Idle keys are dropped. */
