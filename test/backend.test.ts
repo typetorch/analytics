@@ -668,3 +668,63 @@ describe("the bus inside the app", () => {
 		expect(JSON.stringify(await res.json())).not.toContain("disk full");
 	});
 });
+
+describe("wrong tokens on /healthz and the game routes are counted (no free token oracle)", () => {
+	const WRONG = "wrong-token-for-tests-0123456789abcdef0";
+
+	test("/healthz: a wrong Bearer counts toward the login lockout; a blocked address gets the plain answer even with the right token", async () => {
+		const h = await harness();
+		try {
+			const ip = "203.0.113.90";
+			for (let i = 0; i < 5; i++) expect(await asJson(await h.call("/healthz", { headers: bearer(WRONG), ip }))).toEqual({ ok: true });
+			expect(h.logs.filter((l) => l.includes(`health check token failed from ${ip}`)).length).toBe(5);
+			expect(h.logs.join("\n")).not.toContain(WRONG);
+			// Blocked: the admin token gets { ok } only, and the other admin routes 429.
+			expect(await asJson(await h.call("/healthz", { headers: bearer(ADMIN), ip }))).toEqual({ ok: true });
+			expect((await h.call("/v1/settings", { headers: bearer(ADMIN), ip })).status).toBe(429);
+			// No token: the container health check is never counted or blocked.
+			expect((await h.call("/healthz", { ip: "203.0.113.91" })).status).toBe(200);
+			expect((await asJson(await h.call("/healthz", { headers: bearer(ADMIN), ip: "203.0.113.91" }))).version).toBeDefined();
+			// The API key on /healthz is not a failure (and shows nothing more).
+			for (let i = 0; i < 6; i++) expect(await asJson(await h.call("/healthz", { headers: bearer(API), ip: "203.0.113.92" }))).toEqual({ ok: true });
+			expect((await asJson(await h.call("/healthz", { headers: bearer(ADMIN), ip: "203.0.113.92" }))).version).toBeDefined();
+			// The window passes: the address may try again.
+			h.setNow(T0 + 16 * 60_000);
+			expect((await asJson(await h.call("/healthz", { headers: bearer(ADMIN), ip }))).version).toBeDefined();
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("game routes: 30 wrong keys per address, then wrong keys get 429; the right key from that address still works", async () => {
+		const h = await harness();
+		try {
+			const ip = "203.0.113.95";
+			const routes: [string, unknown][] = [
+				["/v1/errors", { j: "job-x", errors: [] }],
+				["/v1/identity", { identities: [] }],
+				["/v1/fleet/heartbeat", { j: "job-x" }],
+				["/v1/ingest", { events: [] }],
+			];
+			const codes: number[] = [];
+			for (let i = 0; i < 31; i++) {
+				const [path, body] = routes[i % routes.length] as [string, unknown];
+				codes.push((await h.call(path, { ...post(WRONG, body), ip })).status);
+			}
+			expect(codes.slice(0, 30).every((c) => c === 401)).toBe(true);
+			expect(codes[30]).toBe(429);
+			// One log line for the first failure and one when the block starts, not one per try.
+			expect(h.logs.filter((l) => l.includes(`wrong API key from ${ip}`)).length).toBe(1);
+			expect(h.logs.some((l) => l.includes(`${ip}: wrong API keys are refused`))).toBe(true);
+			expect(h.logs.join("\n")).not.toContain(WRONG);
+			// A real game server behind the same address is never blocked.
+			expect((await h.call("/v1/errors", { ...post(API, { j: "job-real", errors: [] }), ip })).status).toBe(202);
+			expect((await h.call("/v1/fleet/heartbeat", { ...post(API, { j: "job-real" }), ip })).status).toBe(202);
+			// No key at all is a plain 401 and not counted.
+			expect((await h.call("/v1/errors", { ...post(undefined, { j: "job-x", errors: [] }), ip: "203.0.113.96" })).status).toBe(401);
+			expect(h.logs.some((l) => l.includes("203.0.113.96"))).toBe(false);
+		} finally {
+			await h.close();
+		}
+	});
+});
