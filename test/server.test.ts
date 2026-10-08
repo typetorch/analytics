@@ -441,6 +441,12 @@ describe("settings and health", () => {
 		expect(await r.json()).toEqual({ recordShare: 0.25, techEvery: 60 });
 	});
 
+	test("auth/check also says which parts the server runs (the CLI refuses a token for a part that is off)", async () => {
+		const check = (token: string) => fetch(`${base}/v1/auth/check`, { headers: { authorization: `Bearer ${token}` } });
+		expect(await (await check(INGEST)).json()).toMatchObject({ ok: true, role: "game", parts: { analytics: true, fleet: false } });
+		expect(await (await check(ADMIN)).json()).toMatchObject({ ok: true, role: "admin", parts: { analytics: true, fleet: false } });
+	});
+
 	test("healthz: public ok, details with the admin token", async () => {
 		expect(await (await fetch(`${base}/healthz`)).json()).toEqual({ ok: true });
 		const h = (await (await fetch(`${base}/healthz`, { headers: admin })).json()) as { analytics: { loaderLagSeconds: number; loadedRows: number }; rssMb: number };

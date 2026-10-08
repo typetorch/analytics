@@ -99,7 +99,12 @@ const { servers } = await fleet.servers({ branch: "prod" });
   seconds, no publish. It needs the game's signing keys (`typetorch keys init`, `--fallback`) and its Open Cloud key
   (DataStore read/create/update, messaging); a failure carries the CLI's own message. Returns `{ value, written, seq,
   pinged }`. **writeFleetSettings** runs `typetorch fleet setup --url <url>` with the ingest token in the child's
-  environment (`TYPETORCH_FLEET_INGEST_TOKEN`). This package never signs anything. Settings, as the framework reads them (SCHEMA.md "Sink settings"): `{ backend: "basin" | "duckdb", events,
+  environment (`TYPETORCH_FLEET_INGEST_TOKEN`). Both calls go through the CLI's endpoint checks before anything is
+  signed: the URL is https (DuckDB: ends in `/v1/ingest`), `GET <server>/healthz` answers within 5 s, and
+  `GET /v1/auth/check` accepts the token as a game key (API key, write-only) for that part (the admin token is refused). A
+  broken value is refused: the call throws with the CLI's message (each failing check and its fix) and nothing is
+  written; `force: true` (`--force`) writes it anyway. `bun run local` prints that message in red and keeps the
+  tunnel running with the game's old settings. This package never signs anything. Settings, as the framework reads them (SCHEMA.md "Sink settings"): `{ backend: "basin" | "duckdb", events,
   recordings?, token?, flushSeconds? (5-300), recordShare? (0-1), techEvery? (15-3600), experiments?: { name: {
   active?, weights?, variant? } } }`. URLs must be https here (the framework also takes http).
 
@@ -272,6 +277,7 @@ bun src/server/main.ts --env-file analytics.env    # or, after bun run build: no
 | `POST /v1/sql` | admin | `{ sql, limit? }` -> `{ columns, rows, truncated, ms }`: one read-only SELECT (below) |
 | `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), free disk space; measured at most every 30 s |
 | `GET /v1/settings` | ingest or admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
+| `GET /v1/auth/check` | API key, admin token or session | `{ ok, role: "game" \| "admin", via, service, version, parts: { analytics, fleet } }` and no side effects: which role the credentials have and which parts this server runs (401 `{ error, login }` for none). `typetorch fleet setup`, `typetorch settings set analytics` and `typetorch doctor` call it before a key goes into the signed settings record: the CLI refuses the admin token there, and a game key for a part that is off |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
 | `GET /healthz` | none / admin | `{ ok }`; with the admin token: memory, loader lag, row counts, fleet counts |
 | `POST /v1/identity` | ingest | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
