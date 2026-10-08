@@ -135,7 +135,7 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 	if (!url.pathname.startsWith("/v1/fleet/")) return undefined;
 	const route = url.pathname.slice("/v1/fleet/".length);
 	try {
-		if (req.method === "POST" && route in FLEET_LIMITS) {
+		if (req.method === "POST" && Object.hasOwn(FLEET_LIMITS, route)) {
 			if (!o.isIngest(req)) return json(401, { error: "ingest token required" });
 			const kind = route as keyof typeof FLEET_LIMITS;
 			const body = await readJson(req);

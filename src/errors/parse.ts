@@ -1,20 +1,22 @@
 /**
  * `POST /v1/errors`: error logs from game servers (kernel and framework). The game already templated the message (player
  * names, display names and UserIds became <player.name>, <player.display_name>, <player.user_id>) and fingerprinted it,
- * so one kind is one fingerprint. A body is `{ v?: 1, j?: JobId, errors: [item, ...] }` (or the bare array of items):
+ * so one kind is one fingerprint. A body is `{ v?: 1, j: JobId, errors: [item, ...] }`; `j` is required (1-64 visible
+ * characters, the server's JobId; the X-TT-Job header may carry it instead, which also allows the bare array of items):
  *
  *   { fp, template, stack?, count, firstAt, lastAt, branch?, build?, realm, pids? }
  *
  * `fp` 1-64 characters [A-Za-z0-9_.:-]; `template` 1-1000; `stack` up to 4000 (a sample, kept from the first report);
  * `count` 1 to 1,000,000; `firstAt` <= `lastAt` in unix ms (below 1e11 = seconds); `realm` "server" or "client";
- * `branch` and `build` up to 64; `pids` up to 50 analytics ids (the pseudonymous `pid`, never a UserId or a name).
+ * `branch` and `build` up to 64; `pids` up to 10 analytics ids (the pseudonymous `pid`, never a UserId or a name; more
+ * are ignored). An item covering more than 10 minutes (lastAt - firstAt) is counted in its last minute only.
  * Shape problems of the whole body are an error (400); a bad item is dropped and counted, like /v1/ingest does for rows.
  */
 
 export const ERROR_LIMITS = {
 	/** Items in one batch. */
 	items: 200,
-	pids: 50,
+	pids: 10,
 	fp: 64,
 	template: 1000,
 	stack: 4000,
@@ -23,12 +25,14 @@ export const ERROR_LIMITS = {
 	/** A batch's time range may not reach further back than this, or past a little clock skew ahead. */
 	maxAgeMs: 7 * 86_400_000,
 	skewMs: 10 * 60_000,
-	/** An item covering longer than this is counted in its last minute only. */
-	spreadMs: 60 * 60_000,
+	/** An item covering longer than this is counted in its last minute only (so one item is at most 11 count rows). */
+	spreadMs: 10 * 60_000,
 } as const;
 
 export const FP_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
 const PID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/** A JobId: 1-64 characters, no control characters (Roblox JobIds are 36-character GUIDs). */
+export const ERROR_JOB_PATTERN = /^[^\x00-\x1f\x7f]{1,64}$/;
 
 export type ErrorRealm = "server" | "client";
 
@@ -46,7 +50,8 @@ export interface ErrorItem {
 }
 
 export interface ErrorBatch {
-	job: string | null;
+	/** The sender's JobId (required). */
+	job: string;
 	items: ErrorItem[];
 	/** Items dropped, and the first few reasons. */
 	rejected: number;
@@ -110,18 +115,22 @@ function parseItem(raw: unknown, now: number): ErrorItem {
 	};
 }
 
-/** Checks a request body (already JSON-decoded). Throws ErrorInputError when the body itself is the wrong shape. */
-export function parseErrorBatch(body: unknown, now: number): ErrorBatch {
+/**
+ * Checks a request body (already JSON-decoded). `jobHeader` is the X-TT-Job header, used when the body has no `j`.
+ * Throws ErrorInputError when the body itself is the wrong shape or has no JobId.
+ */
+export function parseErrorBatch(body: unknown, now: number, jobHeader?: string | null): ErrorBatch {
 	let list: unknown;
-	let job: string | null = null;
+	let raw: unknown;
 	if (Array.isArray(body)) list = body;
 	else if (isRecord(body)) {
 		list = body.errors;
-		if (body.j !== undefined && body.j !== null) {
-			if (typeof body.j !== "string" || body.j.length > 64 || body.j.includes("\0")) throw new ErrorInputError("j must be a JobId string of at most 64 characters");
-			job = body.j || null;
-		}
-	} else throw new ErrorInputError("body must be { errors: [...] } or an array");
+		raw = body.j;
+	} else throw new ErrorInputError("body must be { j, errors: [...] } or an array");
+	if (raw === undefined || raw === null || raw === "") raw = jobHeader || undefined;
+	if (raw === undefined) throw new ErrorInputError("j (the JobId) is required");
+	if (typeof raw !== "string" || !ERROR_JOB_PATTERN.test(raw)) throw new ErrorInputError("j must be a JobId string of 1 to 64 characters");
+	const job = raw;
 	if (!Array.isArray(list)) throw new ErrorInputError("errors must be an array");
 	if (list.length > ERROR_LIMITS.items) throw new ErrorInputError(`at most ${ERROR_LIMITS.items} errors per request`);
 	const items: ErrorItem[] = [];

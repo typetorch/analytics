@@ -68,6 +68,12 @@ game's settings written for you.
    and `--cloudflared <path>` exist. Ctrl+C stops the tunnel and the server it started. Without `--game` it still runs but
    says in red that game servers were NOT told about it.
 
+   **The tunnel is public.** Game servers must reach `/v1/ingest` and the fleet routes through it, so the explorer and its
+   admin login come along on the `trycloudflare.com` address (hard to guess, a 32+ character token, the 5-failure lockout).
+   Fine for a test place; for a tunnel that stays up for days set `TYPETORCH_TOKEN_LOGIN=off` in the game's `.env` and sign
+   in with Roblox (the CLI's Bearer token still works), or `TYPETORCH_ADMIN_ALLOW_IPS=<this PC's public address>`.
+   (`bun run local` does not switch the token login off by itself.)
+
 Working on the explorer itself: `bun run web:dev` is `vite dev` in `web/`; pass `--game <repo>` (see
 [The explorer](#the-explorer)).
 
@@ -81,11 +87,13 @@ Everything is an environment variable (a Docker/Coolify env, a systemd `Environm
 |---|---|---|
 | `TYPETORCH_API_KEY` | yes | The game role: game servers write events, heartbeats, deploy reports, alerts and error logs with it. 32+ characters. It reads nothing. |
 | `TYPETORCH_ADMIN_TOKEN` | yes | The admin role: the CLI (Bearer) and the explorer's token login read and manage with it. 32+ characters, **different** from the API key. |
-| `TYPETORCH_API_KEY_PREVIOUS` | no | Also accepted as a game key, for a rotation without downtime: put the old key here, update the games, remove it. |
+| `TYPETORCH_API_KEY_PREVIOUS` | no | Also accepted as a game key, for a rotation without downtime: put the old key here, update the games, remove it. The server prints a reminder at every start while it is set. |
 | `TYPETORCH_DATA_DIR` | no | Where the data lives. `/data` in Docker, `./data` otherwise. |
 | `PORT`, `HOST` | no | Listen address (8787; `127.0.0.1`, `0.0.0.0` in Docker). |
 | `TYPETORCH_PUBLIC_URL` | no | The public https address, no trailing slash. Used for the Roblox sign-in redirect, `Secure` cookies and origin checks. |
-| `TYPETORCH_TRUST_PROXY` | no | `1` when one proxy sits in front (Coolify, Caddy): client addresses come from `X-Forwarded-For`. A number counts the proxies (`2` = two hops). Off by default. |
+| `TYPETORCH_TRUST_PROXY` | no | `1` when one proxy sits in front (Coolify, Caddy): client addresses come from `X-Forwarded-For`. A number counts the proxies (`2` = two hops). Off by default. **Only the proxy may reach the port** then, or any client can choose its address (see [Security](#security)). |
+| `TYPETORCH_TRUSTED_PROXIES` | no | Addresses and CIDR ranges of the proxies. When set, `X-Forwarded-For` is only read when the TCP peer is one of them (a client that reaches port 8787 directly is taken at its own address). E.g. the Docker network's range on Coolify. |
+| `TYPETORCH_CLOUDFLARE` | no | `on` when Cloudflare's proxy (orange cloud) sits in front: an address inside Cloudflare's ranges is replaced by the `CF-Connecting-IP` header. `TYPETORCH_CLOUDFLARE_IPS` replaces the built-in list of ranges. See "Behind Cloudflare" under [Security](#security). |
 | `TYPETORCH_ADMIN_ALLOW_IPS` | no | Comma-separated addresses and CIDR ranges. When set, admin routes, the explorer and the login answer 404 to every other address. Game routes stay open. |
 | `TYPETORCH_TOKEN_LOGIN` | no | `off` hides and refuses the admin-token login in the browser (the CLI's Bearer token still works). Default `on`. |
 | `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
@@ -108,15 +116,17 @@ Everything is an environment variable (a Docker/Coolify env, a systemd `Environm
 | `TYPETORCH_FSYNC_MS` | `1000` | fdatasync interval of the raw files (0 = every write). |
 | `TYPETORCH_MAX_BODY`, `TYPETORCH_MAX_INFLATE` | 2 MB, 16 MB | Ingest body caps (gzip, inflated). |
 | `TYPETORCH_IP_PER_MINUTE`, `TYPETORCH_JOB_PER_MINUTE` | `6000`, `60` | Ingest rate limits per address and per JobId. |
-| `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds the fleet API lets in per minute. |
+| `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds per minute the fleet API lets in, and (counted on their own) the error logs. |
 | `TYPETORCH_SQLITE` | `<data dir>/fleet.sqlite` | The SQLite file (fleet, identities, error logs). |
 | `TYPETORCH_ALERT_WEBHOOK_FORMAT`, `TYPETORCH_ALERT_WEBHOOK_LEVELS` | detected, `critical` | `discord`, `slack` or `json`; which levels are sent. |
 | `TYPETORCH_ERASURE_DELETE_LINK` | `0` | `1` also deletes the DataStore link on erasure. |
 | `TYPETORCH_ERROR_KEEP_DAYS`, `TYPETORCH_ERROR_MAX_KINDS` | `30`, `5000` | Error log retention and the most kinds stored. |
+| `TYPETORCH_ERRORS_IP_PER_MINUTE` | `1200` | `POST /v1/errors` per address per minute (game servers share egress addresses). |
+| `TYPETORCH_ERROR_ROWS_PER_DAY` | `2000000` | New error count and player rows per UTC day; past it new rows are dropped and counted. |
 | `TYPETORCH_SESSION_IDLE_HOURS`, `TYPETORCH_SESSION_MAX_DAYS` | `12`, `7` | Explorer session lifetime. |
 | `TYPETORCH_LOGIN_MAX_FAILURES`, `TYPETORCH_LOGIN_WINDOW_MINUTES` | `5`, `15` | Failed logins per address before 429. |
 | `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
-| `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams. |
+| `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams, and the same number of `GET /v1/fleet/stream` streams. |
 | `TYPETORCH_WEB_DIR`, `TYPETORCH_EXPLORER` | `web/dist`, `on` | Where the built explorer is; `off` serves the API only. |
 
 </details>
@@ -145,19 +155,48 @@ server. A request that changes something and is authenticated by the cookie must
 (a web page on another site can't send it) and, when the browser sends an `Origin`, that must be this site. Bearer requests
 (the CLI) need neither: a browser can't attach them by itself.
 
-**Guessing.** Failed logins and bad Bearer tokens on admin routes are counted per client address: after 5 in 15 minutes the
-address gets `429` with `Retry-After` (even for the right token) until the oldest failure ages out. Each failure is logged
-with the address only, never what was typed. `GET /v1/auth/check` and the Roblox start/callback are rate limited too.
+**Guessing.** Failed logins and bad Bearer tokens on admin routes, `GET /v1/auth/check` and `GET /healthz` are counted per
+client address: after 5 in 15 minutes the address gets `429` with `Retry-After` (even for the right token; `/healthz` answers
+a blocked address its plain `{ ok: true }` without looking at the token) until the oldest failure ages out. Each failure is
+logged with the address only, never what was typed. Wrong API keys on the game routes are counted per address on their own:
+after 30 in 15 minutes *wrong* keys get `429` (the right key from the same address still works, so a real game server behind a
+shared Roblox egress address is never blocked); the first one and the block are logged. `GET /v1/auth/check` and the Roblox
+start/callback are rate limited too, and each address may hold 5 Roblox sign-ins in progress (more push out its own oldest).
 
 **Who may reach the admin side.** `TYPETORCH_ADMIN_ALLOW_IPS` (addresses and CIDR ranges) makes admin routes, the explorer
 and the login answer `404` to every other address. Game routes stay open to any address (Roblox servers' addresses vary)
 but need the API key. Client addresses come from the TCP peer, or from `X-Forwarded-For` only when the proxy is trusted
-(`TYPETORCH_TRUST_PROXY`; set it to `1` on Coolify, leave it off when nothing sits in front).
+(`TYPETORCH_TRUST_PROXY`; set it to `1` on Coolify, leave it off when nothing sits in front). The allow list only works when
+the address is real.
+
+**Let the proxy be the only way in.** With `TYPETORCH_TRUST_PROXY` on, whoever reaches port 8787 *directly* can send their
+own `X-Forwarded-For` and pick the address the allow list and the lockout see. So: on Coolify use **Ports Exposes** `8787`
+only and **never a "Ports Mappings"** entry (that publishes the port on the host); never `docker run -p 0.0.0.0:8787:8787`
+(the examples bind `127.0.0.1`); on a VPS keep `HOST=127.0.0.1` behind Caddy with the firewall closed. Traefik (Coolify's
+proxy) must be the only route in. To enforce it in the backend too, set `TYPETORCH_TRUSTED_PROXIES` to the proxy's addresses
+(e.g. `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` for a Docker network: an internet client never has those): `X-Forwarded-For`
+from any other peer is then ignored. The server warns at startup when the proxy is trusted on a non-loopback `HOST` without
+that list.
+
+**Behind Cloudflare.** If the backend's domain is proxied by Cloudflare (orange cloud) in front of Coolify, Traefik sees a
+Cloudflare edge as the client and does not trust Cloudflare's `X-Forwarded-For` unless its `forwardedHeaders.trustedIPs`
+lists Cloudflare's ranges. Then every visitor behind that edge shares one address: the allow list can't match you, and
+anyone can trip the 5-failure lockout for everyone on that edge (including you) for 15 minutes. Pick one:
+- **DNS only** (grey cloud) for the backend's hostname: simplest, addresses are real.
+- `TYPETORCH_CLOUDFLARE=on`: when the address the proxy rules give is inside Cloudflare's published ranges, the backend uses
+  the `CF-Connecting-IP` header instead (a client that reaches Traefik directly can't use it: its own address isn't
+  Cloudflare's). Cloudflare's edge is shared by every Cloudflare customer, so this trusts Cloudflare to set that header; for a
+  stronger origin lock use Cloudflare's Authenticated Origin Pulls or a Cloudflare Tunnel. The built-in ranges come from
+  <https://www.cloudflare.com/ips/>; `TYPETORCH_CLOUDFLARE_IPS` replaces them if they change (a missing range only means that
+  edge is taken as the client, as without the setting).
+- Or configure Traefik's `trustedIPs` with Cloudflare's ranges and set `TYPETORCH_TRUST_PROXY=2`.
 
 **Browser hardening.** Every answer carries `Content-Security-Policy` (the explorer: its own scripts, styles and fonts only,
 no inline scripts, connections to itself, avatars from Roblox's CDN; the API: nothing), `X-Frame-Options: DENY` with
 `frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Strict-Transport-Security` on
-https. There is **no CORS**: a preflight is refused and no `Access-Control-*` header is ever sent.
+https (with `includeSubDomains`: give the backend its own hostname such as `backend.example.com`; on an apex domain it would
+force https on every subdomain for a year). There is **no CORS**: a preflight is refused and no `Access-Control-*` header is
+ever sent.
 
 **What is public.** `GET /healthz` answers only `{ ok: true }` without the admin role (memory, loader lag and the bus
 counters need it). The explorer's files are public (they hold no data); its data needs the admin role. `GET /v1/auth/check`
@@ -193,7 +232,10 @@ unread. A failure goes back to the login page with a plain sentence, never a sta
 1. https on (a domain on the app; Coolify's proxy gets the certificate).
 2. `TYPETORCH_API_KEY` and `TYPETORCH_ADMIN_TOKEN`: two different random values of 32+ characters.
 3. `TYPETORCH_TRUST_PROXY=1` (the compose file already defaults to it) and `TYPETORCH_PUBLIC_URL=https://<your domain>`.
-4. Optional: `TYPETORCH_ADMIN_ALLOW_IPS=<your IP or range>` to hide the admin side from everyone else.
+   Port 8787 only under **Ports Exposes**, never **Ports Mappings**: Traefik must be the only way in. Optional
+   `TYPETORCH_TRUSTED_PROXIES` enforces it.
+4. Optional: `TYPETORCH_ADMIN_ALLOW_IPS=<your IP or range>` to hide the admin side from everyone else (needs real addresses:
+   no Cloudflare orange cloud, or see "Behind Cloudflare" under [Security](#security)).
 5. Optional: the Roblox OAuth variables above.
 
 The full steps are in [Deploy on Coolify](#deploy-on-coolify).
@@ -236,15 +278,18 @@ The backend builds from this repo into one container: the root `Dockerfile` buil
 here): the files are checked by tests that read them, so expect to fix a typo on the first deploy.
 
 1. In Coolify create a new resource from this repository: **Docker Compose** (Docker Compose Location `/compose.yaml`) or
-   **Dockerfile**. With Dockerfile, add a persistent storage (volume) mounted at `/data`, and set the exposed port to 8787.
+   **Dockerfile**. With Dockerfile, add a persistent storage (volume) mounted at `/data`, and put 8787 under **Ports Exposes**.
+   Never add a **Ports Mappings** entry (it publishes 8787 on the host, past Traefik, and with `TYPETORCH_TRUST_PROXY` any
+   client could then choose its address).
 2. Give the app your domain (e.g. `backend.example.com`) with https on.
 3. Environment variables (secrets as secrets):
    - `TYPETORCH_API_KEY` and `TYPETORCH_ADMIN_TOKEN`: two different random values of 32+ characters
      (`openssl rand -hex 32`). **The compose file refuses to start without them.**
    - `TYPETORCH_PUBLIC_URL=https://backend.example.com`
    - `TYPETORCH_TRUST_PROXY=1` (default in `compose.yaml`; with the Dockerfile app set it yourself)
-   - optional: `TYPETORCH_ADMIN_ALLOW_IPS`, `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`, `ROBLOX_WEBHOOK_SECRET`,
-     `OPENCLOUD_API_KEY`, `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_ALERT_WEBHOOK_URL`
+   - optional: `TYPETORCH_ADMIN_ALLOW_IPS`, `TYPETORCH_TRUSTED_PROXIES`, `TYPETORCH_CLOUDFLARE`,
+     `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`, `ROBLOX_WEBHOOK_SECRET`, `OPENCLOUD_API_KEY`,
+     `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_ALERT_WEBHOOK_URL`
 4. Deploy. The health check is `GET /healthz` inside the container (30 s start period); `docker logs` shows the startup
    line (what is set, never the values) and any old-variable warnings.
 5. Check: `curl https://backend.example.com/healthz` -> `{"ok":true}`;
@@ -291,7 +336,7 @@ the live stream's clients:
 `heartbeat` are summed up and sent at most once a second (`events` `{ batches, events, recordings, rejected, kinds }`,
 `heartbeat` `{ servers: [{ job, branch, artifact, players, health }], more }`); `deploy`, `alert` and `error` go out at once. Each
 browser has its own 64-message buffer (full = dropped and counted), at most 20 streams at once. `GET /v1/fleet/stream` (the
-CLI's `--watch`) is unchanged.
+CLI's `--watch`) is unchanged, with the same cap on open streams.
 
 ## Error logs
 
@@ -299,7 +344,8 @@ Game servers (kernel and framework) post error kinds; the game has already repla
 UserId in the message (`<player.name>`, `<player.display_name>`, `<player.user_id>`) and fingerprinted it, so one kind is one
 `fp`. Players are counted by the pseudonymous analytics id (`pid`), never a name or UserId.
 
-`POST /v1/errors` with the API key, JSON (gzip allowed, `Content-Encoding: gzip`), 512 KB at most (2 MB inflated):
+`POST /v1/errors` with the API key, JSON (gzip allowed, `Content-Encoding: gzip`), 512 KB at most (2 MB inflated). `j` (the
+server's JobId) is **required**:
 
 ```json
 { "v": 1, "j": "<JobId>", "errors": [
@@ -311,21 +357,38 @@ UserId in the message (`<player.name>`, `<player.display_name>`, `<player.user_i
 
 | Field | Rule |
 |---|---|
-| `errors` | at most 200 items (a bare array works too); the body must be an object or an array, else `400` |
+| `j` | required: the JobId, 1-64 characters without control characters; may come in the `X-TT-Job` header instead (then a bare array of items works too). Missing or bad: `400` |
+| `errors` | at most 200 items; the body must be an object (or an array with `X-TT-Job`), else `400` |
 | `fp` | 1-64 characters of `A-Za-z0-9_.:-` |
 | `template` | 1-1,000 characters |
-| `stack` | optional, up to 4,000; the first one stored per kind is kept |
+| `stack` | optional, up to 4,000; the kind keeps the stack of its newest report that had one |
 | `count` | whole number 1 to 1,000,000 |
 | `firstAt`, `lastAt` | unix ms (below 1e11: seconds), `firstAt <= lastAt`, within the last 7 days and at most 10 minutes ahead |
 | `branch`, `build` | optional, up to 64 |
 | `realm` | `server` or `client` |
-| `pids` | optional, up to 50 ids of `A-Za-z0-9_-` (others dropped) |
+| `pids` | optional, up to 10 ids of `A-Za-z0-9_-` (bad ones and any past 10 are ignored) |
 
-A bad item is dropped and counted: `202 { accepted, rejected, errors?: [first 5 reasons] }`. Limits: 30 requests a minute per
-JobId (`j`), the ingest rate limit per address. Storage (in the SQLite file): one row per kind (fingerprint, template, first
-and last seen, one sample stack, total), counts per minute by branch, build and side (an item that spans minutes is spread
-evenly over them, up to an hour), and the pids per day. Counts and pids older than 30 days go (`TYPETORCH_ERROR_KEEP_DAYS`);
-more than 5,000 kinds are dropped and counted (`/healthz` -> `errors.droppedKinds`).
+A bad item is dropped and counted: `202 { accepted, rejected, errors?: [first 5 reasons] }`.
+
+Limits (all `429` with `Retry-After`; the kernel waits and retries):
+- 30 requests a minute per JobId; 1,200 a minute per address (`TYPETORCH_ERRORS_IP_PER_MINUTE`) besides the ingest limit;
+- 2,000 never-seen JobIds a minute across all senders (`TYPETORCH_NEW_JOBS_PER_MINUTE`; a JobId the fleet knows, or that sent
+  errors in the last hour, is not new);
+- batches are stored one at a time, each in one SQLite transaction, with a turn of the event loop between them; at most 64
+  wait, more get `429` (`/healthz` -> `errors.refusedFull`).
+
+What is stored, and what is dropped (counted in `/healthz` -> `errors`, the request still gets its `202`):
+- one row per kind (fingerprint, template, first and last seen, a sample stack, total). The template and stack follow the
+  kind's newest report, so text that one key holder sent first doesn't stay;
+- a new kind needs room: at most 5,000 kinds (`TYPETORCH_ERROR_MAX_KINDS`, `droppedKinds`), and at most **50 new kinds an
+  hour per JobId and 200 per address** (`droppedQuota`), so one sender can't fill the table;
+- counts per minute by branch, build and side: an item that spans up to 10 minutes is spread evenly over them, a longer one
+  is counted in its last minute (so one item is at most 11 rows);
+- the pids per kind and day (2,000 at most per kind and day);
+- at most 2,000,000 **new** count and pid rows per UTC day (`TYPETORCH_ERROR_ROWS_PER_DAY`; `rowsToday`, `droppedRows`);
+  adding to a row that exists is always free.
+
+Counts and pids older than 30 days go (`TYPETORCH_ERROR_KEEP_DAYS`).
 
 Reads (admin): `GET /v1/errors?window=24h&realm=server&branch=prod&build=...&q=text&limit=100&bucket=300` (also
 `from=` / `to=` in unix ms or ISO) answers `{ window: { from, to, bucketSeconds, buckets }, kinds: [{ fp, template, topFrame,

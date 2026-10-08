@@ -10,7 +10,19 @@ export interface FleetDb {
 	run(sql: string, params?: SqlValue[]): Promise<{ changes: number; lastId: number }>;
 	all<T = Record<string, unknown>>(sql: string, params?: SqlValue[]): Promise<T[]>;
 	first<T = Record<string, unknown>>(sql: string, params?: SqlValue[]): Promise<T | undefined>;
+	/**
+	 * Runs `fn` synchronously inside one transaction (COMMIT, or ROLLBACK when it throws). Nothing else can run statements
+	 * in between, and many small writes cost one commit instead of one each.
+	 */
+	transaction<T>(fn: (tx: SyncTx) => T): Promise<T>;
 	close(): Promise<void>;
+}
+
+/** The synchronous statements a transaction body may run. */
+export interface SyncTx {
+	run(sql: string, params?: SqlValue[]): { changes: number; lastId: number };
+	all<T = Record<string, unknown>>(sql: string, params?: SqlValue[]): T[];
+	first<T = Record<string, unknown>>(sql: string, params?: SqlValue[]): T | undefined;
 }
 
 interface SyncStatement {
@@ -51,6 +63,27 @@ export function wrapSync(db: SyncDatabase): FleetDb {
 		},
 		async first<T>(sql: string, params: SqlValue[] = []) {
 			return (statement(sql).get(...params) ?? undefined) as T | undefined;
+		},
+		async transaction<T>(fn: (tx: SyncTx) => T): Promise<T> {
+			const tx: SyncTx = {
+				run: (sql, params = []) => {
+					const r = statement(sql).run(...params);
+					return { changes: Number(r.changes), lastId: Number(r.lastInsertRowid) };
+				},
+				all: <R>(sql: string, params: SqlValue[] = []) => statement(sql).all(...params) as R[],
+				first: <R>(sql: string, params: SqlValue[] = []) => (statement(sql).get(...params) ?? undefined) as R | undefined,
+			};
+			db.exec("BEGIN IMMEDIATE");
+			try {
+				const out = fn(tx);
+				db.exec("COMMIT");
+				return out;
+			} catch (error) {
+				try {
+					db.exec("ROLLBACK");
+				} catch {}
+				throw error;
+			}
 		},
 		async close() {
 			for (const s of cache.values()) s.finalize?.();

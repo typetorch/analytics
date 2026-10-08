@@ -1,9 +1,11 @@
 /**
  * Error logs in the backend's SQLite file: one row per error kind (fingerprint: template, first and last seen, one sample
  * stack), counts per minute (by branch, build and realm) and the analytics ids (`pid`) affected per day. Bounded: at most
- * `maxKinds` kinds (more are dropped and counted), 2,000 pids per kind and day, counts older than `keepDays` are pruned.
+ * `maxKinds` kinds (more are dropped and counted), a few new kinds per sender per hour, 2,000 pids per kind and day, a
+ * daily budget of new rows, counts older than `keepDays` are pruned. Batches are stored one at a time, each in one
+ * transaction, behind a bounded queue (full = 429), so a flood can't hold the event loop.
  */
-import type { FleetDb, SqlValue } from "../fleet/db.ts";
+import type { FleetDb, SqlValue, SyncTx } from "../fleet/db.ts";
 import { ERROR_LIMITS, type ErrorBatch, type ErrorItem } from "./parse.ts";
 
 const MINUTE = 60_000;
@@ -82,6 +84,16 @@ export interface ErrorStats {
 	occurrences: number;
 	/** Items not stored because the kind table was full. */
 	droppedKinds: number;
+	/** Items for a new kind not stored because their sender (JobId or address) used its new-kind quota for the hour. */
+	droppedQuota: number;
+	/** New count and player rows not stored because the day's row budget was spent. */
+	droppedRows: number;
+	/** New rows written today (UTC) and the budget. */
+	rowsToday: number;
+	rowsPerDay: number;
+	/** Batches waiting for the store, and batches refused (429) because the queue was full. */
+	queued: number;
+	refusedFull: number;
 }
 
 interface KindRow {
@@ -123,74 +135,219 @@ export function spreadCount(count: number, firstAt: number, lastAt: number): { m
 	return out;
 }
 
+/** New kinds one sender may add per clock hour: per JobId, and per address (JobIds are made up freely). */
+export const NEW_KINDS_PER_JOB_HOUR = 50;
+export const NEW_KINDS_PER_IP_HOUR = 200;
+/** Batches waiting for the store; past this POST /v1/errors answers 429. */
+export const ERROR_QUEUE_MAX = 64;
+/** New error_counts + error_pids rows per UTC day (TYPETORCH_ERROR_ROWS_PER_DAY); past it new rows are dropped and counted. */
+export const ERROR_ROWS_PER_DAY = 2_000_000;
+
+/** The store's queue is full: answer 429. */
+export class ErrorQueueFull extends Error {
+	override name = "ErrorQueueFull";
+}
+
+/** Uses per key within the current clock hour; bounded memory (the map is cleared every hour and capped). */
+class HourQuota {
+	private window = -1;
+	private readonly used = new Map<string, number>();
+
+	constructor(
+		readonly limit: number,
+		private readonly clock: () => number,
+	) {}
+
+	private roll(): void {
+		const w = Math.floor(this.clock() / 3_600_000);
+		if (w !== this.window) {
+			this.window = w;
+			this.used.clear();
+		}
+	}
+
+	left(key: string): number {
+		this.roll();
+		return this.limit - (this.used.get(key) ?? 0);
+	}
+
+	use(key: string): void {
+		this.roll();
+		this.used.set(key, (this.used.get(key) ?? 0) + 1);
+		if (this.used.size > 100_000) this.used.delete(this.used.keys().next().value as string);
+	}
+}
+
+export interface ErrorStoreOptions {
+	clock: () => number;
+	keepDays: number;
+	maxKinds: number;
+	rowsPerDay: number;
+	newKindsPerJobHour: number;
+	newKindsPerIpHour: number;
+	maxQueue: number;
+}
+
+const yieldTurn = () => new Promise<void>((done) => setImmediate(done));
+
 export class ErrorStore {
 	private kindCount = 0;
-	readonly stats: ErrorStats = { kinds: 0, batches: 0, items: 0, occurrences: 0, droppedKinds: 0 };
+	readonly stats: ErrorStats = { kinds: 0, batches: 0, items: 0, occurrences: 0, droppedKinds: 0, droppedQuota: 0, droppedRows: 0, rowsToday: 0, rowsPerDay: 0, queued: 0, refusedFull: 0 };
 	private lastPrune = 0;
+	private rowDay = -1;
+	private readonly jobQuota: HourQuota;
+	private readonly ipQuota: HourQuota;
+	/** Batches are stored one at a time, each in one transaction, with a turn of the event loop between them. */
+	private chain: Promise<void> = Promise.resolve();
+	private waiting = 0;
 
 	private constructor(
 		private readonly db: FleetDb,
-		private readonly options: { clock: () => number; keepDays: number; maxKinds: number },
-	) {}
+		private readonly options: ErrorStoreOptions,
+	) {
+		this.jobQuota = new HourQuota(options.newKindsPerJobHour, options.clock);
+		this.ipQuota = new HourQuota(options.newKindsPerIpHour, options.clock);
+		this.stats.rowsPerDay = options.rowsPerDay;
+	}
 
-	static async open(db: FleetDb, options: { clock?: () => number; keepDays?: number; maxKinds?: number } = {}): Promise<ErrorStore> {
+	static async open(db: FleetDb, options: Partial<ErrorStoreOptions> = {}): Promise<ErrorStore> {
 		await db.exec(SCHEMA);
-		const store = new ErrorStore(db, { clock: options.clock ?? Date.now, keepDays: options.keepDays ?? 30, maxKinds: options.maxKinds ?? 5000 });
+		// sample_at: when the sample (template, stack) was last replaced (added after the first release).
+		const columns = await db.all<{ name: string }>("PRAGMA table_info(error_kinds)");
+		if (!columns.some((c) => c.name === "sample_at")) await db.exec("ALTER TABLE error_kinds ADD COLUMN sample_at INTEGER");
+		const store = new ErrorStore(db, {
+			clock: options.clock ?? Date.now,
+			keepDays: options.keepDays ?? 30,
+			maxKinds: options.maxKinds ?? 5000,
+			rowsPerDay: options.rowsPerDay ?? ERROR_ROWS_PER_DAY,
+			newKindsPerJobHour: options.newKindsPerJobHour ?? NEW_KINDS_PER_JOB_HOUR,
+			newKindsPerIpHour: options.newKindsPerIpHour ?? NEW_KINDS_PER_IP_HOUR,
+			maxQueue: options.maxQueue ?? ERROR_QUEUE_MAX,
+		});
 		store.kindCount = Number((await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM error_kinds"))?.n ?? 0);
 		store.stats.kinds = store.kindCount;
 		return store;
 	}
 
-	/** Stores a validated batch. */
-	async record(batch: ErrorBatch): Promise<{ stored: number; droppedKinds: number }> {
-		let stored = 0;
-		let droppedKinds = 0;
-		for (const item of batch.items) {
-			if (await this.recordItem(item)) stored++;
-			else droppedKinds++;
-		}
-		this.stats.batches++;
-		this.stats.items += stored;
-		this.stats.droppedKinds += droppedKinds;
-		return { stored, droppedKinds };
+	/** Whether a new batch would be refused (429) right now. */
+	get full(): boolean {
+		return this.waiting >= this.options.maxQueue;
 	}
 
-	private async recordItem(item: ErrorItem): Promise<boolean> {
-		const existing = await this.db.first<{ fp: string; stack: string | null; last_at: number }>("SELECT fp, stack, last_at FROM error_kinds WHERE fp = ?", [item.fp]);
+	/**
+	 * Stores a validated batch from `sender` (its address; the JobId is `batch.job`). Batches queue up (at most
+	 * `maxQueue`, else ErrorQueueFull) and are stored one at a time, each in one transaction.
+	 */
+	async record(batch: ErrorBatch, sender: { ip?: string } = {}): Promise<{ stored: number; droppedKinds: number }> {
+		if (this.full) {
+			this.stats.refusedFull++;
+			throw new ErrorQueueFull("the error store is busy");
+		}
+		this.waiting++;
+		this.stats.queued = this.waiting;
+		const run = this.chain.then(() => this.store(batch, sender.ip ?? ""));
+		this.chain = run.then(yieldTurn, yieldTurn);
+		try {
+			return await run;
+		} finally {
+			this.waiting--;
+			this.stats.queued = this.waiting;
+		}
+	}
+
+	/** Room left in today's row budget (the count starts again at UTC midnight). */
+	private rowRoom(): number {
+		const day = Math.floor(this.options.clock() / DAY);
+		if (day !== this.rowDay) {
+			this.rowDay = day;
+			this.stats.rowsToday = 0;
+		}
+		return this.options.rowsPerDay - this.stats.rowsToday;
+	}
+
+	private async store(batch: ErrorBatch, ip: string): Promise<{ stored: number; droppedKinds: number }> {
+		const result = await this.db.transaction((tx) => {
+			let stored = 0;
+			let droppedKinds = 0;
+			for (const item of batch.items) {
+				if (this.recordItem(tx, item, batch.job, ip)) stored++;
+				else droppedKinds++;
+			}
+			return { stored, droppedKinds };
+		});
+		this.stats.batches++;
+		this.stats.items += result.stored;
+		return result;
+	}
+
+	private recordItem(tx: SyncTx, item: ErrorItem, job: string, ip: string): boolean {
+		const existing = tx.first<{ last_at: number; sample_at: number | null }>("SELECT last_at, sample_at FROM error_kinds WHERE fp = ?", [item.fp]);
 		const branch = item.branch ?? "";
 		const build = item.build ?? "";
 		if (!existing) {
-			if (this.kindCount >= this.options.maxKinds) return false;
-			await this.db.run(
-				"INSERT INTO error_kinds (fp, template, stack, realm, first_at, last_at, total, last_branch, last_build) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-				[item.fp, item.template, item.stack, item.realm, item.firstAt, item.lastAt, item.count, item.branch, item.build],
+			if (this.kindCount >= this.options.maxKinds) {
+				this.stats.droppedKinds++;
+				return false;
+			}
+			// One sender can't fill the kind table: a few new kinds an hour per JobId and per address.
+			if (this.jobQuota.left(job) <= 0 || this.ipQuota.left(ip) <= 0) {
+				this.stats.droppedQuota++;
+				return false;
+			}
+			tx.run(
+				"INSERT INTO error_kinds (fp, template, stack, realm, first_at, last_at, total, last_branch, last_build, sample_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				[item.fp, item.template, item.stack, item.realm, item.firstAt, item.lastAt, item.count, item.branch, item.build, item.lastAt],
 			);
+			this.jobQuota.use(job);
+			this.ipQuota.use(ip);
 			this.kindCount++;
 			this.stats.kinds = this.kindCount;
 		} else {
 			const newest = item.lastAt >= existing.last_at;
-			await this.db.run(
-				"UPDATE error_kinds SET first_at = MIN(first_at, ?), last_at = MAX(last_at, ?), total = total + ?, stack = COALESCE(stack, ?)" +
-					(newest ? ", last_branch = ?, last_build = ?" : "") +
-					" WHERE fp = ?",
-				[item.firstAt, item.lastAt, item.count, item.stack, ...(newest ? [item.branch, item.build] : []), item.fp],
-			);
+			// The sample follows the newest report (the stack only when the item has one), so text that one key holder sent
+			// first doesn't stay: the next report replaces it.
+			const fresh = item.lastAt >= Number(existing.sample_at ?? 0);
+			const sets = ["first_at = MIN(first_at, ?)", "last_at = MAX(last_at, ?)", "total = total + ?"];
+			const params: SqlValue[] = [item.firstAt, item.lastAt, item.count];
+			if (newest) {
+				sets.push("last_branch = ?", "last_build = ?");
+				params.push(item.branch, item.build);
+			}
+			if (fresh) {
+				sets.push("template = ?", "sample_at = ?");
+				params.push(item.template, item.lastAt);
+				if (item.stack) {
+					sets.push("stack = ?");
+					params.push(item.stack);
+				}
+			}
+			tx.run(`UPDATE error_kinds SET ${sets.join(", ")} WHERE fp = ?`, [...params, item.fp]);
 		}
 		this.stats.occurrences += item.count;
+		// New rows count against the day's budget; adding to a row that exists is free.
 		for (const { minute, n } of spreadCount(item.count, item.firstAt, item.lastAt)) {
-			await this.db.run(
-				"INSERT INTO error_counts (fp, minute, branch, build, realm, n) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(fp, minute, branch, build, realm) DO UPDATE SET n = n + excluded.n",
-				[item.fp, minute, branch, build, item.realm, n],
-			);
+			const key: SqlValue[] = [item.fp, minute, branch, build, item.realm];
+			if (tx.run("UPDATE error_counts SET n = n + ? WHERE fp = ? AND minute = ? AND branch = ? AND build = ? AND realm = ?", [n, ...key]).changes) continue;
+			if (this.rowRoom() <= 0) {
+				this.stats.droppedRows++;
+				continue;
+			}
+			tx.run("INSERT INTO error_counts (fp, minute, branch, build, realm, n) VALUES (?, ?, ?, ?, ?, ?)", [...key, n]);
+			this.stats.rowsToday++;
 		}
 		if (item.pids.length) {
 			const day = Math.floor(item.lastAt / DAY);
-			const held = Number((await this.db.first<{ n: number }>("SELECT COUNT(*) AS n FROM error_pids WHERE fp = ? AND day = ?", [item.fp, day]))?.n ?? 0);
+			const held = Number(tx.first<{ n: number }>("SELECT COUNT(*) AS n FROM error_pids WHERE fp = ? AND day = ?", [item.fp, day])?.n ?? 0);
 			let room = PIDS_PER_KIND_DAY - held;
 			for (const pid of item.pids) {
 				if (room <= 0) break;
-				const { changes } = await this.db.run("INSERT OR IGNORE INTO error_pids (fp, day, realm, branch, build, pid) VALUES (?, ?, ?, ?, ?, ?)", [item.fp, day, item.realm, branch, build, pid]);
+				if (this.rowRoom() <= 0) {
+					this.stats.droppedRows++;
+					break;
+				}
+				const { changes } = tx.run("INSERT OR IGNORE INTO error_pids (fp, day, realm, branch, build, pid) VALUES (?, ?, ?, ?, ?, ?)", [item.fp, day, item.realm, branch, build, pid]);
 				room -= changes;
+				this.stats.rowsToday += changes;
 			}
 		}
 		return true;

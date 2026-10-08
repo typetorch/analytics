@@ -5,7 +5,7 @@
  *
  *   game routes (API key)
  *   POST /v1/ingest                 gzip JSON { events, recordings, identities? } -> 202 after the raw write
- *   POST /v1/errors                 { j?, errors: [{ fp, template, stack?, count, firstAt, lastAt, branch, build, realm, pids }] }
+ *   POST /v1/errors                 { j, errors: [{ fp, template, stack?, count, firstAt, lastAt, branch, build, realm, pids }] }
  *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy      (fleet/http.ts)
  *
@@ -37,7 +37,7 @@ import { gunzipSync } from "node:zlib";
 import { EventBus } from "../bus.ts";
 import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
 import { handleErrorReads } from "../errors/http.ts";
-import { ErrorStore } from "../errors/store.ts";
+import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { openSqlite } from "../fleet/db.ts";
@@ -101,6 +101,13 @@ const ERRORS_MAX_INFLATE = 2 * 1024 * 1024;
 const OAUTH_COOKIE = "tt_oauth";
 const OAUTH_PATH = "/v1/auth/roblox";
 const FLEET_GAME_ROUTES = new Set(Object.keys(FLEET_LIMITS));
+/** POST /v1/errors per JobId per minute (the kernel sends at most 6). */
+const ERROR_JOB_PER_MINUTE = 30;
+/** How long an error sender (JobId) stays known after its last accepted batch. */
+const ERROR_SENDER_TTL_MS = 3_600_000;
+const ERROR_SENDERS_MAX = 50_000;
+/** Wrong API keys per address inside the login window before wrong keys get 429. */
+const GAME_KEY_MAX_FAILURES = 30;
 
 export async function startApp(config: ServerConfig, options: AppOptions = {}): Promise<App> {
 	const clock = options.clock ?? Date.now;
@@ -130,7 +137,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// One SQLite file for the fleet tables, pid <-> UserId and the error logs.
 	const sqlite = await openSqlite(config.fleetDb);
 	const identities = await IdentityStore.open(sqlite);
-	const errors = await ErrorStore.open(sqlite, { clock, keepDays: config.errorKeepDays, maxKinds: config.errorMaxKinds });
+	const errors = await ErrorStore.open(sqlite, { clock, keepDays: config.errorKeepDays, maxKinds: config.errorMaxKinds, rowsPerDay: config.errorRowsPerDay });
 	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
 
@@ -148,7 +155,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		);
 	}
 	if (fleet) bus.subscribe("fleet-store", ["heartbeat", "deploy"], (_topic, m) => fleet.apply(m), { mode: "await" });
-	bus.subscribe("error-store", ["error"], async (_topic, m) => void (await errors.record(m)), { mode: "await" });
+	bus.subscribe("error-store", ["error"], async (_topic, m) => void (await errors.record(m, { ip: m.ip ?? "" })), { mode: "await" });
 	// The webhook is slow and remote: queued, so a stuck Discord never holds a heartbeat up.
 	if (notifier) bus.subscribe("alert-notifier", ["alert"], (_topic, alert) => notifier.notify(alert), { mode: "queue", maxQueue: 200 });
 	const live = new LiveHub(bus, { maxClients: config.liveMaxClients, clock });
@@ -158,7 +165,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const sessions = new Sessions({ adminToken: config.adminToken, idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
 	const auth = new Auth({ adminToken: config.adminToken, apiKeys: config.apiKeys, sessions, isOwner: (id) => access.isOwner(id) });
 	const proxyOpts = { trustProxy: config.trustProxy, ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}) };
+	const proxyTrust = { hops: config.trustProxy, ...(config.trustedProxies ? { proxies: config.trustedProxies } : {}), ...(config.cloudflareIps ? { cloudflare: config.cloudflareIps } : {}) };
 	const authFailures = new FailureLimiter(config.loginMaxFailures, config.loginWindowMs, clock);
+	// Wrong API keys per address (game routes). Only wrong keys are refused past it, so a real game server behind the same
+	// egress address is never blocked.
+	const gameKeyFailures = new FailureLimiter(GAME_KEY_MAX_FAILURES, config.loginWindowMs, clock);
 	const checkLimiter = new RateLimiter(120, clock);
 	const oauthLimiter = new RateLimiter(20, clock);
 	const oauth = config.robloxOAuth && config.publicUrl
@@ -169,7 +180,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	const ipLimiter = new RateLimiter(config.ipPerMinute, clock);
 	const jobLimiter = new RateLimiter(config.jobPerMinute, clock);
-	const errorJobLimiter = new RateLimiter(30, clock);
+	const errorJobLimiter = new RateLimiter(ERROR_JOB_PER_MINUTE, clock);
+	const errorIpLimiter = new RateLimiter(config.errorsIpPerMinute, clock);
+	// Never-seen error senders (JobIds) per minute, like the fleet's gate (its own count, so one can't starve the other).
+	const newErrorJobs = new NewJobLimiter(config.fleetNewJobsPerMinute, clock);
+	const errorSenders = new Map<string, number>();
 	const fleetLimiters = Object.fromEntries(Object.entries(FLEET_LIMITS).map(([k, n]) => [k, new RateLimiter(n, clock)])) as Record<keyof typeof FLEET_LIMITS, RateLimiter>;
 	const newFleetJobs = new NewJobLimiter(config.fleetNewJobsPerMinute, clock);
 	const keepOpen = new WeakMap<Request, () => void>();
@@ -214,7 +229,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	async function ingest(req: Request, ip: string): Promise<Response> {
 		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
-		if (!auth.hasGameKey(req)) return json(401, { error: "API key required" });
+		if (!auth.hasGameKey(req)) return badGameKey(req, ip, "ingest");
 		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
 		const read = await readJsonBody(req, config.maxBodyBytes, config.maxInflateBytes);
 		if (read instanceof Response) return read;
@@ -242,28 +257,62 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		});
 	}
 
-	/** POST /v1/errors (API key): error logs, templated and fingerprinted by the game. */
+	/** A JobId seen by POST /v1/errors (or the fleet) lately: it skips the never-seen gate. */
+	async function knownErrorSender(job: string): Promise<boolean> {
+		const seen = errorSenders.get(job);
+		if (seen !== undefined && clock() - seen < ERROR_SENDER_TTL_MS) return true;
+		return fleet ? fleet.knows(job) : false;
+	}
+	function rememberErrorSender(job: string): void {
+		errorSenders.delete(job);
+		errorSenders.set(job, clock());
+		while (errorSenders.size > ERROR_SENDERS_MAX) errorSenders.delete(errorSenders.keys().next().value as string);
+	}
+
+	/**
+	 * POST /v1/errors (API key): error logs, templated and fingerprinted by the game. Limits: per address, per JobId (`j`,
+	 * required), never-seen JobIds per minute, and the store's queue (429 when full); the store bounds the rest.
+	 */
 	async function postErrors(req: Request, ip: string): Promise<Response> {
-		if (!auth.hasGameKey(req)) return json(401, { error: "API key required" });
+		if (!auth.hasGameKey(req)) return badGameKey(req, ip, "error log");
 		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		if (!errorIpLimiter.take(ip)) return tooMany(errorIpLimiter.retryAfter(ip));
+		if (errors.full) return tooMany(1);
 		const read = await readJsonBody(req, Math.min(config.maxBodyBytes, ERRORS_MAX_BODY), Math.min(config.maxInflateBytes, ERRORS_MAX_INFLATE));
 		if (read instanceof Response) return read;
 		const at = clock();
 		let batch;
 		try {
-			batch = parseErrorBatch(read.value, at);
+			batch = parseErrorBatch(read.value, at, req.headers.get("x-tt-job"));
 		} catch (error) {
 			if (error instanceof ErrorInputError) return json(400, { error: error.message });
 			throw error;
 		}
-		if (batch.job && !errorJobLimiter.take(`job:${batch.job}`)) return tooMany(errorJobLimiter.retryAfter(`job:${batch.job}`));
-		if (batch.items.length) await bus.publish("error", { ...batch, at }, read.bytes);
+		const job = batch.job;
+		if (!(await knownErrorSender(job))) {
+			const verdict = newErrorJobs.take(job);
+			if (verdict !== "ok") {
+				if (verdict === "flood") log(`error logs: more than ${newErrorJobs.perMinute} new JobIds this minute; refusing new ones until it ends`);
+				return json(429, { error: "rate limited: too many new JobIds this minute" }, { "retry-after": String(newErrorJobs.retryAfter()) });
+			}
+		}
+		if (!errorJobLimiter.take(`job:${job}`)) return tooMany(errorJobLimiter.retryAfter(`job:${job}`));
+		rememberErrorSender(job);
+		if (batch.items.length) {
+			if (errors.full) return tooMany(1);
+			try {
+				await bus.publish("error", { ...batch, at, ip }, read.bytes);
+			} catch (error) {
+				if (error instanceof ErrorQueueFull) return tooMany(1);
+				throw error;
+			}
+		}
 		return json(202, { accepted: batch.items.length, rejected: batch.rejected, ...(batch.errors.length ? { errors: batch.errors } : {}) });
 	}
 
 	/** POST /v1/identity (API key): identity rows from Basin games (the framework posts them to the fleet API). */
 	async function postIdentity(req: Request, ip: string): Promise<Response> {
-		if (!auth.hasGameKey(req)) return json(401, { error: "API key required" });
+		if (!auth.hasGameKey(req)) return badGameKey(req, ip, "identity");
 		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
 		const raw = await readCapped(req, 256 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
@@ -539,9 +588,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return json(200, { ok: true, erased: pids.length });
 	}
 
+	/**
+	 * GET /healthz: { ok } for everyone (the container health check); the full view for the admin token. A Bearer header
+	 * counts toward the same lockout as the login, and a blocked address gets the plain answer without its token being
+	 * looked at, so this is no token oracle.
+	 */
 	async function health(req: Request, ip: string): Promise<Response> {
-		const principal = adminIpOk(ip) ? auth.principal(req) : undefined;
-		if (principal?.role !== "admin") return json(200, { ok: true });
+		const plain = () => json(200, { ok: true });
+		if (!adminIpOk(ip)) return plain();
+		const given = bearer(req) !== undefined;
+		if (given && authFailures.blocked(ip)) return plain();
+		const principal = auth.principal(req);
+		if (!principal && given) failedAuth(ip, "health check token");
+		if (principal?.role !== "admin") return plain();
 		const memory = process.memoryUsage();
 		const out: Record<string, unknown> = {
 			ok: true,
@@ -578,6 +637,17 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const wait = authFailures.blocked(ip);
 		return wait ? tooMany(wait) : undefined;
 	};
+	/** A game route without the API key: 401, counted per address when a (wrong) key was sent; 429 past the limit. */
+	function badGameKey(req: Request, ip: string, what: string): Response {
+		if (bearer(req) === undefined) return json(401, { error: "API key required" });
+		const wait = gameKeyFailures.blocked(ip);
+		if (wait) return tooMany(wait);
+		const first = gameKeyFailures.count(ip) === 0;
+		gameKeyFailures.fail(ip);
+		if (first) log(`${what}: wrong API key from ${ip}`);
+		if (gameKeyFailures.blocked(ip)) log(`${ip}: wrong API keys are refused for ${Math.ceil(config.loginWindowMs / 60_000)} min after ${GAME_KEY_MAX_FAILURES} tries`);
+		return json(401, { error: "API key required" });
+	}
 	function failedAuth(ip: string, what: string): void {
 		authFailures.fail(ip);
 		log(`${what} failed from ${ip}`);
@@ -653,7 +723,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!adminIpOk(ip)) return notFound();
 		if (!oauthLimiter.take(`start:${ip}`)) return tooMany(oauthLimiter.retryAfter(`start:${ip}`));
 		try {
-			const { url, state } = await oauth.start();
+			const { url, state } = await oauth.start(ip);
 			const cookie = setCookie(OAUTH_COOKIE, state, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: 600, path: OAUTH_PATH });
 			return redirect(url, [cookie]);
 		} catch (error) {
@@ -754,6 +824,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (!gameWrite) {
 				gate = adminGate(req, ip);
 				if ("response" in gate) return gate.response;
+			} else if (!auth.hasGameKey(req)) return badGameKey(req, ip, "fleet");
+			// Event streams are capped like /v1/live (each holds a connection and a listener).
+			if (path === "/v1/fleet/stream" && method === "GET" && fleet.subscribers >= config.liveMaxClients) {
+				return json(429, { error: "too many fleet streams open" }, { "retry-after": "10" });
 			}
 			// Per-JobId limits and a cap on never-seen JobIds, no per-IP limit: many game servers can share one egress IP.
 			return (
@@ -809,7 +883,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	async function handle(req: Request, peer = ""): Promise<Response> {
 		const original = new URL(req.url);
-		const ip = clientIp(req, peer, config.trustProxy);
+		const ip = clientIp(req, peer, proxyTrust);
 		// The explorer's base path is /api (its dev proxy strips it); take it off here too.
 		let path = original.pathname;
 		let url = original;

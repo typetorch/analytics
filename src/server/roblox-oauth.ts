@@ -12,6 +12,8 @@ const DOCS_TTL_MS = 3_600_000;
 const JWKS_REFETCH_MIN_MS = 60_000;
 const CLOCK_SKEW_MS = 30_000;
 const MAX_PENDING = 1000;
+/** Sign-ins in progress per address: more push that address' own oldest out, not someone else's. */
+export const MAX_PENDING_PER_ADDRESS = 5;
 const HTTP_TIMEOUT_MS = 10_000;
 
 /** The reason shown on the login page (a short code the page turns into a plain sentence). */
@@ -64,6 +66,8 @@ interface Pending {
 	verifier: string;
 	nonce: string;
 	created: number;
+	/** Who started it (the client's address). */
+	owner: string;
 }
 
 const b64url = (bytes: Uint8Array | Buffer) => Buffer.from(bytes).toString("base64url");
@@ -144,16 +148,37 @@ export class RobloxOAuth {
 		return keys;
 	}
 
-	/** Step 1: where to send the browser, and the state that goes into the short-lived cookie. */
-	async start(): Promise<{ url: string; state: string }> {
+	/** Pending states held per owner (address), oldest first. */
+	private held(): Map<string, string[]> {
+		const by = new Map<string, string[]>();
+		for (const [state, p] of this.pending) {
+			const list = by.get(p.owner) ?? [];
+			list.push(state);
+			by.set(p.owner, list);
+		}
+		return by;
+	}
+
+	/**
+	 * Step 1: where to send the browser, and the state that goes into the short-lived cookie. `owner` is the client's
+	 * address: each holds at most MAX_PENDING_PER_ADDRESS sign-ins in progress, and when the table is full the address
+	 * holding the most loses its oldest, so starting sign-ins over and over can't push out someone else's.
+	 */
+	async start(owner = ""): Promise<{ url: string; state: string }> {
 		const doc = await this.discovery();
 		const now = this.clock();
 		for (const [state, p] of this.pending) if (now - p.created > PENDING_TTL_MS) this.pending.delete(state);
-		while (this.pending.size >= MAX_PENDING) this.pending.delete(this.pending.keys().next().value as string);
+		const mine = [...this.pending].filter(([, p]) => p.owner === owner).map(([state]) => state);
+		while (mine.length >= MAX_PENDING_PER_ADDRESS) this.pending.delete(mine.shift() as string);
+		while (this.pending.size >= MAX_PENDING) {
+			let most: string[] = [];
+			for (const list of this.held().values()) if (list.length > most.length) most = list;
+			this.pending.delete(most[0] as string);
+		}
 		const state = b64url(randomBytes(32));
 		const verifier = b64url(randomBytes(32));
 		const nonce = b64url(randomBytes(24));
-		this.pending.set(state, { verifier, nonce, created: now });
+		this.pending.set(state, { verifier, nonce, created: now, owner });
 		const url = new URL(doc.authorization_endpoint);
 		url.searchParams.set("response_type", "code");
 		url.searchParams.set("client_id", this.o.clientId);
