@@ -1,62 +1,25 @@
-/** The frame: navigation on the left, the header (server status, theme) and the shared filter bar on top. */
+/**
+ * The frame: the sidebar on the left (a drawer behind a menu button on a phone; its pages come from lib/nav.ts), the header
+ * (page title, server status, theme) and the shared filter bar on top.
+ */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-	Activity,
-	Bug,
-	CalendarRange,
-	Compass,
-	FlaskConical,
-	Gamepad2,
-	LayoutDashboard,
-	ListFilter,
-	LogOut,
-	Monitor,
-	Moon,
-	Server,
-	Settings,
-	Sun,
-	Terminal,
-	Users,
-	Workflow,
-	type LucideIcon,
-} from "lucide-react";
-import { Suspense } from "react";
-import { NavLink, Outlet, useLocation } from "react-router";
+import { LogOut, Menu, Monitor, Moon, Sun } from "lucide-react";
+import { Suspense, useEffect, useState } from "react";
+import { Outlet, useLocation } from "react-router";
 import { cn } from "cn";
 import { FilterBar } from "@/components/FilterBar";
 import { FindPlayer } from "@/components/Identity";
+import { SidebarNav } from "@/components/SidebarNav";
 import { LoadingBlock } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
 import { userLabel, useAuth } from "@/lib/auth";
 import { FILTER_KEYS } from "@/lib/filters";
 import { fmtInt } from "@/lib/format";
+import { findNavItem } from "@/lib/nav";
 import { useTheme, type Theme } from "@/lib/theme";
-
-export interface NavItem {
-	path: string;
-	label: string;
-	icon: LucideIcon;
-	/** The page doesn't use the shared filters (Fleet is live, Query has its own). */
-	noFilters?: boolean;
-}
-
-export const NAV: NavItem[] = [
-	{ path: "/", label: "Overview", icon: LayoutDashboard },
-	{ path: "/roblox", label: "Roblox", icon: Gamepad2 },
-	{ path: "/retention", label: "Retention", icon: CalendarRange },
-	{ path: "/funnels", label: "Funnels", icon: ListFilter },
-	{ path: "/players", label: "Players", icon: Users },
-	{ path: "/flow", label: "Flow", icon: Workflow },
-	{ path: "/experiments", label: "Experiments", icon: FlaskConical },
-	{ path: "/first-session", label: "First session", icon: Compass },
-	{ path: "/events", label: "Events", icon: Activity },
-	{ path: "/fleet", label: "Fleet", icon: Server, noFilters: true },
-	{ path: "/errors", label: "Errors", icon: Bug, noFilters: true },
-	{ path: "/query", label: "Query", icon: Terminal },
-	{ path: "/settings", label: "Settings", icon: Settings, noFilters: true },
-];
 
 /** Links keep the filter parameters (and drop page-only ones like pid). */
 function useFilterSearch(): string {
@@ -93,14 +56,14 @@ function ServerStatus() {
 		title = [health.data.runtime, health.data.rssMb ? `${health.data.rssMb} MB` : ""].filter(Boolean).join(", ");
 	}
 	return (
-		<div className="flex items-center gap-2 text-xs text-muted-foreground" title={title}>
-			<span className={cn("size-2 rounded-full", tone)} aria-hidden />
-			<span>{text}</span>
+		<div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground" title={title}>
+			<span className={cn("size-2 shrink-0 rounded-full", tone)} aria-hidden />
+			<span className="truncate">{text}</span>
 		</div>
 	);
 }
 
-/** Who is signed in (Roblox name and avatar, or the admin token) and the Sign out button. */
+/** Who is signed in (Roblox name and avatar, or the admin token) and the Sign out button: the foot of the sidebar. */
 function UserMenu() {
 	const auth = useAuth();
 	const client = useQueryClient();
@@ -116,17 +79,17 @@ function UserMenu() {
 		}
 	};
 	return (
-		<div className="flex items-center gap-2 text-xs text-muted-foreground" title={user?.kind === "roblox" ? `Roblox user ${user.userId}` : undefined}>
+		<div className="flex items-center gap-2.5 px-1 text-sm" title={user?.kind === "roblox" ? `Roblox user ${user.userId}` : undefined}>
 			{user?.kind === "roblox" && user.avatar ? (
-				<img src={user.avatar} alt="" className="size-5 rounded-full bg-muted" referrerPolicy="no-referrer" />
+				<img src={user.avatar} alt="" className="size-7 shrink-0 rounded-full bg-muted" referrerPolicy="no-referrer" />
 			) : (
-				<span className="grid size-5 place-items-center rounded-full bg-muted text-[10px] font-medium uppercase text-foreground" aria-hidden>
+				<span className="grid size-7 shrink-0 place-items-center rounded-full bg-muted text-xs font-medium uppercase text-foreground" aria-hidden>
 					{label.slice(0, 1)}
 				</span>
 			)}
-			<span className="hidden max-w-32 truncate sm:inline">{label}</span>
+			<span className="min-w-0 flex-1 truncate">{label}</span>
 			{auth.via === "cookie" ? (
-				<Button variant="ghost" size="icon-sm" aria-label="Sign out" title="Sign out" onClick={() => void out()}>
+				<Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label="Sign out" title="Sign out" onClick={() => void out()}>
 					<LogOut />
 				</Button>
 			) : null}
@@ -155,59 +118,72 @@ function ThemeToggle() {
 	);
 }
 
+/** What the desktop sidebar and the phone drawer both show: the name, the pages, who is signed in. */
+function SidebarPanel({ search, onNavigate }: { search: string; onNavigate?: () => void }) {
+	return (
+		<div className="flex h-full min-h-0 flex-col text-sidebar-foreground">
+			<div className="px-5 pt-5 pb-4">
+				<div className="text-sm font-semibold">TypeTorch</div>
+				<div className="text-xs text-muted-foreground">Backend explorer</div>
+			</div>
+			<div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+				<SidebarNav search={search} onNavigate={onNavigate} />
+			</div>
+			<div className="border-t border-sidebar-border px-4 py-3">
+				<UserMenu />
+			</div>
+		</div>
+	);
+}
+
+/** The phone's sidebar: a drawer behind the menu button. It closes on a page click, on a route change and when the screen grows. */
+function MobileMenu({ search }: { search: string }) {
+	const [open, setOpen] = useState(false);
+	const { pathname } = useLocation();
+	useEffect(() => setOpen(false), [pathname]);
+	useEffect(() => {
+		const wide = window.matchMedia?.("(min-width: 768px)");
+		if (!wide) return;
+		const onChange = () => wide.matches && setOpen(false);
+		wide.addEventListener("change", onChange);
+		return () => wide.removeEventListener("change", onChange);
+	}, []);
+	return (
+		<Sheet open={open} onOpenChange={setOpen}>
+			<SheetTrigger asChild>
+				<Button variant="ghost" size="icon-sm" className="-ml-1.5 md:hidden" aria-label="Open menu">
+					<Menu />
+				</Button>
+			</SheetTrigger>
+			<SheetContent side="left" className="bg-sidebar md:hidden">
+				<SheetTitle className="sr-only">Menu</SheetTitle>
+				<SheetDescription className="sr-only">The explorer's pages</SheetDescription>
+				<SidebarPanel search={search} onNavigate={() => setOpen(false)} />
+			</SheetContent>
+		</Sheet>
+	);
+}
+
 export function AppShell() {
 	const search = useFilterSearch();
 	const { pathname } = useLocation();
-	const current = NAV.find((n) => (n.path === "/" ? pathname === "/" : pathname.startsWith(n.path)));
+	const current = findNavItem(pathname);
 	return (
 		<div className="flex min-h-svh">
-			<aside className="sticky top-0 hidden h-svh w-52 shrink-0 flex-col border-r bg-sidebar px-3 py-4 md:flex">
-				<div className="px-2 pb-4">
-					<div className="text-sm font-semibold">TypeTorch</div>
-					<div className="text-xs text-muted-foreground">Backend explorer</div>
-				</div>
-				<nav className="flex flex-col gap-0.5">
-					{NAV.map((item) => (
-						<NavLink
-							key={item.path}
-							to={{ pathname: item.path, search }}
-							end={item.path === "/"}
-							className={({ isActive }) =>
-								cn(
-									"flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-									isActive && "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
-								)
-							}
-						>
-							<item.icon className="size-4" />
-							{item.label}
-						</NavLink>
-					))}
-				</nav>
+			<aside className="sticky top-0 hidden h-svh w-60 shrink-0 border-r bg-sidebar md:block">
+				<SidebarPanel search={search} />
 			</aside>
 			<div className="flex min-w-0 flex-1 flex-col">
 				<header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
 					<div className="flex items-center justify-between gap-3 px-4 py-2">
-						<nav className="-mx-1 flex gap-1 overflow-x-auto md:hidden">
-							{NAV.map((item) => (
-								<NavLink
-									key={item.path}
-									to={{ pathname: item.path, search }}
-									end={item.path === "/"}
-									className={({ isActive }) =>
-										cn("rounded-md px-2 py-1 text-xs whitespace-nowrap", isActive ? "bg-muted font-medium" : "text-muted-foreground")
-									}
-								>
-									{item.label}
-								</NavLink>
-							))}
-						</nav>
-						<div className="hidden text-sm font-medium md:block">{current?.label}</div>
-						<div className="flex items-center gap-3">
+						<div className="flex min-w-0 items-center gap-2">
+							<MobileMenu search={search} />
+							<div className="truncate text-sm font-medium">{current?.label}</div>
+						</div>
+						<div className="flex min-w-0 shrink items-center gap-3">
 							<FindPlayer />
 							<ServerStatus />
 							<ThemeToggle />
-							<UserMenu />
 						</div>
 					</div>
 					{current?.noFilters ? null : (
