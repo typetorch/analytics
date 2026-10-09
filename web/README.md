@@ -28,6 +28,8 @@ variables) with `TT_ANALYTICS_URL=https://...` and `TT_ANALYTICS_ADMIN_TOKEN`. I
 analytics server and adds `Authorization: Bearer <admin token>` (`server/proxy.ts`). Because any other page open in
 the same browser could also send requests to localhost, a guard runs first: only the read endpoints the explorer uses
 (`POST /v1/query/*`, `POST /v1/sql`, `GET /v1/queries`, `GET /v1/storage`, `GET /v1/identity`, `GET /v1/identity/<pid>/profile`, `POST /v1/identity/backfill`, `GET /v1/rollups/*`, `GET /v1/fleet/servers|reports|alerts|stream`,
+the server page's `GET /v1/fleet/servers/<JobId>` (and `/metrics`), `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit`
+(remote debug: the commands are read-only and audited by the backend, as `token`),
 `GET /v1/admin/settings`, `GET /healthz`), only from the explorer's own origin (Sec-Fetch-Site / Origin), JSON bodies only. Erasure, ingest,
 alert acks and settings changes (`PATCH /v1/admin/settings`, the test alert) are never forwarded. The servers listen on localhost only. No CORS change is needed on the
 analytics server.
@@ -52,7 +54,8 @@ backend's rule): up to an hour per minute, up to 6 hours per 5 minutes, up to a 
 | Experiments | per-variant numbers and the plain "how sure" sentences, per player or per server (A/B pins) | `experiment` |
 | First session | early leaves per zone, screen loops, back-and-forth, idle / camera spins / repeated clicks from recordings | `confusion` |
 | Events | top event names by kind, then the newest rows of a picked name (fleet rows without props) | `top-events`, `events` |
-| Fleet | live servers, latest deploy, alerts, live event log, updated over the SSE stream | fleet API |
+| Fleet | live servers, latest deploy, alerts, live event log, updated over the SSE stream; every JobId links to its server page | fleet API |
+| Server (`/servers/<JobId>`, under Fleet in the sidebar) | one server: header (branch, build, kernel, players, uptime, health, place version, last heartbeat), TPS / memory / players over the last hour, and while it runs, read-only remote debug tabs: Status (the kernel's status()), Logs (the server's log ring, Fetch newer; a player's client log), Players, State (Modules > State: roots, tables, pages, key filter), Dex (lazy tree from `game`, properties), Modules and Assets, Builds, Budget, Errors, Network, Audit. A closed, lost or unknown server says so and sends no watch. Answers stay in the page (not the query cache, localStorage or the URL; these tables don't save their view) | `/v1/fleet/servers/<JobId>`, `.../metrics`, remote debug (backend README) |
 | Performance | client fps / memory / ping and server TPS / memory / players over time, by device class, input, screen size, branch or build, p50 / p90 / p99; deploy marks on every chart (hover: what it was; click: filter to that build); compare builds or before vs after a mark; live servers' TPS and memory with each one's history; a Step picker | `perf-client`, `perf-server`, `perf-compare`, `/v1/fleet/marks`, `/v1/fleet/servers/<job>/metrics` |
 | Query | any named query with JSON filters/options (raw JSON), and read-only SQL over `events` / `recordings` | `/v1/query/*`, `/v1/sql` |
 | Settings | the backend's runtime settings (alert webhook as set / not set, format and levels, admin allow list, token login, rate limits, retention): source badge per field (Dashboard / Env / Default), bounds checked before saving, Reset to env, Send test alert, recent changes, the env-only names. Through the dev proxy it is read only | `/v1/admin/settings` |

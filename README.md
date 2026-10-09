@@ -33,6 +33,7 @@ or Bun). Ships as one Docker image that works as a Coolify app.
 - [Cloudflare Basin setup](#cloudflare-basin-setup)
 - [The analytics part (DuckDB)](#the-analytics-part-duckdb)
 - [The fleet API (SQLite)](#the-fleet-api-sqlite)
+- [Remote debug](#remote-debug) (read a live game server from the explorer)
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -330,6 +331,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `POST /v1/errors` | game | error logs (see [Error logs](#error-logs)) |
 | `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
 | `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `deploy`, `mark` | game | the kernel's fleet posts and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
+| `GET /v1/fleet/commands`, `POST /v1/fleet/results` | game | [remote debug](#remote-debug): a watched server's long-poll for read-only commands, and its answers |
 | `POST /v1/query/<name>`, `GET /v1/queries` | admin | the logical queries |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
 | `POST /v1/sql` | admin | one read-only SELECT |
@@ -340,6 +342,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `GET /v1/errors`, `GET /v1/errors/<fp>` | admin | error kinds with counts; one kind |
 | `GET /v1/live` | admin | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) and alert acknowledgement |
+| `GET /v1/fleet/servers/<jobId>`, `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
@@ -489,7 +492,10 @@ Sessions and Timeline views), Flow, Experiments, First session, Events, Fleet, *
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)). The header shows who is signed in (Roblox name and avatar, or
 "admin token") and a Sign out button. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
-with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker.
+with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker. Every JobId
+on the Fleet page opens **`/servers/<JobId>`**: the server's header, its last hour of TPS, memory and players, and while it
+runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, State, Dex, Modules, Builds, Budget, Errors,
+Network, Audit).
 
 **Date range.** The filter bar's range: Last 1 hour, Last 6 hours, Today, Last 7 / 30 / 90 days, or Custom (dates). The hour
 presets send an exact instant (`from` = an ISO time on a whole minute); the day presets and custom ranges send dates, as before.
@@ -856,7 +862,7 @@ Kernels post to it directly (`kernel/src/server/Fleet.luau`, settings in the sig
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `POST /v1/fleet/heartbeat` | ingest | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned |
+| `POST /v1/fleet/heartbeat` | ingest | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)) |
 | `POST /v1/fleet/report` | ingest | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
 | `POST /v1/fleet/alert` | ingest | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`) |
 | `POST /v1/fleet/closing` | ingest | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
@@ -916,6 +922,60 @@ gets 400 before any limiter sees it.
 The fleet core (`src/fleet/service.ts`, `http.ts`) uses no Node APIs (async SQLite interface, Web Request/Response),
 so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durable Object.
 
+## Remote debug
+
+The explorer's server page (`/servers/<JobId>`, plans/25) reads one **live** game server: its status, server log, a
+player's client log, the players, module state, a read-only Dex, modules and assets, builds, the budget view, error
+counters and network counters. **Read-only**: there is no op that changes the game server (no kick, ban, rollback, reload,
+pin, switch, Luau or Dex edit). Needs kernel 0.5.0 (the framework ops also framework 0.5.0 with devtools on; an older
+build answers "not supported" for those, the kernel's own ops still work).
+
+A Roblox server can't be called into, so it **pulls**:
+
+1. The page sends `POST /v1/fleet/servers/<JobId>/watch` (again every 20 s while the tab is visible; a watch lapses 60 s
+   after the last one, or 60 s after the last command).
+2. That server's next heartbeat gets `202 { ok: true, rd: 1 }` (heartbeats come every 30 s: the page says "Connecting").
+3. The kernel then long-polls `GET /v1/fleet/commands?wait=8` (API key, JobId in `X-TT-Job`), runs each allow-listed
+   op and posts the answers to `POST /v1/fleet/results`. It stops when the backend says the job is no longer watched.
+   Not watched = no extra requests at all.
+
+| Endpoint | Role | Body / answer |
+|---|---|---|
+| `GET /v1/fleet/servers/<jobId>` | admin | `{ server: <servers row of any age> \| null, state: live\|closed\|lost\|unknown, debug: { watched, watchedUntil?, connected, lastPollAt? } }` (`connected` = the server polled in the last 15 s) |
+| `POST /v1/fleet/servers/<jobId>/watch` | admin | `{ job, watched, watchedUntil, connected, lastPollAt? }`; `409` for a closed or unknown server (nothing to debug) |
+| `POST /v1/fleet/servers/<jobId>/commands` | admin | `{ op, args? }` -> `202 { id, op, state, createdAt, expiresAt }`; `400` an op outside the allow-list or bad args; `409` not watched (watch first); `429` limits |
+| `GET /v1/fleet/servers/<jobId>/commands/<id>` | admin | `{ id, op, state: queued\|sent\|done\|failed\|expired, createdAt, sentAt?, doneAt?, ms?, result?, error?, redacted? }`; only for whoever queued it (`404` for anyone else, and once the answer is dropped) |
+| `GET /v1/fleet/debug/audit?limit=` | admin | `{ entries: [{ at, who, ip, op, job, args, id }] }`, newest first (the last 500, in memory) |
+| `GET /v1/fleet/commands?wait=0-8` | game | `{ watch, commands: [{ id, op, args, by: { kind: "roblox", userId } \| { kind: "token" }, exp }] }`; held up to `wait` s while watched and nothing waits (one held poll per JobId); a JobId without a heartbeat gets `{ watch: false, commands: [] }` |
+| `POST /v1/fleet/results` | game | `{ j, results: [{ id, ok, json?, error?, ms?, redacted? }] }` (at most 32) -> `202 { accepted, ignored }`; answers for unknown, expired, answered or another JobId's commands are ignored |
+
+**Ops** (`src/fleet/remote-debug.ts` `OPS`, the allow-list; the kernel and the framework keep their own): `status`,
+`builds`, `budget`, `errors`, `players`, `modules`, `assets`, `network` (no args); `logs { since?, limit? <= 500 }`;
+`player.logs { userId, since? }` (the kernel asks that player's client on its own channel); `state { queries: 1-12 }`
+(the dev menu's Modules > State reader); `dex.children { nodes: 1-8 { id, offset?, limit? <= 200 } }`, `dex.props { id }`.
+Unknown argument keys are refused; args are at most 16 KB.
+
+**Security.**
+- Explorer side: the admin role only (the owner's Roblox session or the admin token; cookie writes need `X-TypeTorch: 1`
+  and the Origin check like every other write). The game side: the API key; the kernel takes commands only from the
+  backend URL and key in the signed settings record, runs only its own allow-listed ops, at most 30 a minute, each on a
+  kernel thread with a 10 s deadline, and only for **owners** by its own rule (a `token` caller counts as the owner via
+  the admin token, and the audit says which).
+- **Secrets never leave the server**: the kernel replaces every copy (or 12+ character piece) of the settings' keys and
+  tokens in an answer with `<redacted>` before posting it, and says how many (`redacted`); answers over 200 KB are refused.
+- **Answers live in memory only**: never written to disk, logged, put on the event bus or `/v1/live`; dropped 3 minutes
+  after they arrive (or earlier past 2,000 commands or 32 MB of answers). The explorer keeps them in the page only (not
+  the query cache, localStorage or the URL; its tables don't save their view).
+- **Audit**: every queued command is a log line and a line in `<data dir>/audit/remote-debug.jsonl` (0600, rotated at
+  5 MB, one `.1` kept): when, who (`roblox:<UserId>` or `token`), the address, the op, the JobId and an args summary
+  (sizes and plain numbers; never a player's UserId, never an answer).
+- **Limits**: 30 commands a minute per explorer user and 60 per JobId, 30 watches a minute per user, at most 8 commands
+  waiting per JobId, 32 JobIds watched at once (the oldest watch goes), commands expire 30 s after they are queued (20 s
+  after the server picked them up). The game routes: 90 polls and 120 result posts a minute per JobId; JobIds without a
+  heartbeat (or without a command out) never reach those limiters, so made-up JobIds can't grow them.
+- `GET /healthz` (admin) shows the counters and what is held (`remoteDebug: { queued, sent, done, failed, expired,
+  ignored, dropped, commands, resultBytes, watched }`), never an answer.
+
 ## Privacy
 
 - Events carry a random pid, never a UserId, name or chat. The game keeps UserId -> pid in its DataStore
@@ -927,6 +987,8 @@ so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durab
   [Player profiles](#player-profiles)).
 - **Erasure removes them**: the webhook (or `POST /v1/erasure` by pid) deletes the pid's rows everywhere, then the
   identity rows, and identity rows for an erased pid are refused afterwards. The erasure log never holds the UserId.
+- **Remote debug answers** (player names, logs, state) stay in the backend's memory for at most 3 minutes and in the
+  owner's open page; they are never stored. The audit keeps who asked what, never a player's UserId or an answer.
 - Turning it off: the framework option `identity: false` stops sending identity rows; deleting
   `data/fleet.sqlite`'s `identities` rows (or the file, which also holds fleet history) forgets the mapping.
 
