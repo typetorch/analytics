@@ -9,8 +9,8 @@ The TypeTorch backend: one server for everything a game's TypeTorch needs from t
 - **error logs**: game servers post error kinds (names and ids already replaced), the backend counts them per minute;
 - an in-process **event bus** between them, and a live stream of it (`GET /v1/live`);
 - the **web explorer** (`web/`), served at `/`, with login (the admin token, or Sign in with Roblox for owners);
-- a small programmatic API for the CLI: `createStore`, `store.query`, `writeSettings` / `writeFleetSettings` (through
-  the game's TypeTorch CLI), `createFleetClient`, `graph.toMermaid()`.
+- a small programmatic API for the CLI: `createStore`, `store.query`, `writeBackendSettings` (through the game's TypeTorch
+  CLI), `createFleetClient`, `graph.toMermaid()`.
 
 Two keys, nothing else to remember: game servers write with **`TYPETORCH_API_KEY`**; the CLI and the explorer read and
 manage with **`TYPETORCH_ADMIN_TOKEN`**. Runs on Bun and on Node 20+ (the fleet part needs Node 22.5+ for `node:sqlite`,
@@ -63,8 +63,8 @@ game's settings written for you.
 
    It reads the keys from that `.env` (a missing one stops with a red error that says what to add), keeps its data in this
    repo's `data/`, serves the explorer at <http://localhost:8787> (sign in with the admin token), opens the tunnel, and
-   writes the game's settings through the game's own CLI (`typetorch fleet setup`, `typetorch settings set analytics -`,
-   which sign with the game's keys: `typetorch keys init` first). `--port`, `--public-url`, `--no-settings`, `--cli <entry>`
+   writes the game's settings through the game's own CLI (`typetorch backend setup`, which signs with the game's keys:
+   `typetorch keys init` first). `--port`, `--public-url`, `--no-settings`, `--cli <entry>`
    and `--cloudflared <path>` exist. Ctrl+C stops the tunnel and the server it started. Without `--game` it still runs but
    says in red that game servers were NOT told about it.
 
@@ -295,9 +295,9 @@ here): the files are checked by tests that read them, so expect to fix a typo on
 5. Check: `curl https://backend.example.com/healthz` -> `{"ok":true}`;
    `curl -H "Authorization: Bearer $TYPETORCH_API_KEY" https://backend.example.com/v1/auth/check` -> `"role":"game"`;
    open `https://backend.example.com/` and sign in.
-6. Point the game at it: put the same two values in the game repo's `.env`, set the backend URL in `typetorch.json`, and run
-   the CLI's backend setup (today `typetorch fleet setup` and `typetorch settings set analytics -`; `typetorch backend setup`
-   will replace both, plans/21 part B).
+6. Point the game at it: put the same two values in the game repo's `.env`, then run `typetorch backend setup --url
+   https://backend.example.com` in the game folder. It checks the address and both keys, then writes the settings record and
+   `backend.url` in `typetorch.json`.
 7. Roblox "Right to erasure" webhook: `https://backend.example.com/v1/erasure` with `ROBLOX_WEBHOOK_SECRET`.
 
 Things to know: the container runs as the non-root `bun` user (uid 1000), so a **bind-mounted** `/data` must be writable by
@@ -442,14 +442,14 @@ Props the queries read (SCHEMA.md "Event catalog"; each can be overridden by a q
 | `fleet` `deploy_report` | `s` `b` `a` `j` `r` `e` `d` `t` `g` `k` `p` |
 
 ```ts
-import { validateBatch } from "@typetorch/analytics";
+import { validateBatch } from "@typetorch/backend";
 const { events, recordings, rejected, errors } = validateBatch(body); // invalid rows dropped and counted
 ```
 
 ## Programmatic API
 
 ```ts
-import { createStore, writeSettings, createFleetClient } from "@typetorch/analytics";
+import { createStore, writeBackendSettings, createFleetClient } from "@typetorch/backend";
 
 // Basin (Cloudflare's SQL API), an analytics server, or a local copy of a server's data folder:
 const store = await createStore({ backend: "basin", accountId, bucket: "typetorch-analytics", token });
@@ -460,10 +460,9 @@ const numbers = await store.query("roblox", { from: "2026-09-01", to: "2026-09-3
 const graph = await store.query("flow", { players: "new" }, { facet: "zone" });
 console.log(graph.toMermaid());          // or JSON.stringify(graph)
 
-// The game's settings: the `analytics` field of its signed settings record (kernel 0.3.8), written by the game's
-// own TypeTorch CLI (it holds the signing keys); gameDir is the game repo.
-await writeSettings({ gameDir, settings: { backend: "basin", events, recordings, token: sendToken, recordShare: 0.5 } });
-await writeFleetSettings({ gameDir, url: "https://backend.example.com", ingestToken }); // = typetorch fleet setup
+// The game's settings: the `backend` section of its signed settings record, written by the game's own TypeTorch CLI
+// (it holds the signing keys; gameDir is the game repo). = typetorch backend setup
+await writeBackendSettings({ gameDir, url: "https://backend.example.com", apiKey, adminToken, flushSeconds: 15, recordShare: 1 });
 
 // Live game servers (the fleet API).
 const fleet = createFleetClient({ url: "https://backend.example.com", token: adminToken, ingestToken });
@@ -477,21 +476,16 @@ const { servers } = await fleet.servers({ branch: "prod" });
 - **Filters** (every query): `from`, `to` (unix ms, ISO time, or a date; a date-only `to` includes that day), `art`,
   `branch`, `channel`, `dev`, `players` (`"new"` = first-ever sessions, `"returning"`), `variant`
   (`{ experiment, variant }`), `sexp`, `place`. Without `from`, a query covers its default number of days.
-- **writeSettings** validates the settings, then runs `typetorch settings set analytics -` in `gameDir` (the game's
-  `node_modules/@typetorch/cli`, 0.8+, or `cli: [...]`), the value on stdin so the token never sits in a command
-  line. The CLI reads the signed settings record (DataStore `TypeTorch` / `settings`), checks it was signed by the
-  game's keys, signs the change with both prod keys, writes it and pings servers: kernel 0.3.8 servers switch within
-  seconds, no publish. It needs the game's signing keys (`typetorch keys init`, `--fallback`) and its Open Cloud key
-  (DataStore read/create/update, messaging); a failure carries the CLI's own message. Returns `{ value, written, seq,
-  pinged }`. **writeFleetSettings** runs `typetorch fleet setup --url <url>` with the API key in the child's
-  environment (`TYPETORCH_FLEET_INGEST_TOKEN`). Both calls go through the CLI's endpoint checks before anything is
-  signed: the URL is https (DuckDB: ends in `/v1/ingest`), `GET <server>/healthz` answers within 5 s, and
-  `GET /v1/auth/check` accepts the token as a game key (API key, write-only) for that part (the admin token is refused). A
-  broken value is refused: the call throws with the CLI's message (each failing check and its fix) and nothing is
-  written; `force: true` (`--force`) writes it anyway. `bun run local` prints that message in red and keeps the
-  tunnel running with the game's old settings. This package never signs anything. Settings, as the framework reads them (SCHEMA.md "Sink settings"): `{ backend: "basin" | "duckdb", events,
-  recordings?, token?, flushSeconds? (5-300), recordShare? (0-1), techEvery? (15-3600), experiments?: { name: {
-  active?, weights?, variant? } } }`. URLs must be https here (the framework also takes http).
+- **writeBackendSettings** runs `typetorch backend setup --url <url>` in `gameDir` (the game's `node_modules/@typetorch/cli`,
+  0.9+, or `cli: [...]`), with the game key and the admin token in the child's environment (`TYPETORCH_API_KEY`,
+  `TYPETORCH_ADMIN_TOKEN`), never on the command line. The CLI checks the address and both keys first (`GET <url>/healthz`,
+  `GET /v1/auth/check` for the game key and for the admin token) and refuses a broken one. `force: true` (`--force`) writes it
+  anyway, past failed checks and over a record the game's keys didn't sign. It then writes the signed record's `backend`
+  section (signed with the game's two prod keys), pings servers (they switch within seconds), sends the owner list to the
+  backend and sets `backend.url` in `typetorch.json`. It returns `{ written, seq?, pinged?, owners? }`. This package never
+  signs anything. The sink settings the framework reads from the record's `analytics` field (SCHEMA.md "Sink settings") are
+  `{ backend: "basin" | "duckdb", events, recordings?, token?, flushSeconds? (5-300), recordShare? (0-1), techEvery? (15-3600),
+  experiments?: { name: { active?, weights?, variant? } } }`; URLs must be https here (the framework also takes http).
 
 ## Queries
 
@@ -620,14 +614,12 @@ accounts or tokens for you.
    # PowerShell: $env:WRANGLER_BASIN_SQL_AUTH_TOKEN = "<R2 token>"; bash: export WRANGLER_BASIN_SQL_AUTH_TOKEN=<R2 token>
    npx wrangler basin sql query "<warehouse name>" "SELECT kind, COUNT(*) AS n FROM typetorch.events GROUP BY kind LIMIT 100"
    ```
-6. Write the game's settings with `writeSettings({ gameDir, settings: { backend: "basin", events, recordings, token:
-   <send token> } })` (or `typetorch settings set analytics -` in the game folder, the JSON on stdin).
-   For live server status, run only the fleet part of the server (`TYPETORCH_PARTS=fleet`, below): Basin is minutes
-   behind.
+6. The CLI can't write a Basin sink in 0.9: `typetorch backend setup` replaces a Basin sink with this backend. For live
+   server status, run only the fleet part of the server (`TYPETORCH_PARTS=fleet`, below): Basin is minutes behind.
 
 | Value | Where it lives |
 |---|---|
-| Stream endpoints + send token | The game's signed settings record, field `analytics` (`writeSettings`, server-only) |
+| Stream endpoints + send token | The game's signed settings record, field `analytics` (server-only; CLI 0.9 has no command that writes it) |
 | R2 token (Basin SQL), account id, bucket | Your PC only (env file), for `createStore({ backend: "basin", ... })` |
 
 Basin facts this package relies on (from the docs, 2026-10-05; live checks need your account):
@@ -829,8 +821,8 @@ sudo systemctl reload caddy
 curl https://<your host>/healthz
 ```
 
-Then: the game's settings point at `https://<your host>/v1/ingest` with the API key (`writeSettings`), the settings record's
-`fleet` at `https://<your host>` (the CLI's `fleet setup`), the Roblox erasure webhook at `https://<your host>/v1/erasure`. Back
+Then: the game points at it with `typetorch backend setup --url https://<your host>` (its game key and the admin token in
+the game repo's `.env`), and the Roblox erasure webhook is at `https://<your host>/v1/erasure`. Back
 up `events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite` and `access.json` off the VPS (e.g. `rclone sync` to
 object storage, nightly).
 
