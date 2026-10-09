@@ -2,15 +2,16 @@
  * Fleet API routes on Web Request/Response only (portable to a Cloudflare Worker). The host passes the auth checks
  * and the rate limiters.
  *
- *   POST /v1/fleet/heartbeat | report | alert | closing | deploy     API key (game role)
+ *   POST /v1/fleet/heartbeat | report | alert | closing | deploy | mark     API key (game role)
  *   GET  /v1/fleet/servers?branch=&maxAge=                          admin token
  *   GET  /v1/fleet/servers/<jobId>/metrics?since=<unix ms>         kernel 0.4.2: { points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }
+ *   GET  /v1/fleet/marks?since=&until=&branch=&kinds=&limit=        chart marks: releases, kernel publishes, backup refreshes
  *   GET  /v1/fleet/reports?seq=|artifact=|latest&branch=
  *   GET  /v1/fleet/alerts?since=&level=&unacked=&limit=
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
  *   GET  /v1/fleet/stream?branch=&types=server,alert,...            Server-Sent Events
  */
-import { FleetInputError, JOB_ID_MAX, parseClosing, parseDeploy, parseHeartbeat, parseReport, type AlertLevel, type DeployMessage, type FleetEvent, type FleetService, type HeartbeatMessage } from "./service.ts";
+import { FleetInputError, JOB_ID_MAX, parseClosing, parseDeploy, parseHeartbeat, parseMark, parseReport, type AlertLevel, type DeployMessage, type FleetEvent, type FleetService, type HeartbeatMessage } from "./service.ts";
 
 export const FLEET_BODY_LIMIT = 16 * 1024;
 
@@ -18,7 +19,7 @@ export const FLEET_BODY_LIMIT = 16 * 1024;
  * Per-JobId limits per minute. The kernel sends at most 30 requests a minute in all (burst 10; Constants
  * FLEET_RATE_PER_MINUTE), so these never bite a healthy server. CLI alerts all come as j = "cli".
  */
-export const FLEET_LIMITS = { heartbeat: 40, report: 40, alert: 40, closing: 10, deploy: 30 } as const;
+export const FLEET_LIMITS = { heartbeat: 40, report: 40, alert: 40, closing: 10, deploy: 30, mark: 30 } as const;
 
 /**
  * Never-seen JobIds (no servers row) accepted per minute, across all senders. Anyone with the ingest token (any code
@@ -114,7 +115,7 @@ function timeParam(value: string | null): number | undefined {
 	if (!value) return undefined;
 	if (/^\d+$/.test(value)) return Number(value);
 	const ms = Date.parse(value);
-	if (!Number.isFinite(ms)) throw new FleetInputError("since must be unix ms or an ISO time");
+	if (!Number.isFinite(ms)) throw new FleetInputError("since and until must be unix ms or an ISO time");
 	return ms;
 }
 
@@ -171,6 +172,7 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 			else if (kind === "report") await accept("deploy", { kind: "report", report: parseReport(body) });
 			else if (kind === "closing") await accept("heartbeat", { kind: "closing", ...parseClosing(body, header) });
 			else if (kind === "deploy") await accept("deploy", { kind: "start", deploy: parseDeploy(body) });
+			else if (kind === "mark") await accept("deploy", { kind: "mark", mark: parseMark(body) });
 			else {
 				const alert = await o.service.alert(body);
 				return json(202, { ok: true, id: alert.id });
@@ -228,6 +230,21 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 				}),
 			});
 		}
+		if (route === "marks") {
+			const since = timeParam(q.get("since"));
+			const until = timeParam(q.get("until"));
+			const limit = intParam(q.get("limit"), "limit");
+			const kinds = (q.get("kinds") ?? "").split(",").filter(Boolean);
+			return json(200, {
+				marks: await o.service.marks({
+					...(since !== undefined ? { since } : {}),
+					...(until !== undefined ? { until } : {}),
+					...(q.get("branch") ? { branch: q.get("branch") as string } : {}),
+					...(kinds.length ? { kinds } : {}),
+					...(limit !== undefined ? { limit } : {}),
+				}),
+			});
+		}
 		if (route === "stream") return stream(req, url, o);
 		return json(404, { error: "not found" });
 	} catch (error) {
@@ -257,7 +274,19 @@ function stream(req: Request, url: URL, o: FleetHttpOptions): Response {
 			unsubscribe = o.service.subscribe((event: FleetEvent) => {
 				if (types.size && !types.has(event.type)) return;
 				if (branch) {
-					const b = event.type === "server" ? event.server.branch : event.type === "alert" ? event.alert.branch : event.type === "alert_ack" ? branch : event.branch;
+					// Place-wide marks (kernel, backup) pass every branch filter.
+					const b =
+						event.type === "server"
+							? event.server.branch
+							: event.type === "alert"
+								? event.alert.branch
+								: event.type === "alert_ack"
+									? branch
+									: event.type === "mark"
+										? event.mark.kind === "kernel" || event.mark.kind === "backup"
+											? branch
+											: event.mark.branch
+										: event.branch;
 					if (b !== branch) return;
 				}
 				send(event.type, event);

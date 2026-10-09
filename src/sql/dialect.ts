@@ -3,7 +3,8 @@
  * (CTEs, joins, window functions, CASE, COUNT(DISTINCT), split_part, integer ms timestamps); only the few things
  * that differ go through a Dialect:
  *   - reading a key from a JSON string column (DuckDB's json extension vs Basin's json_get_* functions);
- *   - the row limit (Basin applies LIMIT 500 when none is given and refuses more than 10,000).
+ *   - the row limit (Basin applies LIMIT 500 when none is given and refuses more than 10,000);
+ *   - percentiles (DuckDB's exact quantile_cont; Basin's approx_percentile_cont, a t-digest estimate).
  * Times stay int64 unix ms on both sides; days are `floor(t / 86400000)` (UTC), so no date function is needed.
  */
 
@@ -19,6 +20,14 @@ export interface Dialect {
 	jsonNumber(column: string, key: string): string;
 	/** The LIMIT clause that ends a statement: `rows` capped at maxRows. */
 	limit(rows: number): string;
+	/** The `p` (0-1) percentile of a numeric expression over a group, NULLs ignored (an aggregate). */
+	percentile(expr: string, p: number): string;
+}
+
+/** A percentile as a SQL literal: 0 < p < 1, at most 4 decimals. */
+function fraction(p: number): string {
+	if (!(p > 0 && p < 1) || Math.round(p * 10_000) !== p * 10_000) throw new Error(`a percentile must be between 0 and 1 with at most 4 decimals, got ${p}`);
+	return String(p);
 }
 
 /** Keys and names that go inside a JSON path or a SQL string: letters, digits, `_`, `-`, `.`, at most 64. */
@@ -53,6 +62,9 @@ export const duckdb: Dialect = {
 	limit(rows) {
 		return `LIMIT ${int(Math.max(1, Math.floor(rows)))}`;
 	},
+	percentile(expr, p) {
+		return `quantile_cont(${expr}, ${fraction(p)})`;
+	},
 };
 
 /** Basin SQL (developers.cloudflare.com/basin-sql/sql-reference). */
@@ -69,6 +81,10 @@ export const basin: Dialect = {
 	},
 	limit(rows) {
 		return `LIMIT ${int(Math.min(10_000, Math.max(1, Math.floor(rows))))}`;
+	},
+	percentile(expr, p) {
+		// DataFusion's estimate (t-digest): close to exact on the small groups these queries make. Not checked on a live account.
+		return `approx_percentile_cont(${expr}, ${fraction(p)})`;
 	},
 };
 

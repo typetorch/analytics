@@ -103,7 +103,9 @@ export class LiveHub {
 							kind: m.kind,
 							...(m.kind === "report"
 								? { seq: m.report.seq, branch: m.report.branch, artifact: m.report.artifact, job: m.report.job, result: m.report.result }
-								: { seq: m.deploy.seq, branch: m.deploy.branch, artifact: m.deploy.artifact }),
+								: m.kind === "mark"
+									? { mark: m.mark.kind, seq: m.mark.seq, branch: m.mark.branch, artifact: m.mark.artifact, kernel: m.mark.kernel }
+									: { seq: m.deploy.seq, branch: m.deploy.branch, artifact: m.deploy.artifact, ...(m.deploy.kind ? { release: m.deploy.kind } : {}) }),
 						});
 						break;
 					}

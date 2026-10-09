@@ -5,7 +5,7 @@
  */
 import type { ServerInfo } from "../queries/fleet.ts";
 import { baseUrl } from "../store/remote.ts";
-import type { Alert, AlertLevel, FleetEvent, FleetReport } from "./service.ts";
+import type { Alert, AlertLevel, DeployMark, FleetEvent, FleetReport } from "./service.ts";
 
 export interface FleetClientConfig {
 	url: string;
@@ -48,8 +48,15 @@ export interface FleetClient {
 	ack(id: number, by?: string): Promise<boolean>;
 	/** Live changes and new alerts (Server-Sent Events). */
 	stream(onEvent: (event: FleetEvent | { type: "hello"; at: string }) => void, options?: { branch?: string; types?: FleetEvent["type"][] }): FleetStream;
-	/** Tells the API a deploy started (`{s, b, a, ch, t}`), so stuck servers are found even before any report. */
-	deployStarted(deploy: { s: number; b: string; a?: string; ch?: string; t?: number }): Promise<void>;
+	/**
+	 * Tells the API a release started (`{s, b, a, ch, t, k?, fr?, m?}`), so stuck servers are found even before any report
+	 * and the explorer's charts get a mark (`k`: deploy, rollback, promote, resign; `fr`: the build before).
+	 */
+	deployStarted(deploy: { s: number; b: string; a?: string; ch?: string; t?: number; k?: string; fr?: string; m?: string }): Promise<void>;
+	/** A kernel publish (`k: "kernel"`, `v`, `pv`) or backup refresh (`k: "backup"`, `b`, `s`, `a`, `pv`): a chart mark. */
+	mark(mark: { k: "kernel" | "backup"; b?: string; s?: number; a?: string; ch?: string; v?: string; pv?: number; m?: string; t?: number }): Promise<void>;
+	/** Chart marks (releases, kernel publishes, backup refreshes) in a window, oldest first. */
+	marks(options?: { since?: number | string; until?: number | string; branch?: string; kinds?: string[]; limit?: number }): Promise<DeployMark[]>;
 	/** Posts an alert, e.g. `auto_rollback` after `deploy --wait` rolled a branch back. */
 	alert(alert: { level: AlertLevel; code: string; message: string; j?: string; b?: string; a?: string; s?: number; t?: number; g?: number; k?: string }): Promise<number>;
 }
@@ -143,6 +150,18 @@ export function createFleetClient(config: FleetClientConfig): FleetClient {
 		},
 		async deployStarted(deploy) {
 			await call("POST", "/v1/fleet/deploy", config.ingestToken, { t: Date.now(), ...deploy });
+		},
+		async mark(mark) {
+			await call("POST", "/v1/fleet/mark", config.ingestToken, { j: "cli", t: Date.now(), ...mark });
+		},
+		async marks(options = {}) {
+			const time = (v: number | string | undefined) => (typeof v === "string" ? Date.parse(v) : v);
+			const body = (await call(
+				"GET",
+				`/v1/fleet/marks${qs({ since: time(options.since), until: time(options.until), branch: options.branch, kinds: options.kinds?.join(","), limit: options.limit })}`,
+				config.token,
+			)) as { marks: DeployMark[] };
+			return body.marks;
 		},
 		async alert(alert) {
 			const body = (await call("POST", "/v1/fleet/alert", config.ingestToken, { t: Date.now(), ...alert })) as { id: number };

@@ -9,6 +9,7 @@ import { deployReport, servers } from "./fleet.ts";
 import { funnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
+import { perfClient, perfCompare, perfServer } from "./perf.ts";
 
 export const QUERIES = {
 	overview,
@@ -29,6 +30,9 @@ export const QUERIES = {
 	benchmarks,
 	realtime,
 	trends,
+	"perf-client": perfClient,
+	"perf-server": perfServer,
+	"perf-compare": perfCompare,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;
