@@ -318,6 +318,9 @@ export class RemoteDebugHub {
 		this.commands.set(command.id, command);
 		this.byJob.set(job, [...(this.byJob.get(job) ?? []), command.id]);
 		this.stats.queued++;
+		// A command means the page is open: the watch (and so the kernel's poll) lasts WATCH_MS from now at least.
+		const watched = this.watches.get(job);
+		if (watched) watched.until = Math.max(watched.until, now + WATCH_MS);
 		this.audit({ at: now, who: command.owner, ip, op: command.op, job, args: OPS[command.op].summary(command.args), id: command.id });
 		this.trim();
 		// A held poll answers at once.
