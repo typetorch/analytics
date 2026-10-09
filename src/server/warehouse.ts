@@ -680,7 +680,8 @@ export class Warehouse {
 		// Queries in flight: interrupted, then waited for (the write side of the lock waits for every reader).
 		for (const c of this.pool) c.interrupt();
 		await settlesWithin(this.lock.write(async () => {}), graceMs);
-		await this.writer.run("CHECKPOINT").catch(() => {});
+		// CHECKPOINT alone would fold only the default (in-memory) database: name the file.
+		await this.writer.run("CHECKPOINT live").catch(() => {});
 		this.closeHandles();
 	}
 
