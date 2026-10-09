@@ -74,6 +74,7 @@ function nameColumns(max: number): DataColumn<EventName>[] {
 			format: (v) => fmtPct(v as number),
 			cell: (e) => <ShareBar share={e.count / max} className="w-24" />,
 			filter: false,
+			align: "left",
 			minWidth: 120,
 		},
 		{ id: "players", header: "Players", title: "Distinct pids; server rows have none", accessor: (e) => e.players, cell: (e) => fmtInt(e.players) },

@@ -356,7 +356,8 @@ function TableImpl<T>({
 								<DropdownMenuItem
 									onSelect={(e) => {
 										e.preventDefault();
-										change({ columns: {}, sizes: {} });
+										// Columns that are hidden by default stop sorting, as when they are hidden by hand.
+										change({ columns: {}, sizes: {}, sort: view.sort.filter((s) => !byId.get(s.id)?.defaultHidden) });
 									}}
 								>
 									<RotateCcw />
@@ -514,7 +515,7 @@ function TableImpl<T>({
 				</table>
 			</div>
 
-			{!loading && (shown > PAGE_SIZES[0] || page > 0) ? (
+			{!loading && pageCount > 1 ? (
 				<div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
 					<span className="tabular-nums">
 						{fmtInt(page * view.pageSize + 1)} to {fmtInt(Math.min(shown, (page + 1) * view.pageSize))} of {fmtInt(shown)}
@@ -600,7 +601,7 @@ function HeaderCell<T>({
 		<TableHead
 			scope="col"
 			aria-sort={canSort ? (sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : "none") : undefined}
-			className={cn("sticky top-0 z-10 bg-background", HEADER_BORDER, "relative", pad, col.spec.headerClassName)}
+			className={cn("sticky top-0 z-10 bg-background", HEADER_BORDER, pad, col.spec.headerClassName)}
 			style={widthStyle(width, col.spec.minWidth)}
 			title={col.spec.title}
 		>
@@ -616,7 +617,12 @@ function HeaderCell<T>({
 						onClick={column.getToggleSortingHandler()}
 					>
 						{col.header}
-						{col.spec.hint ? <span className="text-[10px] font-normal text-muted-foreground">{col.spec.hint}</span> : null}
+						{col.spec.hint ? (
+							<>
+								{" "}
+								<span className="text-[10px] font-normal text-muted-foreground">{col.spec.hint}</span>
+							</>
+						) : null}
 						<Icon className={cn("size-3.5 shrink-0", sorted ? "opacity-100" : "opacity-40")} aria-hidden />
 						{sorted && multi ? <span className="text-[10px] text-muted-foreground tabular-nums">{column.getSortIndex() + 1}</span> : null}
 					</button>

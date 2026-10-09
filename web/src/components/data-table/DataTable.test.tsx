@@ -74,6 +74,20 @@ const openMenu = (name: string) => {
 	fireEvent.keyDown(trigger, { key: "ArrowDown" });
 };
 
+describe("DataTable layout", () => {
+	it("keeps the header row sticky and the table scrollable inside its own region", () => {
+		mount();
+		for (const th of Array.from(document.querySelectorAll("thead th"))) {
+			// `relative` would win over `sticky` when the classes are merged.
+			expect(th.classList.contains("sticky")).toBe(true);
+			expect(th.classList.contains("relative")).toBe(false);
+		}
+		const region = screen.getByRole("region", { name: "Servers, scrollable" });
+		expect(region.className).toContain("overflow-auto");
+		expect(region.getAttribute("tabindex")).toBe("0");
+	});
+});
+
 describe("DataTable sorting", () => {
 	it("starts in the order of the data and counts the rows", () => {
 		mount();
@@ -189,6 +203,17 @@ describe("DataTable columns", () => {
 		fireEvent.click(screen.getByRole("menuitem", { name: /Reset columns/ }));
 		expect(head(/TPS/)).toBeTruthy();
 		expect(head(/Channel/)).toBeNull();
+	});
+
+	it("stops sorting by a column that Reset columns hides again", async () => {
+		const byNumber = { id: "number", header: "Number", defaultHidden: true, accessor: (s: Server) => Number(s.job.split("-")[1]) };
+		mount({ columns: [...columns.slice(0, 3), byNumber] });
+		openMenu("Columns");
+		fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Number" }));
+		fireEvent.click(screen.getByRole("button", { name: /^Number/, hidden: true }));
+		expect(jobs()).toEqual(["job-10", "job-3", "job-2", "job-1"]);
+		fireEvent.click(screen.getByRole("menuitem", { name: /Reset columns/ }));
+		expect(jobs()).toEqual(["job-10", "job-2", "job-1", "job-3"]);
 	});
 
 	it("stops sorting by a column that is hidden", async () => {
@@ -358,7 +383,7 @@ describe("DataTable copy and export", () => {
 			reader.onload = () => done(String(reader.result));
 			reader.readAsText(blobs[0] as Blob);
 		});
-		expect(text.replace("﻿", "")).toBe(
+		expect(text.replace("\uFEFF", "")).toBe(
 			["Job,Branch,Health,Players,Memory,TPS,Seen", "job-1,prod,degraded,110,,,2026-10-08T12:00:00.000Z", "job-3,prod,ok,9,1203,30.5,2026-10-09T11:00:00.000Z", "job-2,prod,failing,5,95,12,2026-10-09T09:00:00.000Z"].join("\r\n"),
 		);
 	});

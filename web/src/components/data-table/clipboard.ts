@@ -28,7 +28,7 @@ export async function copyText(text: string): Promise<boolean> {
 /** Saves `text` as a file. A UTF-8 byte order mark first makes Excel read CSV with accents and dashes right. */
 export function downloadText(filename: string, text: string, mime = "text/csv", bom = true): boolean {
 	try {
-		const blob = new Blob([bom ? "﻿" : "", text], { type: `${mime};charset=utf-8` });
+		const blob = new Blob([bom ? "\uFEFF" : "", text], { type: `${mime};charset=utf-8` });
 		const url = URL.createObjectURL(blob);
 		const link = document.createElement("a");
 		link.href = url;
