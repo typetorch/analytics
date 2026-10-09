@@ -36,6 +36,9 @@ const SOURCE_TITLE: Record<SettingSource, string> = {
 	default: "The built-in default (not set in the environment)",
 };
 
+/** The picked option of a toggle stands out (the value is the point here). */
+const PICKED = "data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
+
 /** Unsaved changes per key: null = back to the environment; numbers and lists as typed text; the rest as values. */
 export type Draft = Record<string, unknown>;
 
@@ -103,6 +106,7 @@ function Field({
 	problem,
 	children,
 	note,
+	typed = false,
 }: {
 	setting: RuntimeSetting;
 	draft: Draft;
@@ -112,6 +116,8 @@ function Field({
 	problem?: string | undefined;
 	children: ReactNode;
 	note?: ReactNode;
+	/** A new secret is typed (not in the draft: it lives in its own field). */
+	typed?: boolean;
 }) {
 	const pending = Object.hasOwn(draft, setting.key);
 	const resetting = pending && draft[setting.key] === null;
@@ -123,7 +129,7 @@ function Field({
 				<div className="flex flex-wrap items-center gap-2">
 					<Label htmlFor={`setting-${setting.key}`}>{setting.label}</Label>
 					<SourceBadge source={setting.source} />
-					{pending ? <Badge variant="outline">Unsaved</Badge> : null}
+					{pending || typed ? <Badge variant="outline">Unsaved</Badge> : null}
 				</div>
 				<div className="break-all font-mono text-[11px] text-muted-foreground">{setting.env}</div>
 			</div>
@@ -338,7 +344,7 @@ function SettingsForm({ data }: { data: SettingsView }) {
 				return (
 					<ToggleGroup id={id} type="single" variant="outline" size="sm" spacing={0} value={String(shown)} disabled={disabled} onValueChange={(v) => v && set(setting.key, v)} aria-label={setting.label}>
 						{(setting.options ?? []).map((o) => (
-							<ToggleGroupItem key={o} value={o}>
+							<ToggleGroupItem key={o} value={o} className={PICKED}>
 								{o}
 							</ToggleGroupItem>
 						))}
@@ -359,7 +365,7 @@ function SettingsForm({ data }: { data: SettingsView }) {
 						aria-label={setting.label}
 					>
 						{order.map((o) => (
-							<ToggleGroupItem key={o} value={o}>
+							<ToggleGroupItem key={o} value={o} className={PICKED}>
 								{o}
 							</ToggleGroupItem>
 						))}
@@ -372,8 +378,10 @@ function SettingsForm({ data }: { data: SettingsView }) {
 				const offBlocked = setting.key === "tokenLogin" && setting.value === true && !(data.robloxSignIn && data.you.roblox);
 				return (
 					<ToggleGroup id={id} type="single" variant="outline" size="sm" spacing={0} value={on ? "on" : "off"} disabled={disabled} onValueChange={(v) => v && set(setting.key, v === "on")} aria-label={setting.label}>
-						<ToggleGroupItem value="on">On</ToggleGroupItem>
-						<ToggleGroupItem value="off" disabled={offBlocked}>
+						<ToggleGroupItem value="on" className={PICKED}>
+							On
+						</ToggleGroupItem>
+						<ToggleGroupItem value="off" disabled={offBlocked} className={PICKED}>
 							Off
 						</ToggleGroupItem>
 					</ToggleGroup>
@@ -469,7 +477,7 @@ function SettingsForm({ data }: { data: SettingsView }) {
 				return (
 					<Section key={group.id} title={group.title} description={group.description} contentClassName="py-0">
 						{items.map((setting) => (
-							<Field key={setting.key} setting={setting} draft={draft} disabled={disabled} problem={problems[setting.key]} onReset={() => set(setting.key, null)} onUndo={() => undo(setting.key)} note={noteFor(setting)}>
+							<Field key={setting.key} setting={setting} draft={draft} disabled={disabled} problem={problems[setting.key]} onReset={() => set(setting.key, null)} onUndo={() => undo(setting.key)} note={noteFor(setting)} typed={setting.kind === "secret" && Boolean(secret.trim())}>
 								{control(setting)}
 							</Field>
 						))}

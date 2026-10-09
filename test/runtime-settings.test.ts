@@ -24,6 +24,8 @@ function receiver() {
 	let status = 204;
 	const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => {
 		const url = String(input);
+		// A receiver that is down: the runtime's error message names the URL; only the code may come back.
+		if (url.includes("/unreachable/")) throw Object.assign(new Error(`Unable to connect to ${url}`), { code: "ConnectionRefused" });
 		if (url.startsWith("https://hooks.example.test/")) {
 			posts.push({ url, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
 			return new Response(null, { status });
@@ -263,6 +265,16 @@ describe("runtime settings: values, validation, secrets, audit", () => {
 		expect((await a.testAlert()).status).toBe(409);
 		const reset = await asJson(await a.patch({ alertWebhookUrl: null, alertWebhookLevels: null }));
 		expect(settingOf(reset, "alertWebhookUrl")).toMatchObject({ set: false, source: "default" });
+	});
+
+	test("a webhook that can't be reached: the test alert says why with the error code, never the URL", async () => {
+		expect((await a.patch({ alertWebhookUrl: "https://hooks.example.test/unreachable/fake-webhook-secret-path-AAAA" })).status).toBe(200);
+		const res = await a.testAlert();
+		expect(res.status).toBe(502);
+		const text = await res.text();
+		expect(JSON.parse(text)).toEqual({ ok: false, error: "the webhook could not be reached (ConnectionRefused)" });
+		for (const t of [text, h.logs.join("\n")]) for (const marker of [...SECRET_MARKERS, "unreachable"]) expect(t).not.toContain(marker);
+		await a.patch({ alertWebhookUrl: null });
 	});
 
 	test("rate limits and retention apply to the next request", async () => {

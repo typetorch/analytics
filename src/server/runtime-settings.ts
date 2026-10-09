@@ -423,7 +423,7 @@ export class RuntimeSettings {
 			this.log(`runtime settings: could not save the audit list (${(error as NodeJS.ErrnoException).code ?? (error as Error).name})`);
 		}
 		this.auditList = audit;
-		this.log(`test alert sent by ${actor.who} (${actor.via}): ${result}`);
+		this.log(`test alert from the Settings page by ${actor.who} (${actor.via}): ${result}`);
 	}
 
 	private refresh(): void {

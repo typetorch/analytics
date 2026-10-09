@@ -140,7 +140,10 @@ export function createNotifier(options: NotifierOptions): Notifier {
 				await response.body?.cancel().catch(() => {});
 				return response.ok ? { ok: true, status: response.status } : { ok: false, status: response.status, error: `the webhook answered HTTP ${response.status}` };
 			} catch (error) {
-				return { ok: false, error: `the webhook could not be reached (${(error as Error).name})` };
+				// The error's code (ConnectionRefused, ECONNREFUSED, a TLS code) or name: never its message, which may hold the URL.
+				const { code, name } = error as Error & { code?: unknown };
+				const why = typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code) ? code : name;
+				return { ok: false, error: `the webhook could not be reached (${why})` };
 			}
 		},
 		flush: () => chain,

@@ -102,6 +102,7 @@ describe("Settings page", () => {
 		mount();
 		const input = within(await findRow("alertWebhookUrl")).getByLabelText("Alert webhook") as HTMLInputElement;
 		fireEvent.change(input, { target: { value: `  ${NEW_HOOK}  ` } });
+		expect(within(row("alertWebhookUrl")).getByText("Unsaved")).toBeTruthy();
 		// The test alert waits for the save (it uses the saved webhook).
 		expect((screen.getByRole("button", { name: /send test alert/i }) as HTMLButtonElement).disabled).toBe(true);
 		fireEvent.click(saveButton());
