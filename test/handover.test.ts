@@ -15,6 +15,8 @@ import { loadConfig } from "../src/server/config.ts";
 import { handleShutdown } from "../src/server/lifecycle.ts";
 import { DataFolderLocked, isLockConflict } from "../src/duckdb/lock.ts";
 import { openDuckDbStore } from "../src/store/duckdb.ts";
+import { openSqlite } from "../src/fleet/db.ts";
+import { FleetService } from "../src/fleet/service.ts";
 import { ADMIN, API, bearer, post } from "./harness.ts";
 
 const root = join(import.meta.dir, "..");
@@ -376,6 +378,25 @@ test("a local read-only store refuses a folder a server holds (no second handle 
 	const store = await openDuckDbStore({ dataDir: dir, memoryLimit: "128MB", threads: 1 });
 	await store.close();
 }, 30_000);
+
+test("two servers sweeping one fleet file at the same moment raise one server_lost alert, not two", async () => {
+	const dir = tempDir();
+	const file = join(dir, "fleet.sqlite");
+	let now = Date.UTC(2026, 9, 9, 12, 0, 0);
+	const clock = () => now;
+	const dbs = [await openSqlite(file), await openSqlite(file)];
+	try {
+		const [a, b] = await Promise.all(dbs.map((db) => FleetService.open({ db, clock })));
+		await a.heartbeat(heartbeat("job-swept"));
+		now += 120_000;
+		// Interleaved: both select the server as lost before either marks it.
+		const [ra, rb] = await Promise.all([a.sweep(), b.sweep()]);
+		expect(ra.lost + rb.lost).toBe(1);
+		expect((await a.alerts()).filter((x) => x.code === "server_lost")).toHaveLength(1);
+	} finally {
+		for (const db of dbs) await db.close();
+	}
+});
 
 test("DataFolderLocked names the file and keeps DuckDB's words", () => {
 	const error = new DataFolderLocked("/data/live.duckdb", "IO Error: Could not set lock");
