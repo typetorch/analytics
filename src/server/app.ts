@@ -56,6 +56,7 @@ import { createNotifier, type Notifier } from "../fleet/notify.ts";
 import { FleetService, type Alert } from "../fleet/service.ts";
 import { RemoteDebugHub, type Caller } from "../fleet/remote-debug.ts";
 import { handleRemoteDebug, isRemoteDebugPath } from "../fleet/remote-debug-http.ts";
+import { RemoteDebugWaker } from "../fleet/remote-debug-wake.ts";
 import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
 import { runtimeName, serve, type Served } from "../runtime.ts";
 import { validateSettings } from "../settings.ts";
@@ -117,6 +118,8 @@ export interface App {
 	readonly live: LiveHub;
 	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
 	readonly remoteDebug?: RemoteDebugHub;
+	/** Plans/25 "Instant wake": the wake publisher (off without TYPETORCH_MESSAGING_KEY and TYPETORCH_UNIVERSE_ID). */
+	readonly waker?: RemoteDebugWaker;
 	/** Explorer sessions open right now. */
 	sessionCount(): number;
 	handle(req: Request, ip?: string): Promise<Response>;
@@ -221,6 +224,17 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const access = AccessStore.at(config.dataDir, clock);
 	// Plans/25: remote debug. Answers stay in this process's memory; only the audit (no answers) goes to disk.
 	const remoteDebug = fleet ? new RemoteDebugHub({ clock, log, auditDir: join(config.dataDir, "audit") }) : undefined;
+	// Plans/25 "Instant wake": with TYPETORCH_MESSAGING_KEY and TYPETORCH_UNIVERSE_ID, a watch that starts on a server
+	// that isn't polling publishes a wake (Open Cloud Messaging); without them, the heartbeat reply alone wakes it.
+	const waker = remoteDebug
+		? new RemoteDebugWaker({
+				...(config.messagingKey ? { apiKey: config.messagingKey } : {}),
+				...(config.universeId ? { universeId: config.universeId } : {}),
+				...(options.fetch ? { fetch: options.fetch } : {}),
+				clock,
+				log,
+			})
+		: undefined;
 
 	// Subscribers ------------------------------------------------------------------------------------------------------
 	// The DuckDB writer: appends the batch to the raw file before the 202 (a 202 means "on disk"). Subscribed once the
@@ -781,7 +795,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier.configured ? { webhook: notifier.stats } : {}) };
 		// Plans/25: counters and what is held in memory (never an answer).
-		if (remoteDebug) out.remoteDebug = { ...remoteDebug.stats, ...remoteDebug.memory };
+		if (remoteDebug) out.remoteDebug = { ...remoteDebug.stats, ...remoteDebug.memory, ...(waker?.enabled ? { wake: waker.stats } : { wake: "off" }) };
 		// The bus: per subscriber what was handled, what is waiting and what was dropped (full queue).
 		out.bus = bus.stats();
 		out.live = live.stats;
@@ -1074,6 +1088,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 					return { caller };
 				},
 				limiters: debugLimiters,
+				...(waker?.enabled ? { waker } : {}),
 				readCapped,
 				keepOpen: (r) => keepOpen.get(r)?.(),
 				ip,
@@ -1307,6 +1322,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		);
 		scheduleHandover();
 	}
+	// Plans/25 "Instant wake": one line at the start saying whether it is on (names only, never the key).
+	if (waker) log(waker.describe());
 
 	let stopped: Promise<void> | undefined;
 	/**
@@ -1330,8 +1347,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		await bus.idle(2000);
 		if (sandbox) await (await sandbox.catch(() => undefined))?.close();
 		if (warehouse) await warehouse.close(STOP_JOB_GRACE_MS);
-		// Alerts already handed to the webhook (each send has its own 5 s timeout).
-		await Promise.race([notifier.flush(), new Promise((done) => setTimeout(done, 2000))]);
+		// Alerts already handed to the webhook (each send has its own 5 s timeout), and wake publishes on their way.
+		await Promise.race([Promise.all([notifier.flush(), waker?.idle()]), new Promise((done) => setTimeout(done, 2000))]);
 		if (fleet) await fleet.close();
 		else await sqlite.close();
 	}
@@ -1348,6 +1365,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		notifier,
 		settings: runtime,
 		...(remoteDebug ? { remoteDebug } : {}),
+		...(waker ? { waker } : {}),
 		bus,
 		errors,
 		access,

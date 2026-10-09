@@ -34,6 +34,8 @@ services:
       ROBLOX_WEBHOOK_SECRET: ${ROBLOX_WEBHOOK_SECRET:-}
       OPENCLOUD_API_KEY: ${OPENCLOUD_API_KEY:-}
       TYPETORCH_UNIVERSE_ID: ${TYPETORCH_UNIVERSE_ID:-}
+      # Remote debug's instant wake: an Open Cloud key with ONLY universe-messaging-service:publish (README "Remote debug").
+      TYPETORCH_MESSAGING_KEY: ${TYPETORCH_MESSAGING_KEY:-}
       TYPETORCH_ALERT_WEBHOOK_URL: ${TYPETORCH_ALERT_WEBHOOK_URL:-}
       # Values saved on the explorer's Settings page win over the ones above; "off" ignores them (they stay in /data) and
       # makes the page read only: the way back in after locking yourself out (README "Runtime settings").

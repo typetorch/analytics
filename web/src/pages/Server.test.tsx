@@ -5,7 +5,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import type { FleetServer, FleetServerDetail, RemoteCommand, RemoteOp } from "@/lib/types";
-import ServerPage, { CONNECTING_TEXT } from "./Server";
+import ServerPage, { CONNECTING_TEXT, WAKING_TEXT } from "./Server";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -63,9 +63,9 @@ const answers: Partial<Record<RemoteOp, unknown>> = {
 	"dex.props": (args: { id: number }) => ({ id: args.id, name: "Workspace", className: "Workspace", path: "game.Workspace", props: [{ name: "Gravity", category: "Physics", kind: "number", text: "196.2" }], attrs: [], tags: [] }),
 };
 
-function mockApi(d: FleetServerDetail = detail(), watchConnected = true) {
+function mockApi(d: FleetServerDetail = detail(), watchConnected = true, wake?: boolean) {
 	const fleetServer = vi.spyOn(api, "fleetServer").mockResolvedValue(d);
-	const watchServer = vi.spyOn(api, "watchServer").mockResolvedValue({ job: JOB, watched: true, connected: watchConnected });
+	const watchServer = vi.spyOn(api, "watchServer").mockResolvedValue({ job: JOB, watched: true, connected: watchConnected, ...(wake !== undefined ? { wake } : {}) });
 	vi.spyOn(api, "serverMetrics").mockResolvedValue([
 		{ t: Date.now() - 60_000, tps: 59.9, tpsMin: 55, physFps: 60, memMb: 800, luaMb: 120, players: 3 },
 		{ t: Date.now(), tps: 58.2, tpsMin: 50, physFps: 60, memMb: 812, luaMb: 121, players: 3 },
@@ -135,6 +135,32 @@ describe("the server page", () => {
 			expect(button.title).toBe(CONNECTING_TEXT);
 		}
 		expect(remoteCommand).not.toHaveBeenCalled();
+	});
+
+	it("says Waking server... while a wake is on its way, re-reads the server every second, and connects as soon as it polls", async () => {
+		const { fleetServer, remoteCommand } = mockApi(detail({ debug: { watched: true, connected: false } }), false, true);
+		mount();
+		expect(await screen.findByText(WAKING_TEXT)).toBeTruthy();
+		expect(screen.queryByText(CONNECTING_TEXT)).toBeNull();
+		for (const button of screen.getAllByRole("button", { name: "Fetch" }) as HTMLButtonElement[]) {
+			expect(button.disabled).toBe(true);
+			expect(button.title).toBe(WAKING_TEXT);
+		}
+		expect(remoteCommand).not.toHaveBeenCalled();
+		// The woken server polls: the next read (a second later, not five) says connected and the first fetch runs.
+		const calls = fleetServer.mock.calls.length;
+		fleetServer.mockResolvedValue(detail());
+		await waitFor(() => expect(screen.getByText(/^Connected/)).toBeTruthy(), { timeout: 2500 });
+		expect(fleetServer.mock.calls.length).toBeGreaterThan(calls);
+		expect(screen.queryByText(WAKING_TEXT)).toBeNull();
+		await waitFor(() => expect(remoteCommand).toHaveBeenCalledWith(JOB, "status", undefined, expect.anything()));
+	});
+
+	it("without a wake (no messaging key, or an older backend) it keeps the heartbeat text", async () => {
+		mockApi(detail({ debug: { watched: true, connected: false } }), false, false);
+		mount();
+		expect(await screen.findByText(CONNECTING_TEXT)).toBeTruthy();
+		expect(screen.queryByText(WAKING_TEXT)).toBeNull();
 	});
 
 	it("a closed server: no watch, no debug tabs, its last hour and when it closed", async () => {

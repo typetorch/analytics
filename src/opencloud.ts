@@ -4,6 +4,8 @@
  * (the signed settings record, kernel 0.3.8; settings.ts), not here.
  *   - DataStore entries (v2): read `TypeTorchAnalytics` / `p/<UserId>` to map an erasure request's UserId to a pid.
  *     Scope universe-datastores.objects:read (and :delete to remove the link).
+ *   - MessagingService (v2 `:publishMessage`, the CLI's call too): remote debug's instant wake (fleet/remote-debug-wake.ts).
+ *     Scope universe-messaging-service:publish.
  */
 export const OPEN_CLOUD = "https://apis.roblox.com";
 
@@ -119,4 +121,22 @@ export async function listDataStoreEntries(
 		.filter((id) => id !== "");
 	const next = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
 	return next ? { ids, nextPageToken: next } : { ids };
+}
+
+// MessagingService (v2) -------------------------------------------------------------------------------------------------
+
+/** MessagingService's message limit (bytes of the message text). */
+export const MESSAGE_MAX_BYTES = 1024;
+
+/**
+ * Publishes one message to a MessagingService topic of the universe: `POST /cloud/v2/universes/{id}:publishMessage`
+ * `{ topic, message }` (Roblox's Messaging usage guide; the TypeTorch CLI publishes deploys the same way). Scope
+ * universe-messaging-service:publish. Not retried (a publish that went through twice would deliver twice). Throws
+ * OpenCloudError (no key in it) on a refusal or a network error.
+ */
+export async function publishMessage(options: OpenCloudOptions & { universeId: number; topic: string; message: string }): Promise<void> {
+	if (new TextEncoder().encode(options.message).length > MESSAGE_MAX_BYTES) throw new Error(`MessagingService messages are limited to ${MESSAGE_MAX_BYTES} bytes`);
+	const path = `/cloud/v2/universes/${options.universeId}:publishMessage`;
+	const response = await call(options, "POST", path, { topic: options.topic, message: options.message });
+	if (response.status < 200 || response.status >= 300) fail("POST", path, response.status, response.text, "universe-messaging-service:publish");
 }

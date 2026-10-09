@@ -101,6 +101,10 @@ describe("the session", () => {
 		const detail = (state: FleetServerDetail["state"], connected = false): FleetServerDetail => ({ server: null, state, debug: { watched: false, connected } });
 		expect(detailRefetch(detail("live"))).toBe(5_000);
 		expect(detailRefetch(detail("live", true))).toBe(15_000);
+		// A wake is on its way: every second until the server polls (then slowly, as usual).
+		expect(detailRefetch(detail("live"), true)).toBe(1_000);
+		expect(detailRefetch(detail("live", true), true)).toBe(15_000);
+		expect(detailRefetch(detail("lost"), true)).toBe(30_000);
 		expect(detailRefetch(detail("lost"))).toBe(30_000);
 		expect(detailRefetch(detail("closed"))).toBe(false);
 		expect(detailRefetch(detail("unknown"))).toBe(false);
