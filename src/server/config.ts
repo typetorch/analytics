@@ -123,6 +123,12 @@ export interface ServerConfig {
 	openCloudKey?: string;
 	universeId?: number;
 	erasureDeleteLink: boolean;
+	/**
+	 * Plans/25 "Instant wake": TYPETORCH_MESSAGING_KEY, an Open Cloud key with only universe-messaging-service:publish.
+	 * With TYPETORCH_UNIVERSE_ID, a watch that starts on a server that isn't polling publishes a wake message. Env-only,
+	 * never logged or returned.
+	 */
+	messagingKey?: string;
 	// SQLite (fleet, identities, error logs, owners)
 	fleetDb: string;
 	alertWebhookUrl?: string;
@@ -375,6 +381,14 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (webDir) config.webDir = webDir;
 	if (env.ROBLOX_WEBHOOK_SECRET) config.webhookSecret = env.ROBLOX_WEBHOOK_SECRET;
 	if (env.OPENCLOUD_API_KEY) config.openCloudKey = env.OPENCLOUD_API_KEY;
+	const messagingKey = env.TYPETORCH_MESSAGING_KEY;
+	if (messagingKey) {
+		// Never put the value in an error or a warning.
+		if (!/^[\x21-\x7e]{16,4096}$/.test(messagingKey)) throw new Error("TYPETORCH_MESSAGING_KEY must be an Open Cloud API key (16-4096 printable characters, no spaces)");
+		if (apiKeys.includes(messagingKey) || messagingKey === adminToken) throw new Error("TYPETORCH_MESSAGING_KEY must be an Open Cloud API key, not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
+		if (messagingKey === env.OPENCLOUD_API_KEY) warnings.push("TYPETORCH_MESSAGING_KEY is the same key as OPENCLOUD_API_KEY: give the wake its own Open Cloud key with only universe-messaging-service:publish");
+		config.messagingKey = messagingKey;
+	}
 	if (universe) {
 		const u = Number(universe);
 		if (!Number.isSafeInteger(u) || u <= 0) throw new Error("TYPETORCH_UNIVERSE_ID must be a positive integer");
@@ -401,6 +415,7 @@ export function describeConfig(config: ServerConfig): string {
 		`public url=${config.publicUrl ?? "not set"}`,
 		`erasure webhook secret=${yes(config.webhookSecret)}`,
 		`open cloud key=${yes(config.openCloudKey)}`,
+		`messaging key=${yes(config.messagingKey)}`,
 		`alert webhook=${yes(config.alertWebhookUrl)}`,
 		`duckdb memory_limit=${config.memoryLimit} threads=${config.threads}`,
 		`ad-hoc sql=${config.sql ? `on (memory_limit=${config.sqlMemoryLimit})` : "off"}`,

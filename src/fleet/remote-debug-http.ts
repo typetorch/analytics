@@ -9,7 +9,8 @@
  *
  *   admin (the admin token or an explorer session)
  *   GET  /v1/fleet/servers/<job>                      -> { server, state, debug }
- *   POST /v1/fleet/servers/<job>/watch                -> { job, ...debug }
+ *   POST /v1/fleet/servers/<job>/watch                -> { job, ...debug, wake }   (wake: a wake message went out lately
+ *                                                        for this job: "Waking server..."; remote-debug-wake.ts)
  *   POST /v1/fleet/servers/<job>/commands { op, args } -> 202 { id, op, state, expiresAt }
  *   GET  /v1/fleet/servers/<job>/commands/<id>        -> the command and, once answered, its result
  *   GET  /v1/fleet/debug/audit?limit=                 -> { entries }
@@ -17,6 +18,7 @@
 import type { FleetService } from "./service.ts";
 import { JOB_ID_MAX } from "./service.ts";
 import { RemoteDebugInputError, type Caller, type RemoteDebugHub } from "./remote-debug.ts";
+import type { RemoteDebugWaker } from "./remote-debug-wake.ts";
 
 /** POST /v1/fleet/results at most (each result is at most 256 KB of JSON text; the kernel sends 200 KB at most). */
 export const RESULTS_BODY_MAX = 512 * 1024;
@@ -55,6 +57,8 @@ export interface RemoteDebugHttpOptions {
 	/** The admin gate: the caller, or the answer to send (401/403/404/429). */
 	admin(req: Request): { caller: Caller } | { response: Response };
 	limiters: RemoteDebugLimiters;
+	/** Plans/25 "Instant wake": publishes a wake when a watch starts on a job that isn't polling (none: heartbeats only). */
+	waker?: Pick<RemoteDebugWaker, "wake" | "waking">;
 	/** Reads a body up to `max` bytes (undefined = over). */
 	readCapped(req: Request, max: number): Promise<Uint8Array | null | undefined>;
 	/** Turns off the idle timeout of a held request (the kernel's long-poll). */
@@ -148,7 +152,12 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 			const { state } = await o.fleet.server(job);
 			// A closed or unknown server has nothing to debug: no watch, so its (missing) heartbeats get no rd.
 			if (state === "closed" || state === "unknown") return json(409, { error: state === "closed" ? "this server closed" : "no heartbeat from this JobId", state });
-			return json(200, { job, ...o.hub.watch(job, caller) });
+			const before = o.hub.status(job);
+			const status = o.hub.watch(job, caller);
+			// Instant wake: a watch that starts (new, or after it lapsed) on a server that isn't polling publishes one wake
+			// message (rate-limited, in the background; a failure never touches the watch). The page's 20 s repeats don't.
+			if (o.waker && !before.watched && !status.connected) o.waker.wake(job);
+			return json(200, { job, ...status, wake: !status.connected && (o.waker?.waking(job) ?? false) });
 		}
 		// commands
 		if (m[3]) {
