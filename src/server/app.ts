@@ -427,7 +427,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const uid = parseUid(queryOptions.uid);
 			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
 			const known = await identities.byUid(uid);
-			if (!known.length) return json(404, { error: `no pid known for UserId ${uid}: only players who joined after the identity update (or a backfill) are mapped` });
+			if (!known.length) return json(404, { error: `no pid known for UserId ${uid}` });
 			queryOptions.pid = known[0].pid;
 		}
 		delete queryOptions.uid;

@@ -1,4 +1,4 @@
-/** pid <-> UserId bits: the profile link, the mapping status with the backfill button, and the top bar's player finder. */
+/** pid <-> UserId bits: the profile link, the backfill button, and the top bar's player finder. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, UserSearch } from "lucide-react";
 import { useState } from "react";
@@ -21,7 +21,7 @@ export function UserIdLink({ uid, className }: { uid: number; className?: string
 	);
 }
 
-/** How many pids the server can map to UserIds, and a backfill from the DataStore when the server has access. */
+/** A backfill from the game's DataStore links, when the server can read them (nothing otherwise). */
 export function IdentityStatus() {
 	const client = useQueryClient();
 	const summary = useQuery({ queryKey: ["identity", "summary"], queryFn: ({ signal }) => api.identitySummary(signal), retry: false });
@@ -44,13 +44,10 @@ export function IdentityStatus() {
 		},
 	});
 	if (summary.isError || !summary.data) return null;
-	const { count, backfill: canBackfill } = summary.data;
+	const canBackfill = summary.data.backfill;
+	if (!canBackfill && backfill.isIdle) return null;
 	return (
 		<div className="space-y-1.5 text-xs text-muted-foreground">
-			<p>
-				{fmtInt(count)} pid{count === 1 ? "" : "s"} mapped to UserIds.{" "}
-				{canBackfill ? "Older players can be filled in from the game's DataStore links." : "Only players who joined after the identity update are mapped (the server has no DataStore access for older ones)."}
-			</p>
 			{canBackfill ? (
 				<Button variant="outline" size="xs" onClick={() => backfill.mutate()} disabled={backfill.isPending}>
 					{backfill.isPending ? `Backfilling... ${progress ? `${progress.added} added of ${progress.scanned}` : ""}` : "Backfill identities"}

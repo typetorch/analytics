@@ -67,7 +67,7 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 				) : null}
 			</div>
 			{!valid ? <p className="text-xs text-muted-foreground">A pid has only letters, digits, _ and -.</p> : null}
-			{missing ? <p className="text-xs text-muted-foreground">No pid known for {missing}: only players who joined after the identity update (or a backfill) are mapped.</p> : null}
+			{missing ? <p className="text-xs text-muted-foreground">No player found for UserId {missing}.</p> : null}
 			<QueryState query={q} isEmpty={(d) => d.players.length === 0} empty={search ? "No pid matches." : "No players in this range."}>
 				{(data) => (
 					<DataTable
