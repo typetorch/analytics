@@ -9,6 +9,8 @@ import { api } from "@/lib/api";
 import { fmtAgo, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
 import type { FleetAlert, FleetReportResult, FleetReports, FleetServer, FleetServers, ServerBudget } from "@/lib/types";
+// Plans/25: every JobId here links to its server page (/servers/<JobId>).
+import { JobLink } from "./server/shared";
 
 type StreamState = "connecting" | "live" | "retrying";
 
@@ -172,7 +174,7 @@ export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
 		id: "job",
 		header: "Job",
 		accessor: (s) => s.job,
-		cell: (s) => <span title={s.job}>{shortId(s.job, 6)}</span>,
+		cell: (s) => <JobLink job={s.job} />,
 		className: "font-mono text-xs",
 	},
 	{ id: "type", header: "Type", type: "enum", accessor: (s) => s.serverType },
@@ -323,14 +325,14 @@ const RESULT_COLUMNS: DataColumn<FleetReportResult>[] = [
 const DEPLOY_ERROR_COLUMNS: DataColumn<FleetReports["errors"][number]>[] = [
 	{ id: "error", header: "Error", accessor: (e) => e.error, className: "max-w-96 whitespace-normal text-[var(--status-critical)]" },
 	{ id: "servers", header: "Servers", accessor: (e) => e.servers },
-	{ id: "example", header: "Example", accessor: (e) => e.exampleJob, cell: (e) => <span title={e.exampleJob}>{shortId(e.exampleJob, 6)}</span>, className: "font-mono text-xs" },
+	{ id: "example", header: "Example", accessor: (e) => e.exampleJob, cell: (e) => <JobLink job={e.exampleJob} />, className: "font-mono text-xs" },
 ];
 
 type ServerReport = NonNullable<FleetReports["reports"]>[number];
 
 const REPORT_COLUMNS: DataColumn<ServerReport>[] = [
 	{ id: "at", header: "When (UTC)", type: "date", accessor: (r) => r.at, cell: (r) => fmtTime(r.at), className: "font-mono text-xs tabular-nums" },
-	{ id: "job", header: "Job", accessor: (r) => r.job, cell: (r) => <span title={r.job}>{shortId(r.job, 6)}</span>, className: "font-mono text-xs" },
+	{ id: "job", header: "Job", accessor: (r) => r.job, cell: (r) => <JobLink job={r.job} />, className: "font-mono text-xs" },
 	{
 		id: "result",
 		header: "Result",
@@ -362,7 +364,19 @@ function Report({ data }: { data: FleetReports }) {
 			) : null}
 			<p className="text-xs text-muted-foreground">
 				{data.behind.length ? `${data.behind.length} live server(s) still below #${data.seq}.` : "Every live server on the branch has it."}
-				{data.stuck.length ? ` Stuck (no report 3+ min after the deploy): ${data.stuck.map((j) => shortId(j, 6)).join(", ")}.` : ""}
+				{data.stuck.length ? (
+					<>
+						{" "}
+						Stuck (no report 3+ min after the deploy):{" "}
+						{data.stuck.map((j, i) => (
+							<span key={j}>
+								{i > 0 ? ", " : ""}
+								<JobLink job={j} />
+							</span>
+						))}
+						.
+					</>
+				) : null}
 			</p>
 		</div>
 	);
@@ -386,6 +400,14 @@ const ALERT_COLUMNS: DataColumn<FleetAlert>[] = [
 		header: "Where",
 		accessor: (a) => [a.branch, a.artifact, a.seq ? `#${a.seq}` : null].filter(Boolean).join(" · "),
 		className: "text-xs text-muted-foreground",
+	},
+	{
+		id: "job",
+		header: "Job",
+		accessor: (a) => a.job ?? null,
+		// The CLI's alerts say j = "cli": not a server.
+		cell: (a) => (a.job && a.job !== "cli" ? <JobLink job={a.job} /> : (a.job ?? "–")),
+		className: "font-mono text-xs",
 	},
 	{ id: "branch", header: "Branch", type: "enum", accessor: (a) => a.branch ?? null, defaultHidden: true },
 	{ id: "source", header: "Source", type: "enum", accessor: (a) => a.source ?? null, defaultHidden: true },
