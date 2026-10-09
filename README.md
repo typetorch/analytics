@@ -495,6 +495,12 @@ browser; the proxy forwards only the endpoints the explorer uses, only from its 
 machine. With the proxy there is no login page (the proxy is the login). The Settings page can read through the proxy but not
 save or send a test alert (change settings on the backend's own explorer). `.explorer.local` and the `fleet.env` default are gone.
 
+**Tables.** Every table in the explorer is one component: click a header to sort (shift-click adds a column; numbers, dates and
+sizes sort by their value, not the text shown), a search box and per-column filters, a **Columns** picker on every table, draggable
+widths, "12 of 340 rows", pages, copy a cell or a row as JSON, and Export of the filtered view as CSV. Sort, filters and hidden
+columns are remembered per table in the browser and written to the URL (`fleet-servers.sort=-players`), so a view can be shared.
+How to add a table or a column: `web/README.md`, "Tables".
+
 ## Row format
 
 Two row kinds, flat JSON, one object per row, as the framework writes them (`framework/src/analytics/SCHEMA.md`, the

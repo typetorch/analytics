@@ -85,9 +85,9 @@ export default function Events() {
 	const [kindFilter, setKindFilter] = useParam("kind", ALL);
 	const [picked, setPicked] = useParam("event");
 	const [pid, setPid] = useParam("pid");
-	const events = top.data?.events ?? [];
+	const events = useMemo(() => top.data?.events ?? [], [top.data]);
 	const kinds = [...new Set(events.map((e) => e.kind))].sort();
-	const shown = kindFilter === ALL ? events : events.filter((e) => e.kind === kindFilter);
+	const shown = useMemo(() => (kindFilter === ALL ? events : events.filter((e) => e.kind === kindFilter)), [events, kindFilter]);
 	const max = Math.max(1, ...shown.map((e) => e.count));
 	const columns = useMemo(() => nameColumns(max), [max]);
 	const at = picked.indexOf("/");

@@ -112,15 +112,28 @@ export function DataTable<T>(props: DataTableProps<T>) {
 	return <TableImpl {...props} url={null} />;
 }
 
+/**
+ * URL changes of one tick are applied together: tables that mount at the same time each want to add their own
+ * parameters, and two separate navigations from the same snapshot would drop each other's.
+ */
+let queued: ((params: URLSearchParams) => URLSearchParams)[] = [];
+function queueUrlUpdate(change: (params: URLSearchParams) => URLSearchParams, current: URLSearchParams, apply: (next: URLSearchParams) => void) {
+	queued.push(change);
+	if (queued.length > 1) return;
+	queueMicrotask(() => {
+		const changes = queued;
+		queued = [];
+		const next = changes.reduce((params, fn) => fn(params), new URLSearchParams(current));
+		if (next.toString() !== current.toString()) apply(next);
+	});
+}
+
 function RoutedTable<T>(props: DataTableProps<T>) {
 	const [params, setParams] = useSearchParams();
 	const url = useMemo<UrlBridge>(
 		() => ({
 			params,
-			update(change) {
-				const next = change(new URLSearchParams(params));
-				if (next.toString() !== params.toString()) setParams(next, { replace: true });
-			},
+			update: (change) => queueUrlUpdate(change, params, (next) => setParams(next, { replace: true })),
 		}),
 		[params, setParams],
 	);
@@ -164,10 +177,20 @@ function TableImpl<T>({
 	const visibleCols = useMemo(() => resolved.filter((c) => isVisible(c, view)), [resolved, view]);
 	const visibleKey = visibleCols.map((c) => c.id).join("\n");
 	// The search looks at what is on screen: the visible, searchable columns.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: visibleKey stands for visibleCols
 	const index = useMemo(() => buildSearchIndex(data, visibleCols.filter((c) => c.searchable)), [data, resolved, visibleKey]);
 	const search = useDeferredValue(view.search);
 	const entries = useMemo(() => filterEntries(data, resolved, { search, filters: view.filters }, index), [data, resolved, search, view.filters, index]);
+
+	// A page's own row ids, made unique (a repeated id would make two rows share a React key).
+	const ids = useMemo(() => {
+		const seen = new Set<string>();
+		return data.map((row, i) => {
+			let id = rowId ? rowId(row, i) : String(i);
+			if (seen.has(id)) id = `${id}#${i}`;
+			seen.add(id);
+			return id;
+		});
+	}, [data, rowId]);
 
 	const [pageIndex, setPageIndex] = useState(0);
 	const pageCount = Math.max(1, Math.ceil(entries.length / view.pageSize));
@@ -202,7 +225,7 @@ function TableImpl<T>({
 		getCoreRowModel: getCoreRowModel(),
 		getSortedRowModel: getSortedRowModel(),
 		getPaginationRowModel: getPaginationRowModel(),
-		getRowId: (e) => (rowId ? rowId(e.row, e.i) : String(e.i)),
+		getRowId: (e) => ids[e.i] ?? String(e.i),
 		autoResetPageIndex: false,
 		enableSortingRemoval: true,
 		enableMultiSort: true,
@@ -498,7 +521,7 @@ function TableImpl<T>({
 					</span>
 					<div className="flex items-center gap-2">
 						<Select value={String(view.pageSize)} onValueChange={(v) => change({ pageSize: Number(v) })}>
-							<SelectTrigger size="sm" className="w-28" aria-label="Rows per page">
+							<SelectTrigger size="sm" className="w-36" aria-label="Rows per page">
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>

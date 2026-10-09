@@ -358,10 +358,10 @@ export default function Fleet() {
 				)}
 			</QueryState>
 			<div className="grid gap-4 xl:grid-cols-2">
-				<Section title="Latest deploy">
+				<Section title="Latest deploy" className="min-w-0">
 					<QueryState query={report}>{(data) => <Report data={data} />}</QueryState>
 				</Section>
-				<Section title="Live events" description="Changes pushed by the server since this page opened.">
+				<Section title="Live events" description="Changes pushed by the server since this page opened." className="min-w-0">
 					{stream.log.length ? (
 						<ul className="max-h-64 space-y-1 overflow-y-auto text-xs">
 							{stream.log.map((e, i) => (

@@ -4,7 +4,7 @@
  * both a moment later. Works without either: no router means no URL, blocked storage means no memory.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { clearViewParams, hasViewParams, paramsToView, readStored, viewToParams, writeStored, type TableView } from "./model";
+import { clearViewParams, hasViewParams, isDefaultView, paramsToView, readStored, viewToParams, writeStored, type TableView } from "./model";
 
 /** The page's query string, as far as the table needs it (the router's, or nothing in tests and previews). */
 export interface UrlBridge {
@@ -22,9 +22,15 @@ export function withViewParams(params: URLSearchParams, id: string, view: TableV
 
 export function useTableView(options: { id: string; defaults: TableView; persist: boolean; url: UrlBridge | null }) {
 	const { id, defaults, persist } = options;
+	const source = useRef<"url" | "storage" | "default">("default");
 	const [view, setView] = useState<TableView>(() => {
-		if (options.url && hasViewParams(id, options.url.params)) return paramsToView(id, options.url.params, defaults);
-		return (persist ? readStored(id, defaults) : null) ?? defaults;
+		if (options.url && hasViewParams(id, options.url.params)) {
+			source.current = "url";
+			return paramsToView(id, options.url.params, defaults);
+		}
+		const stored = persist ? readStored(id, defaults) : null;
+		source.current = stored ? "storage" : "default";
+		return stored ?? defaults;
 	});
 	const touched = useRef(false);
 	const latest = useRef({ view, defaults, persist, url: options.url, id });
@@ -53,6 +59,11 @@ export function useTableView(options: { id: string; defaults: TableView; persist
 		};
 		return () => clearTimeout(timer);
 	}, [view]);
+	// A view restored from localStorage goes into the URL too, so the address shows (and shares) what is on screen.
+	useEffect(() => {
+		const { view: v, defaults: d, url, id: key } = latest.current;
+		if (source.current === "storage" && url && !isDefaultView(v, d)) url.update((params) => withViewParams(params, key, v, d));
+	}, []);
 	// Leaving the page within the quarter second must not lose the last change.
 	useEffect(
 		() => () => {

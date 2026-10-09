@@ -60,10 +60,54 @@ state routed around the side. Each state shows what happened there (its top even
 list). "moments" adds key moments (funnel steps, purchases, personal_best, round_end) as small nodes on the path. A
 graph with fewer than 3 states says so in one dim line, with a link to the player's events.
 
+## Tables
+
+Every table in the explorer is one component, `src/components/data-table/` (TanStack Table 8 for sorting, paging and column
+visibility; filtering, saved views and export in `model.ts`). A table gives you, without page code:
+
+- **Sort**: click a header (first click: biggest / newest first for numbers and dates, A to Z for text; again: the other way;
+  again: off); shift-click adds a column to the sort. Sorting uses the column's **underlying value**, never the text it shows, so
+  "47 / 60", "812 MB", "5 min ago" and "42%" sort as numbers and times. Missing values sort last in both directions.
+- **Find**: a search box over the visible columns (every word must match, from 6 rows up), a filter button per column (a checklist
+  for enum / boolean columns, a min and max for numbers, "last hour / 24 hours / 7 / 30 days" for dates, "contains" for text),
+  chips for the active filters, and "12 of 340 rows".
+- **Columns**: a Columns picker on every table (checkboxes, Reset columns), draggable widths (arrow keys too, double-click resets),
+  a sticky header, horizontal scroll inside the table (never the page), pages of 25 to 500 rows.
+- **Copy and export**: a row menu (Copy row as JSON, Copy cell), and Export: Download CSV or Copy as CSV or JSON of the current
+  filtered and sorted view (visible columns, underlying values, formula-safe), Copy link to this view.
+- **Remembered**: sort, search, filters, hidden columns and widths are kept per table id in localStorage, and written to the URL
+  (`fleet-servers.sort=-players,job`, `fleet-servers.f.health=set:ok,failing`, `fleet-servers.cols=-kernel,+channel`). A link with a
+  table's parameters wins over the saved view. Both are optional: without storage or a router the table still works.
+
+```tsx
+const COLUMNS: DataColumn<Server>[] = [
+	{ id: "job", header: "Job", accessor: (s) => s.job, cell: (s) => shortId(s.job) },
+	// Shown as "47 / 60", sorted and filtered by 47:
+	{ id: "players", header: "Players", accessor: (s) => s.players, cell: (s) => `${s.players} / ${s.max}` },
+	// Memory in MB with a unit hint; null sorts last:
+	{ id: "memory", header: "Memory", hint: "MB", accessor: (s) => s.memoryMb, cell: (s) => `${s.memoryMb} MB` },
+	{ id: "health", header: "Health", type: "enum", order: ["ok", "degraded", "failing"], accessor: (s) => s.health },
+	{ id: "seen", header: "Seen", type: "date", accessor: (s) => s.lastSeen, cell: (s) => fmtAgo(s.lastSeen) },
+	{ id: "channel", header: "Channel", type: "enum", accessor: (s) => s.channel, defaultHidden: true },
+];
+
+<DataTable id="fleet-servers" label="Live servers" columns={COLUMNS} data={servers} rowId={(s) => s.job}
+	defaultSort={[{ id: "players", desc: true }]} onRowClick={open} empty={<EmptyState>No servers.</EmptyState>} />
+```
+
+`accessor` is the value (number for numbers, epoch ms / ISO string / Date for dates, `null` for none); `cell` is what shows. Other column
+options: `type` (`text` `number` `date` `enum` `boolean`, guessed from the values when left out), `format` (plain text of the cell, for
+search and filter labels), `searchText`, `filter` (`false` or a kind), `options` and `order` (enums), `firstSort`, `sortable`,
+`hideable`, `defaultHidden`, `searchable`, `align`, `minWidth`, `className`, `hint`, `title`, `exportValue`. Table props: `id` (unique
+in the app), `columns` and `data` (define the column array outside the component or in `useMemo`), `label`, `rowId`, `loading`, `empty`,
+`defaultSort`, `pageSize`, `maxHeight`, `search`, `toolbar`, `onRowClick`, `isRowSelected`, `rowClassName`, `pinnedRows` (a total row
+outside sorting and filtering), `rowJson`, `rowMenu`, `persist`, `urlSync`, `density`. Event rows have `EventTable`; SQL results build
+their columns from DuckDB's types (`sqlColumns` in `pages/Query.tsx`).
+
 ## Development
 
 ```sh
-bun run test        # vitest: API client, graph adapter, filters, proxy guard, a component test
+bun run test        # vitest: API client, graph adapter, filters, proxy guard, the table (sorting, filters, saved view), page tests
 bun run typecheck
 bun run build       # dist/ (pages, charts and the graph view load on demand)
 ```

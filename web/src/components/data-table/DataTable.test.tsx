@@ -257,6 +257,26 @@ describe("DataTable remembers the view", () => {
 		await waitFor(() => expect(screen.getByTestId("search").textContent).toBe("?range=7d&servers.sort=-players"));
 	});
 
+	it("puts a view restored from localStorage into the URL, so the address shows what is on screen", async () => {
+		localStorage.setItem(`${STORAGE_PREFIX}servers`, JSON.stringify({ sort: [{ id: "players", desc: true }], filters: { health: { kind: "set", values: ["ok"] } } }));
+		mount();
+		expect(jobs()).toEqual(["job-10", "job-3"]);
+		await waitFor(() => expect(screen.getByTestId("search").textContent).toBe("?servers.sort=-players&servers.f.health=set%3Aok"));
+	});
+
+	it("keeps every table's parameters when several tables restore their views at once", async () => {
+		localStorage.setItem(`${STORAGE_PREFIX}first`, JSON.stringify({ sort: [{ id: "job", desc: true }] }));
+		localStorage.setItem(`${STORAGE_PREFIX}second`, JSON.stringify({ sort: [{ id: "players", desc: false }] }));
+		render(
+			<MemoryRouter initialEntries={["/fleet?range=7d"]}>
+				<DataTable<Server> id="first" columns={columns} data={servers} />
+				<DataTable<Server> id="second" columns={columns} data={servers} />
+				<Probe />
+			</MemoryRouter>,
+		);
+		await waitFor(() => expect(screen.getByTestId("search").textContent).toBe("?range=7d&first.sort=-job&second.sort=players"));
+	});
+
 	it("does not write to the URL when the table is left right after a change", async () => {
 		const view = mount();
 		fireEvent.click(header("Players"));
