@@ -67,22 +67,34 @@ export function clientIp(req: Request, peer: string, trust: boolean | number | P
 	return ip;
 }
 
-/** Token buckets per key: `perMinute` requests, refilled continuously. Idle keys are dropped. */
+/**
+ * Token buckets per key: `perMinute` requests, refilled continuously. Idle keys are dropped. `perMinute` may be a function
+ * (a runtime setting): it is read on every request, so a change applies to the next one.
+ */
 export class RateLimiter {
 	private buckets = new Map<string, { tokens: number; at: number }>();
 	private sweeps = 0;
+	private readonly limit: () => number;
 
 	constructor(
-		readonly perMinute: number,
+		perMinute: number | (() => number),
 		private readonly clock: () => number = Date.now,
-	) {}
+	) {
+		this.limit = typeof perMinute === "function" ? perMinute : () => perMinute;
+	}
+
+	/** The current limit. */
+	get perMinute(): number {
+		return this.limit();
+	}
 
 	/** True when the request may go ahead; false = 429. */
 	take(key: string, cost = 1): boolean {
 		const now = this.clock();
 		if (++this.sweeps % 10_000 === 0) this.sweep(now);
-		const bucket = this.buckets.get(key) ?? { tokens: this.perMinute, at: now };
-		bucket.tokens = Math.min(this.perMinute, bucket.tokens + (Math.max(0, now - bucket.at) / 60_000) * this.perMinute);
+		const perMinute = this.limit();
+		const bucket = this.buckets.get(key) ?? { tokens: perMinute, at: now };
+		bucket.tokens = Math.min(perMinute, bucket.tokens + (Math.max(0, now - bucket.at) / 60_000) * perMinute);
 		bucket.at = Math.max(bucket.at, now);
 		this.buckets.set(key, bucket);
 		if (bucket.tokens < cost) return false;

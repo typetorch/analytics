@@ -125,6 +125,10 @@ export interface ServerConfig {
 	alertWebhookLevels: Set<"critical" | "warning" | "info">;
 	/** Never-seen JobIds the fleet API accepts per minute (429 and one fleet_flood alert past it). */
 	fleetNewJobsPerMinute: number;
+	/** TYPETORCH_RUNTIME_SETTINGS (default on): values saved from the explorer's Settings page override the env; off = ignored. */
+	runtimeSettings: boolean;
+	/** Names (never values) of the variables that were set, so the Settings page can say "env" vs "default". */
+	envSet: ReadonlySet<string>;
 	/** One line per old variable name that was read: "OLD is deprecated: use NEW". Never holds a value. */
 	warnings: string[];
 }
@@ -173,6 +177,17 @@ function secret(env: Record<string, string | undefined>, name: string, required:
 	}
 	if (raw.length < MIN_SECRET_LENGTH) throw new Error(`${name} must be at least ${MIN_SECRET_LENGTH} characters (use a random value, e.g. openssl rand -hex 32)`);
 	return raw;
+}
+
+/** An https URL that parses (the alert webhook; the value is never put in an error). */
+export function isHttpsUrl(value: string): boolean {
+	if (value.length > 2048 || /[\s\x00-\x1f\x7f]/.test(value)) return false;
+	try {
+		const u = new URL(value);
+		return u.protocol === "https:" && u.hostname !== "";
+	} catch {
+		return false;
+	}
 }
 
 /** Reads the config. `realEnv` defaults to process.env; an env file (if any) sits under it. */
@@ -224,6 +239,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	for (const p of parts) if (p !== "analytics" && p !== "fleet") throw new Error('TYPETORCH_PARTS lists "analytics" and/or "fleet"');
 	if (parts.size === 0) throw new Error("TYPETORCH_PARTS is empty");
 	const universe = env.TYPETORCH_UNIVERSE_ID;
+	if (env.TYPETORCH_ALERT_WEBHOOK_URL && !isHttpsUrl(env.TYPETORCH_ALERT_WEBHOOK_URL)) throw new Error("TYPETORCH_ALERT_WEBHOOK_URL must be an https:// URL");
 	const format = env.TYPETORCH_ALERT_WEBHOOK_FORMAT;
 	if (format && !["discord", "slack", "json"].includes(format)) throw new Error("TYPETORCH_ALERT_WEBHOOK_FORMAT is discord, slack or json");
 	const levels = new Set(
@@ -341,6 +357,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		fleetDb: resolve(env.TYPETORCH_SQLITE ?? resolve(dataDir, "fleet.sqlite")),
 		alertWebhookLevels: levels,
 		fleetNewJobsPerMinute: num(env, "TYPETORCH_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),
+		runtimeSettings: flag(env, "TYPETORCH_RUNTIME_SETTINGS", true),
+		envSet: new Set(Object.keys(env).filter((name) => env[name] !== undefined && env[name] !== "")),
 		warnings,
 	};
 	if (adminAllowIps) config.adminAllowIps = adminAllowIps;

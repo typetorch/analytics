@@ -322,7 +322,8 @@ describe("roles", () => {
 		expect(await (await h.call("/healthz", { headers: bearer(API) })).json()).toEqual({ ok: true });
 		const detail = await asJson(await h.call("/healthz", { headers: bearer(ADMIN) }));
 		expect(detail).toMatchObject({ ok: true });
-		expect(detail.bus.subscribers.map((s: { name: string }) => s.name).sort()).toEqual(["duckdb-writer", "error-store", "fleet-store", "live"]);
+		// The alert notifier is subscribed even without a webhook, so one saved on the Settings page works at once.
+		expect(detail.bus.subscribers.map((s: { name: string }) => s.name).sort()).toEqual(["alert-notifier", "duckdb-writer", "error-store", "fleet-store", "live"]);
 		expect(detail.errors).toBeDefined();
 	});
 });

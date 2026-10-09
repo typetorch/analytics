@@ -49,11 +49,19 @@ export class NewJobLimiter implements NewJobGate {
 	private window = -1;
 	private readonly admitted = new Set<string>();
 	private refusedInWindow = 0;
+	private readonly limit: () => number;
 
+	/** `perMinute` may be a function (a runtime setting): read on every call. */
 	constructor(
-		readonly perMinute: number = FLEET_NEW_JOBS_PER_MINUTE,
+		perMinute: number | (() => number) = FLEET_NEW_JOBS_PER_MINUTE,
 		private readonly clock: () => number = Date.now,
-	) {}
+	) {
+		this.limit = typeof perMinute === "function" ? perMinute : () => perMinute;
+	}
+
+	get perMinute(): number {
+		return this.limit();
+	}
 
 	take(job: string): "ok" | "refused" | "flood" {
 		const window = Math.floor(this.clock() / (this.windowSeconds * 1000));

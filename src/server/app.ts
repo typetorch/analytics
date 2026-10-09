@@ -21,6 +21,9 @@
  *   GET  /v1/fleet/servers | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
  *   GET  /v1/access, PUT /v1/access { seq, owners } (admin token only): the owners who may sign in with Roblox
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
+ *   GET  /v1/admin/settings         runtime settings (server/runtime-settings.ts): values, sources, bounds, audit; secrets as set/not set
+ *   PATCH /v1/admin/settings        { key: value | null } (null = back to the environment), applied at once; lockout guards
+ *   POST /v1/admin/settings/test-alert   one test alert through the current webhook (3 a minute)
  *
  *   open
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
@@ -44,7 +47,7 @@ import { openSqlite } from "../fleet/db.ts";
 import { IdentityStore, parseIdentities, parseUid, PID_PATTERN } from "../fleet/identity.ts";
 import { FLEET_LIMITS, handleFleet, NewJobLimiter } from "../fleet/http.ts";
 import { createNotifier, type Notifier } from "../fleet/notify.ts";
-import { FleetService } from "../fleet/service.ts";
+import { FleetService, type Alert } from "../fleet/service.ts";
 import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
 import { runtimeName, serve, type Served } from "../runtime.ts";
 import { validateSettings } from "../settings.ts";
@@ -59,6 +62,7 @@ import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
+import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
 import { StaticSite } from "./static.ts";
 import { measureStorage, type StorageReport } from "./storage.ts";
@@ -79,7 +83,10 @@ export interface App {
 	readonly port: number;
 	readonly warehouse?: Warehouse;
 	readonly fleet?: FleetService;
-	readonly notifier?: Notifier;
+	/** The alert webhook sender (always there; it skips alerts while no webhook URL is set). */
+	readonly notifier: Notifier;
+	/** The runtime settings (the explorer's Settings page): current values over the environment's. */
+	readonly settings: RuntimeSettings;
 	readonly bus: BackendBus;
 	readonly errors: ErrorStore;
 	readonly access: AccessStore;
@@ -108,10 +115,15 @@ const ERROR_SENDER_TTL_MS = 3_600_000;
 const ERROR_SENDERS_MAX = 50_000;
 /** Wrong API keys per address inside the login window before wrong keys get 429. */
 const GAME_KEY_MAX_FAILURES = 30;
+/** Test alerts from the Settings page per minute (they reach a third-party webhook). */
+const TEST_ALERTS_PER_MINUTE = 3;
 
 export async function startApp(config: ServerConfig, options: AppOptions = {}): Promise<App> {
 	const clock = options.clock ?? Date.now;
 	const log = options.log ?? ((line: string) => console.log(`[backend] ${line}`));
+
+	// Runtime settings: the environment's values unless the Settings page saved others. Read live everywhere below.
+	const runtime = RuntimeSettings.fromConfig(config, { clock, log });
 
 	// One bus for the whole process. Stores that answer for their data are awaited subscribers; the rest are queued.
 	const bus: BackendBus = new EventBus<BackendTopics>({ maxQueue: config.busMaxQueue, maxBytes: config.busMaxBytes, log });
@@ -121,8 +133,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				dataDir: config.dataDir,
 				memoryLimit: config.memoryLimit,
 				threads: config.threads,
-				keepDays: config.keepDays,
-				rawKeepDays: config.rawKeepDays,
+				keepDays: () => runtime.get("keepDays"),
+				rawKeepDays: () => runtime.get("rawKeepDays"),
 				compactMb: config.compactMb,
 				queryTimeoutSeconds: config.queryTimeoutSeconds,
 				queryConcurrency: config.queryConcurrency,
@@ -131,13 +143,27 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				log,
 			})
 		: undefined;
-	const notifier = config.alertWebhookUrl
-		? createNotifier({ url: config.alertWebhookUrl, ...(config.alertWebhookFormat ? { format: config.alertWebhookFormat } : {}), levels: config.alertWebhookLevels, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}) })
-		: undefined;
+	// The alert webhook: URL, format and levels are read for every alert, so a saved change applies to the next one.
+	const notifier = createNotifier({
+		url: () => runtime.get("alertWebhookUrl") || undefined,
+		format: () => {
+			const format = runtime.get("alertWebhookFormat");
+			return format === "auto" ? undefined : format;
+		},
+		levels: () => new Set(runtime.get("alertWebhookLevels")),
+		clock,
+		log,
+		...(options.fetch ? { fetch: options.fetch } : {}),
+	});
 	// One SQLite file for the fleet tables, pid <-> UserId and the error logs.
 	const sqlite = await openSqlite(config.fleetDb);
 	const identities = await IdentityStore.open(sqlite);
-	const errors = await ErrorStore.open(sqlite, { clock, keepDays: config.errorKeepDays, maxKinds: config.errorMaxKinds, rowsPerDay: config.errorRowsPerDay });
+	const errors = await ErrorStore.open(sqlite, {
+		clock,
+		keepDays: () => runtime.get("errorKeepDays"),
+		maxKinds: () => runtime.get("errorMaxKinds"),
+		rowsPerDay: () => runtime.get("errorRowsPerDay"),
+	});
 	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
 
@@ -156,8 +182,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	}
 	if (fleet) bus.subscribe("fleet-store", ["heartbeat", "deploy"], (_topic, m) => fleet.apply(m), { mode: "await" });
 	bus.subscribe("error-store", ["error"], async (_topic, m) => void (await errors.record(m, { ip: m.ip ?? "" })), { mode: "await" });
-	// The webhook is slow and remote: queued, so a stuck Discord never holds a heartbeat up.
-	if (notifier) bus.subscribe("alert-notifier", ["alert"], (_topic, alert) => notifier.notify(alert), { mode: "queue", maxQueue: 200 });
+	// The webhook is slow and remote: queued, so a stuck Discord never holds a heartbeat up. Always subscribed: the
+	// notifier skips alerts while no webhook is set, and one saved on the Settings page applies at once.
+	bus.subscribe("alert-notifier", ["alert"], (_topic, alert) => notifier.notify(alert), { mode: "queue", maxQueue: 200 });
 	const live = new LiveHub(bus, { maxClients: config.liveMaxClients, clock });
 	live.start();
 
@@ -176,17 +203,22 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		? new RobloxOAuth({ clientId: config.robloxOAuth.clientId, clientSecret: config.robloxOAuth.clientSecret, redirectUri: `${config.publicUrl}/v1/auth/roblox/callback`, clock, ...(options.fetch ? { fetch: options.fetch } : {}) })
 		: undefined;
 	const site = config.webDir ? new StaticSite(config.webDir) : undefined;
-	const adminIpOk = (ip: string) => !config.adminAllowIps || ipAllowed(config.adminAllowIps, ip);
+	// The allow list is a runtime setting: read on every request.
+	const adminIpOk = (ip: string) => {
+		const rules = runtime.adminAllowRules();
+		return !rules || ipAllowed(rules, ip);
+	};
 
-	const ipLimiter = new RateLimiter(config.ipPerMinute, clock);
-	const jobLimiter = new RateLimiter(config.jobPerMinute, clock);
+	const ipLimiter = new RateLimiter(() => runtime.get("ipPerMinute"), clock);
+	const jobLimiter = new RateLimiter(() => runtime.get("jobPerMinute"), clock);
 	const errorJobLimiter = new RateLimiter(ERROR_JOB_PER_MINUTE, clock);
-	const errorIpLimiter = new RateLimiter(config.errorsIpPerMinute, clock);
+	const errorIpLimiter = new RateLimiter(() => runtime.get("errorsIpPerMinute"), clock);
 	// Never-seen error senders (JobIds) per minute, like the fleet's gate (its own count, so one can't starve the other).
-	const newErrorJobs = new NewJobLimiter(config.fleetNewJobsPerMinute, clock);
+	const newErrorJobs = new NewJobLimiter(() => runtime.get("fleetNewJobsPerMinute"), clock);
 	const errorSenders = new Map<string, number>();
 	const fleetLimiters = Object.fromEntries(Object.entries(FLEET_LIMITS).map(([k, n]) => [k, new RateLimiter(n, clock)])) as Record<keyof typeof FLEET_LIMITS, RateLimiter>;
-	const newFleetJobs = new NewJobLimiter(config.fleetNewJobsPerMinute, clock);
+	const newFleetJobs = new NewJobLimiter(() => runtime.get("fleetNewJobsPerMinute"), clock);
+	const testAlertLimiter = new RateLimiter(TEST_ALERTS_PER_MINUTE, clock);
 	const keepOpen = new WeakMap<Request, () => void>();
 
 	let settingsCache: { mtime: number; value: Record<string, unknown> } | undefined;
@@ -619,7 +651,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				live: await warehouse.liveRows(),
 			};
 		}
-		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier ? { webhook: notifier.stats } : {}) };
+		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier.configured ? { webhook: notifier.stats } : {}) };
 		// The bus: per subscriber what was handled, what is waiting and what was dropped (full queue).
 		out.bus = bus.stats();
 		out.live = live.stats;
@@ -630,7 +662,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// Auth routes -------------------------------------------------------------------------------------------------------
 
-	const loginOptions = () => ({ token: config.tokenLogin, roblox: Boolean(oauth) });
+	const loginOptions = () => ({ token: runtime.get("tokenLogin"), roblox: Boolean(oauth) });
 	const secureCookie = (req: Request) => isHttps(req, proxyOpts);
 	const notFound = () => json(404, { error: "not found" });
 	const blockedResponse = (ip: string): Response | undefined => {
@@ -680,7 +712,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	async function login(req: Request, ip: string): Promise<Response> {
 		if (!adminIpOk(ip)) return notFound();
-		if (!config.tokenLogin) return json(404, { error: "token login is off on this server" });
+		if (!runtime.get("tokenLogin")) return json(404, { error: "token login is off on this server" });
 		const blocked = blockedResponse(ip);
 		if (blocked) return blocked;
 		const problem = cookieMutationProblem(req, proxyOpts);
@@ -781,6 +813,84 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 	}
 
+	// Runtime settings (the explorer's Settings page) -------------------------------------------------------------------
+
+	/** Who is changing settings, for the audit list and the log: never a token; a Roblox name made safe. */
+	function actorOf(principal: Principal & { role: "admin" }): SettingsActor {
+		if (principal.via === "bearer") return { who: "admin token", via: "bearer" };
+		if (principal.user.kind === "roblox") {
+			const name = principal.user.name.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 32);
+			return { who: `roblox user ${principal.user.userId}${name ? ` (${name})` : ""}`, via: "session" };
+		}
+		return { who: "admin token", via: "session" };
+	}
+	const isRobloxSession = (p: Principal & { role: "admin" }) => p.via === "cookie" && p.user.kind === "roblox";
+
+	/** GET /v1/admin/settings: every editable setting (secrets as set / not set), the env-only names, the audit list. */
+	function settingsView(ip: string, principal: Principal & { role: "admin" }): Record<string, unknown> {
+		return {
+			enabled: runtime.enabled,
+			settings: runtime.view(),
+			envOnly: [...ENV_ONLY],
+			audit: runtime.audit(),
+			// For the page's guards: the caller's address as this server sees it, and whether Roblox sign-in is usable.
+			you: { ip, roblox: isRobloxSession(principal) },
+			robloxSignIn: Boolean(oauth),
+		};
+	}
+
+	/** PATCH /v1/admin/settings { key: value | null }: checked, guarded, saved, applied at once. */
+	async function patchSettings(req: Request, ip: string, principal: Principal & { role: "admin" }): Promise<Response> {
+		if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON: { key: value, ... }" });
+		const raw = await readCapped(req, SETTINGS_BODY_MAX);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: unknown;
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8"));
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		try {
+			const result = runtime.patch(body, { ...actorOf(principal), ip, robloxSession: isRobloxSession(principal), robloxSignIn: Boolean(oauth) });
+			// The token login turned off: browser sessions made with the token end too (the caller's is a Roblox session).
+			const sessionsEnded = result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0;
+			return json(200, { ...settingsView(ip, principal), changed: result.changed, ...(sessionsEnded ? { sessionsEnded } : {}) });
+		} catch (error) {
+			if (error instanceof SettingsError) return json(error.status, { error: error.message, ...(error.key ? { key: error.key } : {}), ...(error.guard ? { guard: error.guard } : {}) });
+			throw error;
+		}
+	}
+
+	/** POST /v1/admin/settings/test-alert: one info alert through the current webhook. Answers a status, never the URL. */
+	async function testAlert(principal: Principal & { role: "admin" }): Promise<Response> {
+		if (!testAlertLimiter.take("test-alert")) return tooMany(testAlertLimiter.retryAfter("test-alert"));
+		if (!notifier.configured) return json(409, { ok: false, error: "no alert webhook is set: save one first" });
+		const actor = actorOf(principal);
+		const at = clock();
+		const alert: Alert = {
+			id: 0,
+			level: "info",
+			code: "test_alert",
+			message: "Test alert from the TypeTorch backend's Settings page: the webhook works.",
+			job: null,
+			branch: null,
+			artifact: null,
+			seq: null,
+			generation: null,
+			kernel: null,
+			source: "server",
+			details: null,
+			createdAt: new Date(at).toISOString(),
+			at,
+			acked: false,
+			ackedAt: null,
+			ackedBy: null,
+		};
+		const result = await notifier.test(alert);
+		runtime.recordTest(actor, result.ok ? `sent (HTTP ${result.status})` : `failed: ${result.error}`);
+		return json(result.ok ? 200 : 502, result);
+	}
+
 	// Routing -----------------------------------------------------------------------------------------------------------
 
 	/** The admin gate: allow list, failure limit, credentials, and the cookie's extra checks. Returns the principal or the answer. */
@@ -859,7 +969,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (path === "/v1/storage" && method === "GET") return json(200, await storage());
 			if (path === "/v1/identity" && method === "GET") return getIdentity(url);
 			if (path === "/v1/identity/backfill") return method === "POST" ? backfill(req) : json(405, { error: "POST only" });
-			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: config.errorKeepDays });
+			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays") });
+			if (path === "/v1/admin/settings") {
+				if (method === "GET") return json(200, settingsView(ip, gate.principal));
+				if (method === "PATCH") return patchSettings(req, ip, gate.principal);
+				return json(405, { error: "GET or PATCH only" });
+			}
+			if (path === "/v1/admin/settings/test-alert") return method === "POST" ? testAlert(gate.principal) : json(405, { error: "POST only" });
 			if (path === "/v1/live" && method === "GET") return live.connect(req, url, () => keepOpen.get(req)?.());
 			if (path === "/v1/access") {
 				if (method === "GET") return json(200, access.get());
@@ -957,7 +1073,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		port: served.port,
 		...(warehouse ? { warehouse } : {}),
 		...(fleet ? { fleet } : {}),
-		...(notifier ? { notifier } : {}),
+		notifier,
+		settings: runtime,
 		bus,
 		errors,
 		access,
@@ -977,7 +1094,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				await warehouse.load().catch(() => {});
 				await warehouse.close();
 			}
-			await notifier?.flush();
+			await notifier.flush();
 			if (fleet) await fleet.close();
 			else await sqlite.close();
 		},

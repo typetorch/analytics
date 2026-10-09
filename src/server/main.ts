@@ -18,7 +18,10 @@ async function main(): Promise<void> {
 	const config = loadConfig();
 	for (const warning of config.warnings) console.warn(`[backend] ${warning}`);
 	const app = await startApp(config);
-	console.log(`[backend] listening on ${config.host}:${app.port} (${runtimeName()}); ${describeConfig(config)}`);
+	// The environment's view, then (names only) what the explorer's Settings page saved over it.
+	const saved = app.settings.overridden();
+	const overrides = saved.length ? `; saved on the Settings page (these win over the environment): ${saved.join(", ")}` : "";
+	console.log(`[backend] listening on ${config.host}:${app.port} (${runtimeName()}); ${describeConfig(config)}${overrides}`);
 	let stopping = false;
 	const stop = async (signal: string) => {
 		if (stopping) return;

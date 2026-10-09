@@ -178,25 +178,33 @@ class HourQuota {
 	}
 }
 
+/** A number, or a function read on every use (a runtime setting from the explorer's Settings page). */
+export type LiveNumber = number | (() => number);
+
 export interface ErrorStoreOptions {
 	clock: () => number;
-	keepDays: number;
-	maxKinds: number;
-	rowsPerDay: number;
+	keepDays: LiveNumber;
+	maxKinds: LiveNumber;
+	rowsPerDay: LiveNumber;
 	newKindsPerJobHour: number;
 	newKindsPerIpHour: number;
 	maxQueue: number;
 }
 
+const live = (value: LiveNumber): (() => number) => (typeof value === "function" ? value : () => value);
+
 const yieldTurn = () => new Promise<void>((done) => setImmediate(done));
 
 export class ErrorStore {
 	private kindCount = 0;
-	readonly stats: ErrorStats = { kinds: 0, batches: 0, items: 0, occurrences: 0, droppedKinds: 0, droppedQuota: 0, droppedRows: 0, rowsToday: 0, rowsPerDay: 0, queued: 0, refusedFull: 0 };
+	private readonly counters: ErrorStats = { kinds: 0, batches: 0, items: 0, occurrences: 0, droppedKinds: 0, droppedQuota: 0, droppedRows: 0, rowsToday: 0, rowsPerDay: 0, queued: 0, refusedFull: 0 };
 	private lastPrune = 0;
 	private rowDay = -1;
 	private readonly jobQuota: HourQuota;
 	private readonly ipQuota: HourQuota;
+	private readonly keepDays: () => number;
+	private readonly maxKinds: () => number;
+	private readonly rowsPerDay: () => number;
 	/** Batches are stored one at a time, each in one transaction, with a turn of the event loop between them. */
 	private chain: Promise<void> = Promise.resolve();
 	private waiting = 0;
@@ -207,7 +215,15 @@ export class ErrorStore {
 	) {
 		this.jobQuota = new HourQuota(options.newKindsPerJobHour, options.clock);
 		this.ipQuota = new HourQuota(options.newKindsPerIpHour, options.clock);
-		this.stats.rowsPerDay = options.rowsPerDay;
+		this.keepDays = live(options.keepDays);
+		this.maxKinds = live(options.maxKinds);
+		this.rowsPerDay = live(options.rowsPerDay);
+	}
+
+	/** Counters for /healthz (rowsPerDay is the current budget). */
+	get stats(): ErrorStats {
+		this.counters.rowsPerDay = this.rowsPerDay();
+		return this.counters;
 	}
 
 	static async open(db: FleetDb, options: Partial<ErrorStoreOptions> = {}): Promise<ErrorStore> {
@@ -225,7 +241,7 @@ export class ErrorStore {
 			maxQueue: options.maxQueue ?? ERROR_QUEUE_MAX,
 		});
 		store.kindCount = Number((await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM error_kinds"))?.n ?? 0);
-		store.stats.kinds = store.kindCount;
+		store.counters.kinds = store.kindCount;
 		return store;
 	}
 
@@ -240,18 +256,18 @@ export class ErrorStore {
 	 */
 	async record(batch: ErrorBatch, sender: { ip?: string } = {}): Promise<{ stored: number; droppedKinds: number }> {
 		if (this.full) {
-			this.stats.refusedFull++;
+			this.counters.refusedFull++;
 			throw new ErrorQueueFull("the error store is busy");
 		}
 		this.waiting++;
-		this.stats.queued = this.waiting;
+		this.counters.queued = this.waiting;
 		const run = this.chain.then(() => this.store(batch, sender.ip ?? ""));
 		this.chain = run.then(yieldTurn, yieldTurn);
 		try {
 			return await run;
 		} finally {
 			this.waiting--;
-			this.stats.queued = this.waiting;
+			this.counters.queued = this.waiting;
 		}
 	}
 
@@ -260,9 +276,9 @@ export class ErrorStore {
 		const day = Math.floor(this.options.clock() / DAY);
 		if (day !== this.rowDay) {
 			this.rowDay = day;
-			this.stats.rowsToday = 0;
+			this.counters.rowsToday = 0;
 		}
-		return this.options.rowsPerDay - this.stats.rowsToday;
+		return this.rowsPerDay() - this.counters.rowsToday;
 	}
 
 	private async store(batch: ErrorBatch, ip: string): Promise<{ stored: number; droppedKinds: number }> {
@@ -275,8 +291,8 @@ export class ErrorStore {
 			}
 			return { stored, droppedKinds };
 		});
-		this.stats.batches++;
-		this.stats.items += result.stored;
+		this.counters.batches++;
+		this.counters.items += result.stored;
 		return result;
 	}
 
@@ -285,13 +301,13 @@ export class ErrorStore {
 		const branch = item.branch ?? "";
 		const build = item.build ?? "";
 		if (!existing) {
-			if (this.kindCount >= this.options.maxKinds) {
-				this.stats.droppedKinds++;
+			if (this.kindCount >= this.maxKinds()) {
+				this.counters.droppedKinds++;
 				return false;
 			}
 			// One sender can't fill the kind table: a few new kinds an hour per JobId and per address.
 			if (this.jobQuota.left(job) <= 0 || this.ipQuota.left(ip) <= 0) {
-				this.stats.droppedQuota++;
+				this.counters.droppedQuota++;
 				return false;
 			}
 			tx.run(
@@ -301,7 +317,7 @@ export class ErrorStore {
 			this.jobQuota.use(job);
 			this.ipQuota.use(ip);
 			this.kindCount++;
-			this.stats.kinds = this.kindCount;
+			this.counters.kinds = this.kindCount;
 		} else {
 			const newest = item.lastAt >= existing.last_at;
 			// The sample follows the newest report (the stack only when the item has one), so text that one key holder sent
@@ -323,17 +339,17 @@ export class ErrorStore {
 			}
 			tx.run(`UPDATE error_kinds SET ${sets.join(", ")} WHERE fp = ?`, [...params, item.fp]);
 		}
-		this.stats.occurrences += item.count;
+		this.counters.occurrences += item.count;
 		// New rows count against the day's budget; adding to a row that exists is free.
 		for (const { minute, n } of spreadCount(item.count, item.firstAt, item.lastAt)) {
 			const key: SqlValue[] = [item.fp, minute, branch, build, item.realm];
 			if (tx.run("UPDATE error_counts SET n = n + ? WHERE fp = ? AND minute = ? AND branch = ? AND build = ? AND realm = ?", [n, ...key]).changes) continue;
 			if (this.rowRoom() <= 0) {
-				this.stats.droppedRows++;
+				this.counters.droppedRows++;
 				continue;
 			}
 			tx.run("INSERT INTO error_counts (fp, minute, branch, build, realm, n) VALUES (?, ?, ?, ?, ?, ?)", [...key, n]);
-			this.stats.rowsToday++;
+			this.counters.rowsToday++;
 		}
 		if (item.pids.length) {
 			const day = Math.floor(item.lastAt / DAY);
@@ -342,12 +358,12 @@ export class ErrorStore {
 			for (const pid of item.pids) {
 				if (room <= 0) break;
 				if (this.rowRoom() <= 0) {
-					this.stats.droppedRows++;
+					this.counters.droppedRows++;
 					break;
 				}
 				const { changes } = tx.run("INSERT OR IGNORE INTO error_pids (fp, day, realm, branch, build, pid) VALUES (?, ?, ?, ?, ?, ?)", [item.fp, day, item.realm, branch, build, pid]);
 				room -= changes;
-				this.stats.rowsToday += changes;
+				this.counters.rowsToday += changes;
 			}
 		}
 		return true;
@@ -358,7 +374,7 @@ export class ErrorStore {
 		const now = this.options.clock();
 		if (now - this.lastPrune < 3_600_000) return 0;
 		this.lastPrune = now;
-		const cutoff = now - this.options.keepDays * DAY;
+		const cutoff = now - this.keepDays() * DAY;
 		let removed = 0;
 		removed += (await this.db.run("DELETE FROM error_counts WHERE minute < ?", [Math.floor(cutoff / MINUTE)])).changes;
 		removed += (await this.db.run("DELETE FROM error_pids WHERE day < ?", [Math.floor(cutoff / DAY)])).changes;
@@ -366,7 +382,7 @@ export class ErrorStore {
 		removed += gone;
 		if (gone) {
 			this.kindCount = Number((await this.db.first<{ n: number }>("SELECT COUNT(*) AS n FROM error_kinds"))?.n ?? 0);
-			this.stats.kinds = this.kindCount;
+			this.counters.kinds = this.kindCount;
 		}
 		return removed;
 	}

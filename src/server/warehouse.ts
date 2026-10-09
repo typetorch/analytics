@@ -80,8 +80,9 @@ export interface WarehouseOptions {
 	dataDir: string;
 	memoryLimit: string;
 	threads: number;
-	keepDays: number;
-	rawKeepDays: number;
+	/** Days of day files and of raw archives kept (0 = forever); a function is read at every prune (a runtime setting). */
+	keepDays: number | (() => number);
+	rawKeepDays: number | (() => number);
 	compactMb: number;
 	queryTimeoutSeconds: number;
 	queryConcurrency: number;
@@ -387,22 +388,25 @@ export class Warehouse {
 	/** Deletes day files older than keepDays and raw archives older than rawKeepDays. Returns files removed. */
 	private prune(now: number): number {
 		const today = Math.floor(now / DAY_MS);
+		const read = (v: number | (() => number)) => (typeof v === "function" ? v() : v);
+		const keepDays = read(this.options.keepDays);
+		const rawKeepDays = read(this.options.rawKeepDays);
 		let removed = 0;
-		if (this.options.keepDays > 0) {
+		if (keepDays > 0) {
 			const dirs = [this.layout.events, this.layout.recordings, ...["daily", "player_days", "edges"].map((d) => join(this.layout.rollups, d))];
 			for (const dir of dirs) {
 				for (const file of dayFiles(dir)) {
-					if (file.day < today - this.options.keepDays) {
+					if (file.day < today - keepDays) {
 						unlinkSync(file.path);
 						removed++;
 					}
 				}
 			}
 		}
-		if (this.options.rawKeepDays > 0 && existsSync(this.layout.rawArchive)) {
+		if (rawKeepDays > 0 && existsSync(this.layout.rawArchive)) {
 			for (const name of readdirSync(this.layout.rawArchive)) {
 				const day = Math.floor(Date.parse(`${name}T00:00:00Z`) / DAY_MS);
-				if (Number.isFinite(day) && day < today - this.options.rawKeepDays) {
+				if (Number.isFinite(day) && day < today - rawKeepDays) {
 					rmSync(join(this.layout.rawArchive, name), { recursive: true, force: true });
 					removed++;
 				}
