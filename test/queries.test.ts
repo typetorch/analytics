@@ -465,6 +465,84 @@ describe("explorer lookups", () => {
 	});
 });
 
+describe("player stats (the Players page's player detail)", () => {
+	const range = (from: number, to: number) => fx.events.filter((e) => e.t >= from && e.t < to);
+	const payer = [...new Set(inRange(30).filter((e) => e.kind === "purchase").map((e) => e.pid as string))].sort()[0];
+	const median = (values: number[]) => {
+		const v = [...values].sort((a, b) => a - b);
+		const mid = Math.floor(v.length / 2);
+		return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+	};
+
+	test("totals, sessions and purchases match a reference computation; the daily series is dense and adds up", async () => {
+		expect(payer).toBeDefined();
+		const r = await store.query("player-stats", {}, { pid: payer });
+		const rows = range(NOW - 30 * DAY, NOW).filter((e) => e.pid === payer);
+		const s = [...sessions(rows).values()];
+		const lengths = s.map((x) => x.t1 - x.t0);
+		const buys = rows.filter((e) => e.kind === "purchase");
+		const robux = buys.reduce((sum, e) => sum + (JSON.parse(e.props as string) as { robux: number }).robux, 0);
+		expect(r.pid).toBe(payer);
+		expect(r.window).toMatchObject({ bucket: "day", clamped: false, days: 31 });
+		expect(r.totals.sessions).toBe(s.length);
+		expect(r.totals.events).toBe(rows.length);
+		expect(r.totals.playtimeMinutes).toBe(Math.round((lengths.reduce((a, b) => a + b, 0) / 60_000) * 10) / 10);
+		expect(r.totals.medianSessionMinutes).toBe(Math.round((median(lengths) / 60_000) * 10) / 10);
+		expect(r.totals.purchases).toBe(buys.length);
+		expect(r.totals.robux).toBe(robux);
+		expect(r.totals.activeDays).toBe(new Set(s.map((x) => day(x.t0))).size);
+		expect(r.totals.firstSeen).toBe(new Date(Math.min(...s.map((x) => x.t0))).toISOString());
+		// Dense: one bucket per UTC day the window touches, oldest first; the buckets add up to the totals.
+		expect(r.series.length).toBe(31);
+		expect(r.series[0].start).toBe(new Date(day(NOW - 30 * DAY) * DAY).toISOString());
+		expect(r.series.reduce((a, b) => a + b.sessions, 0)).toBe(s.length);
+		expect(r.series.reduce((a, b) => a + b.purchases, 0)).toBe(buys.length);
+		expect(r.series.reduce((a, b) => a + b.robux, 0)).toBe(robux);
+		// Lists: newest first, with the purchase's product, price and place.
+		expect(r.sessions.length).toBe(s.length);
+		expect(Date.parse(r.sessions[0].start)).toBe(Math.max(...s.map((x) => x.t0)));
+		expect(r.purchases.length).toBe(buys.length);
+		expect(r.purchases[0]).toMatchObject({ kind: "product", where: "shop" });
+		expect(["1234", "555"]).toContain(r.purchases[0].product ?? "");
+		expect([99, 199]).toContain(r.purchases[0].robux ?? 0);
+		expect(r.sessionsTruncated || r.purchasesTruncated).toBe(false);
+	});
+
+	test("a window up to two days is bucketed by hour", async () => {
+		const from = TODAY * DAY;
+		const r = await store.query("player-stats", { from, to: NOW }, { pid: payer });
+		expect(r.window).toMatchObject({ bucket: "hour", days: 1 });
+		expect(r.series.length).toBe(12);
+		expect(r.series[1].start).toBe(new Date(from + 3_600_000).toISOString());
+		const s = sessions(range(from, NOW).filter((e) => e.pid === payer));
+		expect(r.series.reduce((a, b) => a + b.sessions, 0)).toBe(s.size);
+	});
+
+	test("bounds: the window is cut to 400 days; list limits mark truncation; bad options are refused", async () => {
+		const wide = await store.query("player-stats", { from: "2020-01-01" }, { pid: payer });
+		expect(wide.window.clamped).toBe(true);
+		expect(Date.parse(wide.window.from)).toBe(NOW - 400 * DAY);
+		expect(wide.series.length).toBeLessThanOrEqual(401);
+		const short = await store.query("player-stats", {}, { pid: payer, sessions: 1, purchases: 1 });
+		expect(short.sessions.length).toBe(1);
+		expect(short.sessionsTruncated).toBe(short.totals.sessions > 1);
+		expect(short.purchasesTruncated).toBe(short.totals.purchases > 1);
+		expect(() => store.render("player-stats", {}, { pid: "x' OR 1=1 --" })).toThrow("pid");
+		expect(() => store.render("player-stats", {}, {})).toThrow("pid");
+		expect(() => store.render("player-stats", {}, { pid: payer, sessions: 0 })).toThrow("sessions");
+		expect(() => store.render("player-stats", {}, { pid: payer, purchases: 5000 })).toThrow("purchases");
+	});
+
+	test("a player without rows: zeros and empty lists, the series still dense", async () => {
+		const r = await store.query("player-stats", { from: "2026-09-29", to: "2026-10-05" }, { pid: "nobody-here" });
+		expect(r.totals).toMatchObject({ sessions: 0, events: 0, playtimeMinutes: 0, avgSessionMinutes: 0, medianSessionMinutes: 0, robux: 0, purchases: 0, firstSeen: null, lastSeen: null });
+		expect(r.series.length).toBe(7);
+		expect(r.series.every((b) => b.sessions === 0 && b.robux === 0)).toBe(true);
+		expect(r.sessions).toEqual([]);
+		expect(r.purchases).toEqual([]);
+	});
+});
+
 test("unknown queries and bad filters are refused", async () => {
 	await expect(store.query("nope" as never)).rejects.toThrow("unknown query");
 	expect(() => store.render("overview", { dev: "fridge" as never })).toThrow("dev must be one of");

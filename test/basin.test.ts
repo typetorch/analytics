@@ -16,6 +16,8 @@ const TOKEN = "test-token-not-a-secret-123";
 const OPTIONS: Partial<Record<QueryName, object>> = {
 	timeline: { pid: "p0003" },
 	"player-graph": { pid: "p0003", facet: "zone" },
+	// A payer (two purchases in the default range), so the spending statements return rows.
+	"player-stats": { pid: "p0015" },
 	flow: { facet: "zone" },
 	funnel: { funnel: "onboarding" },
 	experiment: { experiment: "onboarding" },
