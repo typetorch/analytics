@@ -29,6 +29,48 @@ export const METRICS_MAX_POINTS = 720;
  * fits, while made-up JobIds (up to TYPETORCH_NEW_JOBS_PER_MINUTE of them a minute) can't grow the table without end.
  */
 export const METRICS_MAX_ROWS = 1_000_000;
+/** Kernel publishes and backup refreshes (the marks table) are rare and useful on long charts: kept a year. */
+export const KEEP_MARKS_MS = 365 * 86_400_000;
+/** GET marks reads at most this long a window. */
+export const MARKS_MAX_WINDOW_MS = 366 * 86_400_000;
+/** The marks table keeps at most this many (the newest), checked hourly with the other retention. */
+export const MARKS_MAX_ROWS = 5000;
+
+/** What a release did to a branch (the CLI's `k` on POST /v1/fleet/deploy; deploys known only from reports have none). */
+export const DEPLOY_KINDS = ["deploy", "rollback", "promote", "resign"] as const;
+export type DeployKind = (typeof DEPLOY_KINDS)[number];
+/** Marks that aren't a branch release (POST /v1/fleet/mark): a kernel publish (or restore), a backup refresh. */
+export const MARK_ONLY_KINDS = ["kernel", "backup"] as const;
+export type MarkKind = DeployKind | (typeof MARK_ONLY_KINDS)[number];
+export const MARK_KINDS: readonly MarkKind[] = [...DEPLOY_KINDS, ...MARK_ONLY_KINDS];
+
+/**
+ * A vertical mark on the explorer's time-series charts (Roblox's "published change"): every release of a branch (the
+ * deploys table) and every kernel publish / backup refresh (the marks table), oldest first.
+ */
+export interface DeployMark {
+	/** "deploy:<seq>" or "mark:<id>". */
+	id: string;
+	kind: MarkKind;
+	/** When it happened (the CLI's time, else when the backend heard of it), unix ms. */
+	at: number;
+	time: string;
+	branch: string | null;
+	seq: number | null;
+	artifact: string | null;
+	channel: string | null;
+	/** rollback / promote: the build the branch ran before. */
+	from: string | null;
+	/** kernel: the kernel version. */
+	kernel: string | null;
+	/** kernel / backup: the place version the publish made. */
+	placeVersion: number | null;
+	message: string | null;
+	/** Releases: deploy reports so far, servers per result (each server's newest report). */
+	results?: Record<string, number>;
+	/** A release known only from its reports (no CLI post): its kind is a guess ("deploy"). */
+	inferred?: boolean;
+}
 
 /** The kernel sends critical and warning; the CLI may also post info. */
 export type AlertLevel = "critical" | "warning" | "info";
@@ -95,7 +137,8 @@ export interface FleetReport {
 export type FleetEvent =
 	| { type: "server"; change: "new" | "update" | "lost" | "closed" | "back"; server: ServerInfo }
 	| { type: "report"; seq: number; job: string; result: string; branch: string | null }
-	| { type: "deploy"; seq: number; branch: string | null; artifact: string | null }
+	| { type: "deploy"; seq: number; branch: string | null; artifact: string | null; kind?: string | null }
+	| { type: "mark"; mark: DeployMark }
 	| { type: "alert"; alert: Alert }
 	| { type: "alert_ack"; id: number };
 
@@ -215,12 +258,31 @@ export interface ParsedDeploy {
 	artifact: string | null;
 	channel: string | null;
 	t: number | null;
+	/** What the release did (`k`); null from older CLIs. */
+	kind: DeployKind | null;
+	/** The build the branch ran before (`fr`). */
+	from: string | null;
+	/** The release note (`m`). */
+	message: string | null;
+}
+
+/** A kernel publish or backup refresh from the CLI (POST /v1/fleet/mark). */
+export interface ParsedMark {
+	kind: (typeof MARK_ONLY_KINDS)[number];
+	branch: string | null;
+	seq: number | null;
+	artifact: string | null;
+	channel: string | null;
+	kernel: string | null;
+	placeVersion: number | null;
+	message: string | null;
+	t: number | null;
 }
 
 /** What goes on the bus' `heartbeat` topic. */
 export type HeartbeatMessage = { kind: "heartbeat"; heartbeat: ParsedHeartbeat } | { kind: "closing"; job: string; heartbeat?: ParsedHeartbeat };
 /** What goes on the bus' `deploy` topic. */
-export type DeployMessage = { kind: "report"; report: ParsedReport } | { kind: "start"; deploy: ParsedDeploy };
+export type DeployMessage = { kind: "report"; report: ParsedReport } | { kind: "start"; deploy: ParsedDeploy } | { kind: "mark"; mark: ParsedMark };
 export type FleetMessage = HeartbeatMessage | DeployMessage;
 
 /**
@@ -356,16 +418,51 @@ export function parseReport(raw: unknown): ParsedReport {
 	};
 }
 
-/** `{s, b, a, ch, t}` from the CLI when a deploy starts: gives stuck detection a start time. */
+/**
+ * `{s, b, a, ch, t, k?, fr?, m?}` from the CLI when a deploy starts: gives stuck detection a start time and the charts a
+ * mark. `k`: deploy | rollback | promote | resign; `fr`: the build before; `m`: the release note; `t`: unix ms or s.
+ */
 export function parseDeploy(raw: unknown): ParsedDeploy {
 	const b = asBody(raw);
+	const kind = text(b, "k", 16);
+	if (kind !== null && !(DEPLOY_KINDS as readonly string[]).includes(kind)) throw new FleetInputError(`k must be one of ${DEPLOY_KINDS.join(", ")}`);
 	return {
 		seq: int(b, "s", true) as number,
 		branch: text(b, "b", 64, true) as string,
 		artifact: text(b, "a", 64),
 		channel: text(b, "ch", 16),
 		t: int(b, "t"),
+		kind: kind as DeployKind | null,
+		from: text(b, "fr", 64),
+		message: text(b, "m", 200),
 	};
+}
+
+/**
+ * `{k, b?, s?, a?, ch?, v?, pv?, m?, t?}` from the CLI: `k` = kernel (a kernel publish or restore: `v` the kernel version,
+ * `pv` the place version) or backup (a backup refresh: the build `b`/`s`/`a` that became the place's backup, `pv`).
+ */
+export function parseMark(raw: unknown): ParsedMark {
+	const b = asBody(raw);
+	const kind = text(b, "k", 16, true) as string;
+	if (!(MARK_ONLY_KINDS as readonly string[]).includes(kind)) throw new FleetInputError(`k must be one of ${MARK_ONLY_KINDS.join(", ")} (releases go to /v1/fleet/deploy)`);
+	return {
+		kind: kind as ParsedMark["kind"],
+		branch: text(b, "b", 64),
+		seq: int(b, "s"),
+		artifact: text(b, "a", 64),
+		channel: text(b, "ch", 16),
+		kernel: text(b, "v", 32),
+		placeVersion: int(b, "pv"),
+		message: text(b, "m", 200),
+		t: int(b, "t"),
+	};
+}
+
+/** A sender's time (unix s or ms) as ms, or `now` when missing or more than a day away from it (a wrong clock). */
+export function markTime(t: number | null, now: number): number {
+	const ms = toMs(t);
+	return ms !== null && Math.abs(ms - now) <= 86_400_000 ? ms : now;
 }
 
 export type NewAlert = Omit<Alert, "id" | "createdAt" | "at" | "acked" | "ackedAt" | "ackedBy" | "details"> & { t?: number | null; details: Record<string, unknown> | null };
@@ -564,7 +661,18 @@ CREATE INDEX IF NOT EXISTS alerts_created ON alerts (created);
 CREATE TABLE IF NOT EXISTS deploys (
 	seq INTEGER PRIMARY KEY, branch TEXT, artifact TEXT, channel TEXT, t INTEGER, received INTEGER NOT NULL, stuck_at INTEGER);
 CREATE INDEX IF NOT EXISTS deploys_received ON deploys (received);
+CREATE TABLE IF NOT EXISTS marks (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, branch TEXT, seq INTEGER, artifact TEXT, channel TEXT, kernel TEXT,
+	place_version INTEGER, message TEXT, at INTEGER NOT NULL, received INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS marks_at ON marks (at);
 `;
+
+/** Deploys columns added after a fleet file was first made (the release kinds for the chart marks). */
+const ADDED_DEPLOY_COLUMNS: [string, string][] = [
+	["kind", "TEXT"],
+	["from_artifact", "TEXT"],
+	["message", "TEXT"],
+];
 
 export interface FleetServiceOptions {
 	db: FleetDb;
@@ -597,6 +705,11 @@ export class FleetService {
 		for (const [name, type] of ADDED_SERVER_COLUMNS) {
 			if (!columns.has(name)) await options.db.exec(`ALTER TABLE servers ADD COLUMN ${name} ${type}`);
 		}
+		// Release kinds for the deploy marks, to deploys tables made before them.
+		const deployColumns = new Set((await options.db.all<{ name: string }>("PRAGMA table_info(deploys)")).map((c) => c.name));
+		for (const [name, type] of ADDED_DEPLOY_COLUMNS) {
+			if (!deployColumns.has(name)) await options.db.exec(`ALTER TABLE deploys ADD COLUMN ${name} ${type}`);
+		}
 		return service;
 	}
 
@@ -626,6 +739,7 @@ export class FleetService {
 		if (message.kind === "heartbeat") await this.applyHeartbeat(message.heartbeat);
 		else if (message.kind === "closing") await this.applyClosing(message.job, message.heartbeat);
 		else if (message.kind === "report") await this.applyReport(message.report);
+		else if (message.kind === "mark") await this.applyMark(message.mark);
 		else await this.applyDeploy(message.deploy);
 	}
 
@@ -688,12 +802,126 @@ export class FleetService {
 
 	async applyDeploy(d: ParsedDeploy): Promise<void> {
 		const now = this.clock();
+		// `t` is stored as ms (the CLI's clock; replaced by now when a day or more off).
+		const t = d.t === null ? null : markTime(d.t, now);
 		await this.db.run(
-			"INSERT INTO deploys (seq, branch, artifact, channel, t, received) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(seq) DO UPDATE SET branch = excluded.branch, " +
-				"artifact = COALESCE(excluded.artifact, deploys.artifact), channel = excluded.channel, t = excluded.t, received = MIN(deploys.received, excluded.received)",
-			[d.seq, d.branch, d.artifact, d.channel, d.t, now],
+			"INSERT INTO deploys (seq, branch, artifact, channel, t, received, kind, from_artifact, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(seq) DO UPDATE SET branch = excluded.branch, " +
+				"artifact = COALESCE(excluded.artifact, deploys.artifact), channel = excluded.channel, t = excluded.t, received = MIN(deploys.received, excluded.received), " +
+				"kind = COALESCE(excluded.kind, deploys.kind), from_artifact = COALESCE(excluded.from_artifact, deploys.from_artifact), message = COALESCE(excluded.message, deploys.message)",
+			[d.seq, d.branch, d.artifact, d.channel, t, now, d.kind, d.from, d.message],
 		);
-		this.emit({ type: "deploy", seq: d.seq, branch: d.branch, artifact: d.artifact });
+		this.emit({ type: "deploy", seq: d.seq, branch: d.branch, artifact: d.artifact, kind: d.kind });
+	}
+
+	mark(raw: unknown): Promise<DeployMark> {
+		return this.applyMark(parseMark(raw));
+	}
+
+	/** A kernel publish or backup refresh: stored in marks, sent on the SSE stream. */
+	async applyMark(m: ParsedMark): Promise<DeployMark> {
+		const now = this.clock();
+		const at = markTime(m.t, now);
+		const { lastId } = await this.db.run(
+			"INSERT INTO marks (kind, branch, seq, artifact, channel, kernel, place_version, message, at, received) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			[m.kind, m.branch, m.seq, m.artifact, m.channel, m.kernel, m.placeVersion, m.message, at, now],
+		);
+		const mark: DeployMark = {
+			id: `mark:${lastId}`,
+			kind: m.kind,
+			at,
+			time: new Date(at).toISOString(),
+			branch: m.branch,
+			seq: m.seq,
+			artifact: m.artifact,
+			channel: m.channel,
+			from: null,
+			kernel: m.kernel,
+			placeVersion: m.placeVersion,
+			message: m.message,
+		};
+		this.emit({ type: "mark", mark });
+		return mark;
+	}
+
+	/**
+	 * Chart marks in [since, until): releases (the deploys table, with each one's report results) and kernel / backup
+	 * marks, oldest first; the newest `limit` when there are more. With `branch`, releases of other branches are left
+	 * out (kernel and backup marks are place-wide and always kept).
+	 */
+	async marks(options: { since?: number; until?: number; branch?: string; kinds?: readonly string[]; limit?: number } = {}): Promise<DeployMark[]> {
+		const now = this.clock();
+		const until = options.until ?? now + 60_000;
+		const since = options.since ?? until - 30 * 86_400_000;
+		if (since >= until) throw new FleetInputError("since must be before until");
+		if (until - since > MARKS_MAX_WINDOW_MS) throw new FleetInputError("marks: at most a 366-day window");
+		const limit = Math.min(Math.max(1, options.limit ?? 500), 2000);
+		for (const kind of options.kinds ?? []) if (!(MARK_KINDS as readonly string[]).includes(kind)) throw new FleetInputError(`kinds must be of ${MARK_KINDS.join(", ")}`);
+		const kinds = options.kinds?.length ? new Set(options.kinds) : undefined;
+		const want = (kind: string) => !kinds || kinds.has(kind);
+		const out: DeployMark[] = [];
+		if (DEPLOY_KINDS.some(want)) {
+			// `t` is the CLI's time (ms; older rows may hold seconds), else the first report's arrival.
+			const rows = await this.db.all<{ seq: number; branch: string | null; artifact: string | null; channel: string | null; t: number | null; received: number; kind: string | null; from_artifact: string | null; message: string | null }>(
+				"SELECT seq, branch, artifact, channel, t, received, kind, from_artifact, message FROM deploys WHERE received >= ? AND received < ?" +
+					(options.branch ? " AND branch = ?" : "") +
+					" ORDER BY received DESC LIMIT 5000",
+				[since - 86_400_000, until + 86_400_000, ...(options.branch ? [options.branch] : [])],
+			);
+			const kept = rows.map((r) => ({ r, at: toMs(r.t) ?? r.received })).filter(({ r, at }) => at >= since && at < until && want(r.kind ?? "deploy"));
+			const results = new Map<number, Record<string, number>>();
+			const seqs = kept.map(({ r }) => r.seq);
+			for (let i = 0; i < seqs.length; i += 500) {
+				const chunk = seqs.slice(i, i + 500);
+				const counts = await this.db.all<{ seq: number; result: string; servers: number }>(
+					`SELECT r.seq AS seq, r.result AS result, COUNT(*) AS servers FROM reports r JOIN (SELECT seq, job, MAX(id) AS id FROM reports WHERE seq IN (${chunk.map(() => "?").join(", ")}) GROUP BY seq, job) l ON l.id = r.id GROUP BY r.seq, r.result`,
+					chunk,
+				);
+				for (const c of counts) results.set(c.seq, { ...results.get(c.seq), [c.result]: c.servers });
+			}
+			for (const { r, at } of kept) {
+				out.push({
+					id: `deploy:${r.seq}`,
+					kind: (r.kind as DeployKind | null) ?? "deploy",
+					at,
+					time: new Date(at).toISOString(),
+					branch: r.branch,
+					seq: r.seq,
+					artifact: r.artifact,
+					channel: r.channel,
+					from: r.from_artifact,
+					kernel: null,
+					placeVersion: null,
+					message: r.message,
+					results: results.get(r.seq) ?? {},
+					...(r.kind === null ? { inferred: true } : {}),
+				});
+			}
+		}
+		const markKinds = MARK_ONLY_KINDS.filter(want);
+		if (markKinds.length) {
+			const rows = await this.db.all<{ id: number; kind: string; branch: string | null; seq: number | null; artifact: string | null; channel: string | null; kernel: string | null; place_version: number | null; message: string | null; at: number }>(
+				`SELECT id, kind, branch, seq, artifact, channel, kernel, place_version, message, at FROM marks WHERE at >= ? AND at < ? AND kind IN (${markKinds.map(() => "?").join(", ")}) ORDER BY at DESC LIMIT 5000`,
+				[since, until, ...markKinds],
+			);
+			for (const r of rows) {
+				out.push({
+					id: `mark:${r.id}`,
+					kind: r.kind as MarkKind,
+					at: r.at,
+					time: new Date(r.at).toISOString(),
+					branch: r.branch,
+					seq: r.seq,
+					artifact: r.artifact,
+					channel: r.channel,
+					from: null,
+					kernel: r.kernel,
+					placeVersion: r.place_version,
+					message: r.message,
+				});
+			}
+		}
+		out.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id, "en", { numeric: true }));
+		return out.length > limit ? out.slice(out.length - limit) : out;
 	}
 
 	closing(raw: unknown, jobHeader?: string | null): Promise<void> {
@@ -971,6 +1199,10 @@ export class FleetService {
 			await this.db.run("DELETE FROM reports WHERE received < ?", [now - KEEP_REPORTS_MS]);
 			await this.db.run("DELETE FROM alerts WHERE created < ?", [now - KEEP_ALERTS_MS]);
 			await this.db.run("DELETE FROM deploys WHERE received < ?", [now - KEEP_ALERTS_MS]);
+			await this.db.run("DELETE FROM marks WHERE received < ?", [now - KEEP_MARKS_MS]);
+			// And at most MARKS_MAX_ROWS (the newest): marks come from the CLI at 30 a minute at most, so a leaked game key
+			// can add a few thousand an hour, never an unbounded table.
+			await this.db.run("DELETE FROM marks WHERE id <= (SELECT MAX(id) FROM marks) - ?", [MARKS_MAX_ROWS]);
 			await this.db.run("DELETE FROM servers WHERE (closed_at IS NOT NULL AND closed_at < ?) OR (lost_at IS NOT NULL AND lost_at < ?)", [now - KEEP_GONE_SERVERS_MS, now - KEEP_GONE_SERVERS_MS]);
 		}
 		return { lost: lostRows.length, stuck };

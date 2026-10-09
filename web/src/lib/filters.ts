@@ -1,12 +1,16 @@
 /**
  * The shared filter bar's state. It lives in the URL (?range=7d&branch=dev...), so a view can be bookmarked or
- * shared, and turns into the analytics server's `filters` object. Days are UTC, like the server's.
+ * shared, and turns into the analytics server's `filters` object. Days are UTC, like the server's. The hour presets
+ * (1h, 6h) send an exact instant (ISO, on a whole minute so the query cache holds still within a minute); the day
+ * presets and custom ranges send dates, as before.
  */
 import { DEVICES, type Device, type Filters } from "./types";
 
-export const RANGE_PRESETS = ["1d", "7d", "30d", "90d"] as const;
+export const RANGE_PRESETS = ["1h", "6h", "1d", "7d", "30d", "90d"] as const;
 export type RangePreset = (typeof RANGE_PRESETS)[number] | "custom";
 export const DEFAULT_RANGE: RangePreset = "30d";
+/** The presets that count hours back from now (the rest are days, today included). */
+export const HOUR_PRESETS: Partial<Record<RangePreset, number>> = { "1h": 1, "6h": 6 };
 
 export interface FilterState {
 	range: RangePreset;
@@ -28,6 +32,19 @@ export const FILTER_KEYS = ["range", "from", "to", "branch", "art", "dev", "play
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+const MINUTE_MS = 60_000;
+
+/**
+ * A chart's time step for a window, as the backend picks it (queries/core.ts windowBucketMs): up to an hour -> 1 min,
+ * up to 6 hours -> 5 min, up to a day -> 1 hour, longer -> 1 day.
+ */
+export function windowBucketMs(spanMs: number): number {
+	if (spanMs <= 65 * MINUTE_MS) return MINUTE_MS;
+	if (spanMs <= 6.5 * HOUR_MS) return 5 * MINUTE_MS;
+	if (spanMs <= 26 * HOUR_MS) return HOUR_MS;
+	return DAY_MS;
+}
 
 export function isoDate(ms: number): string {
 	return new Date(ms).toISOString().slice(0, 10);
@@ -74,12 +91,18 @@ export function writeFilters(state: FilterState, params: URLSearchParams): URLSe
 	return next;
 }
 
-/** The server's filters. Presets end now: "7d" = today and the 6 days before (UTC). */
+/**
+ * The server's filters. Presets end now: "7d" = today and the 6 days before (UTC); "1h" = the hour before now (from the
+ * whole minute, so up to 61 minutes), as an ISO instant.
+ */
 export function toApiFilters(state: FilterState, now = Date.now()): Filters {
 	const filters: Filters = {};
+	const hours = HOUR_PRESETS[state.range];
 	if (state.range === "custom") {
 		if (state.from) filters.from = state.from;
 		if (state.to) filters.to = state.to;
+	} else if (hours) {
+		filters.from = new Date(Math.floor(now / MINUTE_MS) * MINUTE_MS - hours * HOUR_MS).toISOString();
 	} else {
 		const days = Number.parseInt(state.range, 10);
 		filters.from = isoDate(now - (days - 1) * DAY_MS);
@@ -99,6 +122,10 @@ export function rangeOnly(filters: Filters): Filters {
 
 export function describeRange(state: FilterState): string {
 	switch (state.range) {
+		case "1h":
+			return "the last 1 hour";
+		case "6h":
+			return "the last 6 hours";
 		case "1d":
 			return "today (UTC)";
 		case "custom":

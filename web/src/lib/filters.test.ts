@@ -1,7 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { activeFilterCount, readFilters, toApiFilters, writeFilters } from "./filters";
+import { activeFilterCount, describeRange, readFilters, toApiFilters, windowBucketMs, writeFilters } from "./filters";
 
 const NOW = Date.UTC(2026, 9, 5, 18, 0, 0);
+
+describe("hour presets", () => {
+	it("send an exact instant from the whole minute; read and written like the day presets", () => {
+		const late = NOW + 42_123; // 18:00:42.123
+		expect(toApiFilters({ range: "1h" }, late)).toEqual({ from: "2026-10-05T17:00:00.000Z" });
+		expect(toApiFilters({ range: "6h", dev: "phone" }, late)).toEqual({ from: "2026-10-05T12:00:00.000Z", dev: "phone" });
+		// Same minute, same filters (the query cache holds still).
+		expect(toApiFilters({ range: "1h" }, late + 10_000)).toEqual(toApiFilters({ range: "1h" }, late));
+		expect(readFilters(new URLSearchParams("range=6h&from=2026-10-01")).range).toBe("6h");
+		expect(readFilters(new URLSearchParams("range=6h&from=2026-10-01")).from).toBeUndefined();
+		expect(writeFilters({ range: "1h" }, new URLSearchParams()).toString()).toBe("range=1h");
+		expect(describeRange({ range: "1h" })).toBe("the last 1 hour");
+		expect(describeRange({ range: "6h" })).toBe("the last 6 hours");
+	});
+
+	it("chart steps by window: 1 h -> 1 min, 6 h -> 5 min, a day -> hourly, longer -> daily", () => {
+		const H = 3_600_000;
+		expect(windowBucketMs(H + 60_000)).toBe(60_000);
+		expect(windowBucketMs(6 * H + 60_000)).toBe(300_000);
+		expect(windowBucketMs(18 * H)).toBe(H);
+		expect(windowBucketMs(24 * H)).toBe(H);
+		expect(windowBucketMs(7 * 24 * H)).toBe(24 * H);
+	});
+});
 
 describe("filters", () => {
 	it("read from the URL, ignoring junk", () => {

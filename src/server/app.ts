@@ -11,7 +11,7 @@
  *
  *   admin routes (admin token as Bearer, or the explorer's session cookie)
  *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
- *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=
+ *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=   (from / to: dates, or unix ms / ISO instants)
  *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
  *   GET  /v1/storage                bytes and files per part of the data folder
  *   GET  /v1/settings               live dials from data/settings.json
@@ -43,6 +43,7 @@ import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
 import { handleErrorReads } from "../errors/http.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
+import { rollupDays } from "../sql/filters.ts";
 import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { openSqlite } from "../fleet/db.ts";
 import { IdentityStore, parseIdentities, parseUid, PID_PATTERN } from "../fleet/identity.ts";
@@ -563,9 +564,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (!existsSync(file)) return json(200, { rows: [] });
 			source = `read_parquet(${pathLit(file)})`;
 		} else {
-			const from = q.get("from") ? Math.floor(Date.parse(`${q.get("from")}T00:00:00Z`) / DAY_MS) : -Infinity;
-			const to = q.get("to") ? Math.floor(Date.parse(`${q.get("to")}T00:00:00Z`) / DAY_MS) : Infinity;
-			const files = dayFiles(dir).filter((f) => f.day >= from && f.day <= to);
+			// Dates (inclusive) or exact instants (unix ms or ISO; widened to the days they touch).
+			let days: { first: number; last: number };
+			try {
+				days = rollupDays(q.get("from"), q.get("to"));
+			} catch (error) {
+				return json(400, { error: (error as Error).message.slice(0, 200) });
+			}
+			const files = dayFiles(dir).filter((f) => f.day >= days.first && f.day <= days.last);
 			if (!files.length) return json(200, { rows: [] });
 			source = `read_parquet([${files.map((f) => pathLit(f.path)).join(", ")}])`;
 		}

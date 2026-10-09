@@ -63,6 +63,11 @@ describe("explorer proxy guard", () => {
 	it("forwards only the explorer's endpoints", () => {
 		expect(guardRequest({ method: "POST", url: "/v1/query/overview", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/fleet/stream?branch=dev", headers: same }, true)).toEqual({ ok: true });
+		// The Performance page's marks and a server's history.
+		expect(guardRequest({ method: "GET", url: "/v1/fleet/marks?since=1&until=2&branch=prod", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/fleet/servers/11111111-2222-3333-4444-555555555555/metrics?since=1", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/fleet/servers/../storage/metrics", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
+		expect(guardRequest({ method: "POST", url: "/v1/fleet/mark", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
 		expect(guardRequest({ method: "POST", url: "/v1/sql", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/storage", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/identity?uid=1", headers: same }, true)).toEqual({ ok: true });

@@ -49,6 +49,17 @@ function parseTime(value: number | string, what: string, endOfDay: boolean): num
 	return DATE_ONLY.test(text) && endOfDay ? ms + DAY_MS : ms;
 }
 
+/**
+ * The UTC days (inclusive) a `from` / `to` pair covers, for the day rollups: dates as before ("2026-10-05" to
+ * "2026-10-05" is that day), and exact instants (unix ms or ISO; `to` exclusive) widen to the days they touch, so a
+ * "last hour" window reads the rollups of the one or two days it falls in. Missing ends are open.
+ */
+export function rollupDays(from: string | null | undefined, to: string | null | undefined): { first: number; last: number } {
+	const first = from ? Math.floor(parseTime(from, "from", false) / DAY_MS) : -Infinity;
+	const last = to ? Math.floor((parseTime(to, "to", true) - 1) / DAY_MS) : Infinity;
+	return { first, last };
+}
+
 function list<T extends string>(value: T | T[] | undefined, what: string, check?: (v: string) => void): T[] | undefined {
 	if (value === undefined) return undefined;
 	const values = (Array.isArray(value) ? value : [value]).filter((v) => v !== "");

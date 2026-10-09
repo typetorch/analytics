@@ -5,7 +5,6 @@
  * Adding a page = one line in the group it belongs to (and its route in main.tsx; nav.test.ts fails when the two disagree).
  *
  * Where the pages other branches add go:
- *   - Performance (/performance):        a line in the "observe" group, next to Fleet and Errors.
  *   - Fleet server pages (/servers/:jobId): not nav items. They already light up Fleet through its `also: ["/servers"]`,
  *     so just add the route in main.tsx. Another detail page under a nav item: add its path prefix to that item's `also`.
  *   - A page that is deliberately in no menu: add it to HIDDEN_ROUTES below, with the reason.
@@ -18,6 +17,7 @@ import {
 	Compass,
 	FlaskConical,
 	Gamepad2,
+	Gauge,
 	LayoutDashboard,
 	ListFilter,
 	Server,
@@ -75,12 +75,12 @@ export const NAV_GROUPS: NavGroup[] = [
 		],
 	},
 	{
-		// Performance (/performance) goes here.
 		id: "observe",
 		label: "Observe & troubleshoot",
 		items: [
 			{ label: "Fleet", path: "/fleet", icon: Server, noFilters: true, also: ["/servers"] },
 			{ label: "Errors", path: "/errors", icon: Bug, noFilters: true },
+			{ label: "Performance", path: "/performance", icon: Gauge },
 			{ label: "Roblox", path: "/roblox", icon: Gamepad2 },
 		],
 	},

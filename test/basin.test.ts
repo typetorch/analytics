@@ -56,6 +56,8 @@ beforeAll(async () => {
 	await connection.run(`CREATE MACRO json_get_str(j, k) AS json_extract_string(j, '$."' || k || '"')`);
 	await connection.run(`CREATE MACRO json_get_float(j, k) AS TRY_CAST(json_extract(j, '$."' || k || '"') AS DOUBLE)`);
 	await connection.run(`CREATE MACRO json_get_int(j, k) AS TRY_CAST(json_extract(j, '$."' || k || '"') AS BIGINT)`);
+	// DataFusion's estimate, as DuckDB's exact percentile (the perf-* queries).
+	await connection.run("CREATE MACRO approx_percentile_cont(x, p) AS quantile_cont(x, p)");
 });
 afterAll(() => {
 	connection.closeSync();

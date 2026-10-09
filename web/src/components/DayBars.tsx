@@ -1,4 +1,7 @@
-/** A small per-day bar chart (one series; the card title names it). Days without data show as zero. */
+/**
+ * A small per-day bar chart (one series; the card title names it). Days without data show as zero. Windows of a day or
+ * less use the same chart per step (1 min, 5 min, 1 h): labels are "YYYY-MM-DD hh:mm" and the axis shows the time.
+ */
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
@@ -21,13 +24,31 @@ export function fillDays(points: DayPoint[], from: string, to: string): DayPoint
 	return out;
 }
 
+/** Every step of [fromMs, toMs) (UTC, "YYYY-MM-DD hh:mm"), with the values found and 0 elsewhere (at most 400 steps). */
+export function fillSteps(points: { t: number; value: number }[], fromMs: number, toMs: number, stepMs: number): DayPoint[] {
+	const byT = new Map(points.map((p) => [p.t, p.value]));
+	const label = (t: number) => {
+		const iso = new Date(t).toISOString();
+		return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+	};
+	if (!(stepMs > 0) || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs || (toMs - fromMs) / stepMs > 400) {
+		return points.map((p) => ({ date: label(p.t), value: p.value }));
+	}
+	const out: DayPoint[] = [];
+	for (let t = Math.floor(fromMs / stepMs) * stepMs; t < toMs; t += stepMs) out.push({ date: label(t), value: byT.get(t) ?? 0 });
+	return out;
+}
+
+/** "10-05" for a day, "17:05" for a step inside a day. */
+const tick = (d: string) => (d.length > 10 ? d.slice(11) : d.slice(5));
+
 export function DayBars({ data, label, decimals = 0, color = "var(--chart-1)" }: { data: DayPoint[]; label: string; decimals?: number; color?: string }) {
 	const config: ChartConfig = { value: { label, color } };
 	return (
 		<ChartContainer config={config} className="aspect-auto h-40 w-full">
 			<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={2}>
 				<CartesianGrid vertical={false} />
-				<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={24} tickFormatter={(d: string) => d.slice(5)} />
+				<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={24} tickFormatter={tick} />
 				<YAxis
 					tickLine={false}
 					axisLine={false}

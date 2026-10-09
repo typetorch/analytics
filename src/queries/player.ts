@@ -11,7 +11,7 @@
 import { PROP_KEYS } from "../schema.ts";
 import { DAY_MS, int, lit } from "../sql/dialect.ts";
 import type { NormalizedFilters } from "../sql/filters.ts";
-import { checkPid, defineQuery, intOption, iso, num, round, SERVER_PURCHASE, str, strOrNull, where, type QueryContext } from "./core.ts";
+import { checkPid, defineQuery, intOption, iso, num, round, SERVER_PURCHASE, str, strOrNull, where, windowBucketMs, type QueryContext } from "./core.ts";
 
 /** The longest window the query reads; a wider filter range is cut to its last 400 days. */
 export const PLAYER_MAX_DAYS = 400;
@@ -20,17 +20,8 @@ const HOUR_MS = 3_600_000;
 
 export type PlayerBucketUnit = "minute" | "5 minutes" | "hour" | "day";
 
-/**
- * The step for a window: up to an hour (65 min) per minute, up to 6 hours (6.5 h) per 5 minutes, up to a day (26 h) per
- * hour, longer per day. The same steps as `windowBucketMs` on the performance branch (Overview and Performance charts):
- * use that one once both are merged.
- */
-export function playerBucketMs(spanMs: number): number {
-	if (spanMs <= 65 * MINUTE_MS) return MINUTE_MS;
-	if (spanMs <= 6.5 * HOUR_MS) return 5 * MINUTE_MS;
-	if (spanMs <= 26 * HOUR_MS) return HOUR_MS;
-	return DAY_MS;
-}
+/** The step for a window: the explorer's shared rule (core.ts `windowBucketMs`, also used by Overview and Performance). */
+export const playerBucketMs = windowBucketMs;
 
 const UNITS: Record<number, PlayerBucketUnit> = { [MINUTE_MS]: "minute", [5 * MINUTE_MS]: "5 minutes", [HOUR_MS]: "hour", [DAY_MS]: "day" };
 

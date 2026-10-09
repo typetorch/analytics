@@ -36,12 +36,14 @@ Without a token every `/api` call answers 503 and the header shows "no admin tok
 
 ## Pages
 
-All pages share the filter bar (date range in UTC days, branch, artifact, device, new/returning, experiment variant);
-it lives in the URL, so a view can be bookmarked.
+All pages share the filter bar (date range: Last 1 hour, Last 6 hours, Today, 7 / 30 / 90 days in UTC days, or custom dates;
+branch, artifact, device, new/returning, experiment variant); it lives in the URL, so a view can be bookmarked. The hour
+presets send an exact ISO instant (on a whole minute). Charts step by the window (`windowBucketMs` in `lib/filters.ts`, the
+backend's rule): up to an hour per minute, up to 6 hours per 5 minutes, up to a day per hour, longer per day.
 
 | Page | What it shows | Query |
 |---|---|---|
-| Overview | players, new, returning, sessions, events, playtime; per-day bars; Storage: what the server keeps on disk (DuckDB live, Parquet history, raw, fleet, rows, today's growth), every 30 s | `overview`, `/v1/storage` |
+| Overview | players, new, returning, sessions, events, playtime; per-day bars (per minute, 5 minutes or hour for windows of a day or less); Storage: what the server keeps on disk (DuckDB live, Parquet history, raw, fleet, rows, today's growth), every 30 s | `overview`, `/v1/storage` |
 | Roblox | Creator Hub's overview from our events: benchmark cards (playtime per DAU, D1, D7, payer conversion, ARPPU, after-join play-through; 7/14/28 days vs the period before; the 50th/90th you copy from Creator Hub, kept in this browser, with an estimated percentile), a realtime column (concurrent users and a 7-day line from heartbeats, session time, client errors per session, client fps, server memory vs the 24 h before), and 7-day moving averages per join source | `benchmarks`, `realtime`, `trends` |
 | Retention | join-day cohorts x day 1/3/7/14/30 heatmap, weighted average, days not over shown as – | `retention` |
 | Funnels | funnel picker, step bars (reached, of start, from previous, median time), biggest drop highlighted | `funnel` |
@@ -51,6 +53,7 @@ it lives in the URL, so a view can be bookmarked.
 | First session | early leaves per zone, screen loops, back-and-forth, idle / camera spins / repeated clicks from recordings | `confusion` |
 | Events | top event names by kind, then the newest rows of a picked name (fleet rows without props) | `top-events`, `events` |
 | Fleet | live servers, latest deploy, alerts, live event log, updated over the SSE stream | fleet API |
+| Performance | client fps / memory / ping and server TPS / memory / players over time, by device class, input, screen size, branch or build, p50 / p90 / p99; deploy marks on every chart (hover: what it was; click: filter to that build); compare builds or before vs after a mark; live servers' TPS and memory with each one's history; a Step picker | `perf-client`, `perf-server`, `perf-compare`, `/v1/fleet/marks`, `/v1/fleet/servers/<job>/metrics` |
 | Query | any named query with JSON filters/options (raw JSON), and read-only SQL over `events` / `recordings` | `/v1/query/*`, `/v1/sql` |
 | Settings | the backend's runtime settings (alert webhook as set / not set, format and levels, admin allow list, token login, rate limits, retention): source badge per field (Dashboard / Env / Default), bounds checked before saving, Reset to env, Send test alert, recent changes, the env-only names. Through the dev proxy it is read only | `/v1/admin/settings` |
 

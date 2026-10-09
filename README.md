@@ -329,9 +329,9 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `POST /v1/ingest` | game | gzip JSON `{ events, recordings, identities? }`. Appended to a raw file, then `202 { accepted, rejected }` |
 | `POST /v1/errors` | game | error logs (see [Error logs](#error-logs)) |
 | `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
-| `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `deploy` | game | the kernel's fleet posts and the CLI's deploy start / alerts |
+| `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `deploy`, `mark` | game | the kernel's fleet posts and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
 | `POST /v1/query/<name>`, `GET /v1/queries` | admin | the logical queries |
-| `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin | the nightly rollup tables |
+| `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
 | `POST /v1/sql` | admin | one read-only SELECT |
 | `GET /v1/storage` | admin | what the data folder holds |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` |
@@ -339,7 +339,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `GET /v1/identity/<pid>/profile` | admin | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>` | admin | error kinds with counts; one kind |
 | `GET /v1/live` | admin | Server-Sent Events of the event bus |
-| `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads (a server's TPS / memory history too) and alert acknowledgement |
+| `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) and alert acknowledgement |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
@@ -485,11 +485,27 @@ window touches. The explorer's **Errors** page shows both.
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
 Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
-Sessions and Timeline views), Flow, Experiments, First session, Events, Fleet, **Errors**, Query, **Settings** (the
+Sessions and Timeline views), Flow, Experiments, First session, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)). The header shows who is signed in (Roblox name and avatar, or
 "admin token") and a Sign out button. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
 with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker.
+
+**Date range.** The filter bar's range: Last 1 hour, Last 6 hours, Today, Last 7 / 30 / 90 days, or Custom (dates). The hour
+presets send an exact instant (`from` = an ISO time on a whole minute); the day presets and custom ranges send dates, as before.
+Charts step by the window: up to an hour per minute, up to 6 hours per 5 minutes, up to a day per hour, longer per day (the
+Overview's `buckets` below a day, its `days` beyond; `windowBucketMs` in `src/queries/core.ts`).
+
+**Performance** (`/performance`): how the game runs on players' devices and on the servers. Client frame rate, memory and ping
+(tech/client) and server TPS (the Heartbeat rate), memory and players (tech/server) over time, by device class, input,
+screen-size bucket (the viewport's short side), branch or build, at p50 / p90 / p99 (on the bad side: low fps and TPS, high
+memory and ping; the line shows the picked percentile, the tables all three). Every chart carries **deploy marks**, like Creator
+Hub's published-change lines: a vertical mark per deploy, rollback, promote, re-sign, kernel publish and backup refresh
+(`GET /v1/fleet/marks`); hover for the branch, seq, build, place version and results, click to filter the page to that build.
+**Compare**: builds side by side over the range, or before vs after a mark over two windows of the same length (1 h to 7 d).
+**Live servers**: each server's latest TPS and memory from its heartbeat, and its own history
+(`GET /v1/fleet/servers/<jobId>/metrics`, kernel 0.4.2 heartbeats; the page says so when a server or the backend doesn't have
+it). A **Step** picker overrides the window's step (1 min to 1 day, 2 to 400 steps).
 
 Working on it: `bun run web:dev` (or `cd web && bun run dev -- --game <game repo>`) starts Vite with a proxy: `/api` goes to the
 backend with the admin token **from the game repo's `.env`** (`TYPETORCH_ADMIN_TOKEN`, or `TYPETORCH_ENV_FILE`), at the URL in the
@@ -569,7 +585,8 @@ const { servers } = await fleet.servers({ branch: "prod" });
   `CLOUDFLARE_ACCOUNT_ID` + `TT_BASIN_BUCKET` + `TT_BASIN_SQL_TOKEN` (or `WRANGLER_BASIN_SQL_AUTH_TOKEN`). The old
   `TT_ANALYTICS_URL` / `TT_ANALYTICS_ADMIN_TOKEN` still work for one release, with a warning on stderr.
 - `store.render(name, filters, options)` (Basin and DuckDB stores) returns the SQL without running it.
-- **Filters** (every query): `from`, `to` (unix ms, ISO time, or a date; a date-only `to` includes that day), `art`,
+- **Filters** (every query): `from`, `to` (unix ms, ISO time, or a date; a date-only `to` includes that day; an exact instant
+  is exact, e.g. the explorer's "Last 1 hour"), `art`,
   `branch`, `channel`, `dev`, `players` (`"new"` = first-ever sessions, `"returning"`), `variant`
   (`{ experiment, variant }`), `sexp`, `place`. Without `from`, a query covers its default number of days.
 - **writeSettings** validates the settings, then runs `typetorch settings set analytics -` in `gameDir` (the game's
@@ -592,7 +609,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 
 | Name | What | Default range |
 |---|---|---|
-| `overview` | players, new players, sessions, playtime, in total and per day | 30 days |
+| `overview` | players, new players, sessions, playtime, in total and per day; windows of a day or less also per step (`bucketMs`: 1 min up to an hour, 5 min up to 6 h, else 1 h; `buckets`, by the time a session started) | 30 days |
 | `roblox` | first-play bounce (first session < 60 s), qualified plays (sessions >= 5 min), D1/D7, playtime and play days per user, payer conversion, Robux per user and per payer | 30 days |
 | `retention` | retention by join-day cohort (day 1, 3, 7, 14, 30; days not over are `null`) | 30 days |
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
@@ -611,6 +628,9 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `benchmarks` | the last `days` (7) vs the `days` before: playtime per daily active user, D1/D7 (counted on the return day, days fully over), payer conversion, ARPPU, after-join play-through (first sessions reaching `qualifiedMinutes`) | ends at `to` |
 | `realtime` | concurrent users per hour from fleet heartbeats (per minute, summed over servers; `ccuDays` 7) and now; session time, client errors per session (tech/error from clients), client fps, server memory: the last `hours` (24) vs the hours before | 7 days |
 | `trends` | per day, `window`-day (7) moving averages of new users, DAU, playtime per DAU, Robux and D1, in total and per join source (session/join `from`; past `maxSources` folded into `other`) | 28 days |
+| `perf-client` | client fps, memory and ping (tech/client) over time and per group: `by` = `none`, `dev` (device class), `input`, `screen` (viewport short side: `<400`, `400-599`, `600-799`, `800-1079`, `1080+`), `branch`, `art`; p50 / p90 / p99 on the bad side, avg, n; the busiest `maxGroups` (8, at most 20). Step: the window's (`windowBucketMs`), or `bucketMinutes` (1-1440), or about `buckets` (10-400). At most 92 days and 400 steps | 7 days |
+| `perf-server` | server TPS (`hb`), physics FPS, memory (tech/server) and players (each server's average per step, summed), the same way; `by` = `none`, `branch`, `art` (server rows have no player: device, new/returning and variant filters don't apply) | 7 days |
+| `perf-compare` | the client and server numbers side by side: `mode: "builds"` (`arts`, at most 6; default the 4 busiest) or `mode: "around"` (`at`, unix ms or ISO, e.g. a mark's time: before vs after over two windows of `hours` (1-168, 24), shortened to the time since `at`) | 7 days |
 
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
 once: the DuckDB server drops exact duplicate rows when it writes each day's Parquet file; today's numbers and Basin can
@@ -840,11 +860,13 @@ Kernels post to it directly (`kernel/src/server/Fleet.luau`, settings in the sig
 | `POST /v1/fleet/report` | ingest | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
 | `POST /v1/fleet/alert` | ingest | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`) |
 | `POST /v1/fleet/closing` | ingest | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
-| `POST /v1/fleet/deploy` | ingest | `{ s, b, a, ch, t }` from the CLI when a deploy starts (stuck detection's start time) |
+| `POST /v1/fleet/deploy` | ingest | `{ s, b, a, ch, t, k?, fr?, m? }` from the CLI after a release (stuck detection's start time and a chart mark): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `t` unix ms or s (a clock a day off is replaced by the backend's) |
+| `POST /v1/fleet/mark` | ingest | `{ j: "cli", k: kernel\|backup, v?, pv?, b?, s?, a?, ch?, m?, t? }` from the CLI after `kernel deploy` / `kernel restore` (`v` kernel version, `pv` place version) and a backup refresh (`b`/`s`/`a` the build that became the backup). Only `j = "cli"` (one limiter key, 30 a minute) |
 | `GET /v1/fleet/servers?branch=&maxAge=` | admin | `{ servers: [...], players, byArtifact, byHealth }` (live: seen in the last 90 s, not closed) |
 | `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }` |
 | `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
 | `GET /v1/fleet/alerts?since=<ms>&level=&unacked=1&limit=` | admin | `{ alerts: [...] }` (each with `at` in ms and `acked`) |
+| `GET /v1/fleet/marks?since=&until=&branch=&kinds=&limit=` | admin | `{ marks: [{ id, kind, at, time, branch, seq, artifact, channel, from, kernel, placeVersion, message, results?, inferred? }] }`, oldest first: every release in the deploys table (with its servers per report result; one known only from server reports has `inferred: true`) and the kernel / backup marks. Times unix ms or ISO; default the last 30 days; at most a 366-day window and the `limit` (500, at most 2,000) newest. `branch` keeps that branch's releases and every place-wide mark |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | `{ by? }` |
 | `GET /v1/fleet/stream?branch=&types=server,alert` | admin | Server-Sent Events (below) |
 
@@ -867,7 +889,8 @@ points in all (the sweep drops the oldest), which fits a 1,250-server fleet.
 | `hello` | `{ at }` on connect |
 | `server` | `{ type, change: new\|update\|back\|lost\|closed, server: <servers row> }` (on changes, not every heartbeat) |
 | `report` | `{ type, seq, job, result, branch }` |
-| `deploy` | `{ type, seq, branch, artifact }` |
+| `deploy` | `{ type, seq, branch, artifact, kind? }` |
+| `mark` | `{ type, mark: <marks row> }` (kernel publish, backup refresh) |
 | `alert` | `{ type, alert: <alerts row> }` |
 | `alert_ack` | `{ type, id }` |
 
@@ -877,7 +900,7 @@ message (one alert per branch and artifact per sweep, listing the JobIds; critic
 with no report for it (it lists those JobIds and says nothing about the build). **Notifications:**
 `TYPETORCH_ALERT_WEBHOOK_URL` (Discord, Slack or generic JSON, detected from the URL or `TYPETORCH_ALERT_WEBHOOK_FORMAT`), critical
 only by default (`TYPETORCH_ALERT_WEBHOOK_LEVELS`), the same (code, branch, artifact) at most once per 10 minutes, at most
-20 posts a minute. Reports are kept 30 days, alerts 90 days. Per-JobId limits (40 a minute) sit above the kernel's
+20 posts a minute. Reports are kept 30 days, alerts and releases 90 days, kernel / backup marks a year (at most 5,000, the newest). Per-JobId limits (40 a minute) sit above the kernel's
 own 30.
 
 **New JobIds** (`TYPETORCH_NEW_JOBS_PER_MINUTE`, 2,000): JobIds without a `servers` row are let in at most 2,000 per
