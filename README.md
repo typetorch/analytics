@@ -336,6 +336,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `GET /v1/storage` | admin | what the data folder holds |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` |
 | `GET /v1/identity`, `POST /v1/identity/backfill` | admin | pid <-> UserId lookups and backfill |
+| `GET /v1/identity/<pid>/profile` | admin | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>` | admin | error kinds with counts; one kind |
 | `GET /v1/live` | admin | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads (a server's TPS / memory history too) and alert acknowledgement |
@@ -483,7 +484,8 @@ window touches. The explorer's **Errors** page shows both.
 
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
-Roblox, Retention, Funnels, Players, Flow, Experiments, First session, Events, Fleet, **Errors**, Query, **Settings** (the
+Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
+Sessions and Timeline views), Flow, Experiments, First session, Events, Fleet, **Errors**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)). The header shows who is signed in (Roblox name and avatar, or
 "admin token") and a Sign out button. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
@@ -596,6 +598,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
 | `timeline` | one player's sessions and events (by `pid`) | 90 days |
 | `player-graph` | one player's node graph (all sessions, or one with `sid`): states as nodes with what happened in them, moves as edges with counts and time | 90 days |
+| `player-stats` | one player (by `pid`, or `uid`): Robux, purchases, sessions and playtime per UTC day (per hour when the range is 2 days or less; dense, sessions count where they start), totals (avg / median session, playtime per day, active days, first / last seen), each session (`sessions`, default 1,000, at most 5,000) and each purchase (`purchases`, default 500, at most 2,000), newest first, with `...Truncated` flags. The range is cut to its last 400 days (`window.clamped`). Server-sent purchases only, like the revenue queries | 30 days |
 | `flow` | the merged flow graph for a filter (where most go next, where they quit) | 7 days |
 | `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
 | `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
@@ -761,6 +764,7 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | `GET /healthz` | open / admin | `{ ok }`; with the admin role: memory, loader lag, row counts, fleet counts, the bus, error log counts |
 | `POST /v1/identity` | game | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
 | `GET /v1/identity?pid=` / `?uid=` | admin | pid <-> UserId (`{ identities: [{ pid, uid, firstSeen, lastSeen }] }`); no parameter: `{ count, backfill }` |
+| `GET /v1/identity/<pid>/profile` | admin | `{ pid, linked: false }`, or `{ pid, linked: true, uid, roblox: "ok" \| "partial" \| "not-found" \| "unavailable", cached, name, displayName, avatar }` (null when Roblox didn't say). 120 a minute per address |
 | `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `OPENCLOUD_API_KEY` with `universe-datastores.objects:list` and `:read`) |
 
 How it works:
@@ -792,9 +796,20 @@ keeps the notification id and outcome, never the UserId.
 DuckDB games in the ingest batch, Basin games to `POST /v1/identity` (Basin rows can't be deleted). They go to one
 table in the fleet SQLite file, `identities (pid PRIMARY KEY, uid, first_seen, last_seen)`, never into the events.
 Queries take a UserId where they take a pid: `players` searches by part of a pid or by a UserId and returns `uid`
-when known; `timeline`, `player-graph` and `events` take `uid` instead of `pid` (the most recently seen pid). Players
-who joined before identity rows existed are mapped by `POST /v1/identity/backfill` (DataStore links, Open Cloud key) or
-not at all.
+when known; `timeline`, `player-graph`, `player-stats` and `events` take `uid` instead of `pid` (the most recently seen
+pid; an unknown UserId is a 404 `no pid known for UserId <uid>`). Players who joined before identity rows existed are
+mapped by `POST /v1/identity/backfill` (DataStore links, Open Cloud key) or not at all.
+
+<a id="player-profiles"></a>**Player profiles** (`GET /v1/identity/<pid>/profile`, the Players page's profile card). The server
+looks the pid's UserId up on Roblox's public APIs: `https://users.roblox.com/v1/users/<UserId>` (username, display name) and
+`https://thumbnails.roblox.com/v1/users/avatar-headshot` (150x150 headshot). Only those two fixed hosts; the UserId (a
+checked integer from the identity table) is the only input, so nothing in a request becomes a URL. Each call has a 4 s
+deadline and a 64 KB body cap, redirects are refused, the username must be letters, digits and `_`, the display name loses
+control characters, and only an https headshot on `*.rbxcdn.com` is kept (the explorer's CSP allows that CDN). Answers stay
+in memory only (never on disk, never logged): 6 h for a good one, 60 s for a failure or a headshot still rendering, at most
+5,000 UserIds (least recently used out first); at most 120 lookups a minute and 8 at once across all callers, past that an
+older answer or `unavailable`. While Roblox is down the last good answer is served; without one the card shows the UserId.
+Nothing to set: no key is needed.
 
 **Ad-hoc SQL** (`POST /v1/sql`, admin token; `TYPETORCH_SQL=0` turns it off). One SELECT or WITH statement over two
 views, `events` and `recordings` (every day file plus a Parquet snapshot of today's live rows, taken again only when
@@ -883,8 +898,10 @@ so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durab
 - Events carry a random pid, never a UserId, name or chat. The game keeps UserId -> pid in its DataStore
   (`TypeTorchAnalytics` / `p/<UserId>`).
 - **UserIds are stored on the dev's own server**: the identity table above maps pids to UserIds so the dev can find a
-  player (support) and answer Right to Erasure without a DataStore read. It is never sent anywhere else and never part
-  of the events, Parquet files, rollups, raw archives or Basin.
+  player (support) and answer Right to Erasure without a DataStore read. It is never part of the events, Parquet files,
+  rollups, raw archives or Basin, and goes to one place only: Roblox itself, when an admin opens a player's detail (the
+  server asks Roblox's public APIs for that UserId's name and headshot, without the pid; the answer stays in memory, see
+  [Player profiles](#player-profiles)).
 - **Erasure removes them**: the webhook (or `POST /v1/erasure` by pid) deletes the pid's rows everywhere, then the
   identity rows, and identity rows for an erased pid are refused afterwards. The erasure log never holds the UserId.
 - Turning it off: the framework option `identity: false` stops sending identity rows; deleting
