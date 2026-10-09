@@ -8,12 +8,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, RotateCcw, Save, Send, Undo2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
+import { DataTable, type DataColumn } from "@/components/data-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, ApiError } from "@/lib/api";
@@ -206,42 +206,56 @@ function WebhookControl({
 	);
 }
 
+/** What a change did, as plain text (the search and the CSV use it; the cell shows the same words). */
+function auditWhat(e: SettingsAuditEntry): string {
+	if (e.action === "test-alert") return `Test alert: ${e.result ?? ""}`;
+	return [e.set?.length ? `Set ${e.set.join(", ")}` : "", e.reset?.length ? `Reset ${e.reset.join(", ")}` : ""].filter(Boolean).join("; ");
+}
+
+const AUDIT_COLUMNS: DataColumn<SettingsAuditEntry>[] = [
+	{ id: "at", header: "When", type: "date", accessor: (e) => e.at, cell: (e) => <span title={fmtTime(e.at)}>{fmtAgo(e.at)}</span>, format: (_v, e) => fmtAgo(e.at), className: "text-xs" },
+	{
+		id: "who",
+		header: "Who",
+		accessor: (e) => e.who,
+		cell: (e) => (
+			<>
+				{e.who}
+				<span className="text-muted-foreground"> ({e.via === "bearer" ? "CLI token" : "explorer"})</span>
+			</>
+		),
+		className: "text-xs",
+	},
+	{ id: "via", header: "Via", type: "enum", accessor: (e) => (e.via === "bearer" ? "CLI token" : "explorer"), defaultHidden: true },
+	{ id: "action", header: "Action", type: "enum", accessor: (e) => e.action, defaultHidden: true },
+	{
+		id: "what",
+		header: "What",
+		accessor: auditWhat,
+		cell: (e) =>
+			e.action === "test-alert" ? (
+				<>Test alert: {e.result}</>
+			) : (
+				<>
+					{e.set?.length ? <span>Set {e.set.join(", ")}</span> : null}
+					{e.set?.length && e.reset?.length ? "; " : null}
+					{e.reset?.length ? <span>Reset {e.reset.join(", ")}</span> : null}
+				</>
+			),
+		className: "text-xs whitespace-normal",
+	},
+];
+
 function AuditList({ entries }: { entries: SettingsAuditEntry[] }) {
-	if (!entries.length) return <EmptyState>No changes yet. Each save and test alert is listed here (who and which settings, never the values).</EmptyState>;
 	return (
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>When</TableHead>
-					<TableHead>Who</TableHead>
-					<TableHead>What</TableHead>
-				</TableRow>
-			</TableHeader>
-			<TableBody>
-				{entries.map((e, i) => (
-					<TableRow key={`${e.at}-${i}`}>
-						<TableCell className="text-xs whitespace-nowrap" title={fmtTime(e.at)}>
-							{fmtAgo(e.at)}
-						</TableCell>
-						<TableCell className="text-xs">
-							{e.who}
-							<span className="text-muted-foreground"> ({e.via === "bearer" ? "CLI token" : "explorer"})</span>
-						</TableCell>
-						<TableCell className="text-xs whitespace-normal">
-							{e.action === "test-alert" ? (
-								<>Test alert: {e.result}</>
-							) : (
-								<>
-									{e.set?.length ? <span>Set {e.set.join(", ")}</span> : null}
-									{e.set?.length && e.reset?.length ? "; " : null}
-									{e.reset?.length ? <span>Reset {e.reset.join(", ")}</span> : null}
-								</>
-							)}
-						</TableCell>
-					</TableRow>
-				))}
-			</TableBody>
-		</Table>
+		<DataTable
+			id="settings-audit"
+			label="Settings changes"
+			columns={AUDIT_COLUMNS}
+			data={entries}
+			defaultSort={[{ id: "at", desc: true }]}
+			empty={<EmptyState>No changes yet. Each save and test alert is listed here (who and which settings, never the values).</EmptyState>}
+		/>
 	);
 }
 
