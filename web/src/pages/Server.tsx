@@ -216,7 +216,7 @@ function ServerView({ job }: { job: string }) {
 							</TabsList>
 						</div>
 						<TabsContent value="status" forceMount className="data-[state=inactive]:hidden">
-							<StatusTab job={job} live={live} status={status} />
+							<StatusTab active={tab === "status"} job={job} live={live} status={status} />
 						</TabsContent>
 						<TabsContent value="logs" forceMount className="data-[state=inactive]:hidden">
 							<LogsTab active={tab === "logs"} players={players} request={logRequest} />

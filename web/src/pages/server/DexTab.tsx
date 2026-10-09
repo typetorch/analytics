@@ -4,7 +4,7 @@
  * children load when it opens, 200 at a time) and the selected instance's properties, attributes and tags.
  */
 import { ChevronDown, ChevronRight, LoaderCircle } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { cn } from "cn";
 import { EmptyState } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
@@ -104,6 +104,7 @@ export function DexTab({ active }: { active: boolean }) {
 	const [open, setOpen] = useState<Set<number>>(() => new Set());
 	const [selected, setSelected] = useState<number | undefined>();
 	const [loading, setLoading] = useState<number | undefined>();
+	const propsRef = useRef<HTMLDivElement>(null);
 
 	const loadChildren = useCallback(
 		async (id: number, offset = 0) => {
@@ -126,6 +127,8 @@ export function DexTab({ active }: { active: boolean }) {
 		(id: number) => {
 			setSelected(id);
 			void loadPropsOp({ id });
+			// On a phone the properties sit under the tree: bring them on screen (no scroll when they already are).
+			requestAnimationFrame(() => propsRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }));
 		},
 		[loadPropsOp],
 	);
@@ -153,7 +156,7 @@ export function DexTab({ active }: { active: boolean }) {
 				<span className="text-xs text-muted-foreground">Read only. Refresh reloads the open node you selected (or game).</span>
 			</RemoteBar>
 			<div className="grid gap-4 lg:grid-cols-2">
-				<ul role="tree" aria-label="Server instances" className="max-h-[60vh] min-w-0 overflow-auto rounded-lg border p-1 text-sm">
+				<ul role="tree" aria-label="Server instances" className="max-h-[45vh] min-w-0 lg:max-h-[60vh] overflow-auto rounded-lg border p-1 text-sm">
 					{lines.map((line) =>
 						line.kind === "more" ? (
 							<li key={`more-${line.id}`} role="none" style={{ paddingLeft: line.depth * 14 + 22 }}>
@@ -176,7 +179,7 @@ export function DexTab({ active }: { active: boolean }) {
 						),
 					)}
 				</ul>
-				<div className="min-w-0 space-y-3">
+				<div ref={propsRef} className="min-w-0 scroll-mt-4 space-y-3">
 					{selected === undefined ? (
 						<p className="text-sm text-muted-foreground">Select an instance to read its properties.</p>
 					) : (

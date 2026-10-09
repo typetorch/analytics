@@ -182,13 +182,14 @@ export function StatusFacts({ data }: { data: RemoteStatus }) {
 }
 
 /** `status` is the page's: it is fetched once as soon as the server polls (the header shows its place version). */
-export function StatusTab({ job, live, status }: { job: string; live: boolean; status: RemoteState<RemoteStatus> & { run: () => Promise<unknown> } }) {
+// The charts render only while the tab shows (a chart in a hidden panel has no size and warns on every resize).
+export function StatusTab({ active, job, live, status }: { active: boolean; job: string; live: boolean; status: RemoteState<RemoteStatus> & { run: () => Promise<unknown> } }) {
 	const run = status.run;
 	return (
 		<div className="space-y-6">
 			<section className="space-y-2">
 				<h2 className="text-sm font-medium">Last {CHART_MINUTES} minutes</h2>
-				<ServerCharts job={job} live={live} />
+				{active ? <ServerCharts job={job} live={live} /> : null}
 			</section>
 			<section className="space-y-3">
 				<h2 className="text-sm font-medium">Kernel status</h2>
