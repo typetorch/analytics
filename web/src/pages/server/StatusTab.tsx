@@ -10,12 +10,33 @@ import { api, ApiError } from "@/lib/api";
 import { fmtDuration, fmtInt, fmtNum, fmtTime } from "@/lib/format";
 import type { RemoteState } from "@/lib/remote-debug";
 import type { RemoteStatus, ServerMetricPoint } from "@/lib/types";
-import { RemoteBar, useDebug, useFirstFetch } from "./shared";
+import { RemoteBar } from "./shared";
 
 /** The charts' window. */
 export const CHART_MINUTES = 60;
 
-const hhmm = (t: number) => fmtTime(t).slice(11, 16);
+/** A round step (1, 2, 2.5 or 5 times a power of ten) at least `x`. */
+function niceStep(x: number): number {
+	if (!(x > 0)) return 1;
+	const power = 10 ** Math.floor(Math.log10(x));
+	const f = x / power;
+	return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * power;
+}
+
+/** The y axis: 0 to a round top (at least `floor`) in four equal steps, e.g. 0 15 30 45 60 or 0 250 500 750 1,000. */
+export function valueTicks(max: number, floor = 0): number[] {
+	const top = floor > 0 && max <= floor ? floor : niceStep(Math.max(max, 0) / 4) * 4;
+	return [0, 1, 2, 3, 4].map((i) => (top * i) / 4);
+}
+
+/** The x axis: about four evenly spaced times between the first and the last point. */
+export function timeTicks(first: number, last: number, count = 4): number[] {
+	if (!(last > first)) return [first];
+	return Array.from({ length: count }, (_, i) => Math.round(first + ((last - first) * i) / (count - 1)));
+}
+
+/** "10:32", or "10:32:05" when the window is under five minutes (so ticks don't repeat). */
+const timeLabel = (span: number) => (t: number) => fmtTime(t).slice(11, span < 5 * 60_000 ? 19 : 16);
 
 interface SeriesSpec {
 	key: keyof ServerMetricPoint;
@@ -28,6 +49,9 @@ function MetricChart({ title, unit, points, series, digits, minMax }: { title: s
 	const config: ChartConfig = Object.fromEntries(series.map((s) => [s.key, { label: s.label, color: s.color }]));
 	const values = points.flatMap((p) => series.map((s) => p[s.key])).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
 	const last = points.length ? points[points.length - 1] : undefined;
+	const first = points.length ? points[0].t : 0;
+	const xTicks = timeTicks(first, last?.t ?? first);
+	const yTicks = valueTicks(values.length ? Math.max(...values) : 0, minMax);
 	return (
 		<figure className="min-w-0 space-y-1" aria-label={`${title} over the last ${CHART_MINUTES} minutes`}>
 			<figcaption className="flex items-baseline justify-between gap-2 text-sm">
@@ -40,14 +64,19 @@ function MetricChart({ title, unit, points, series, digits, minMax }: { title: s
 				<ChartContainer config={config} className="aspect-auto h-40 w-full">
 					<LineChart data={points} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
 						<CartesianGrid vertical={false} />
-						<XAxis dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} tickLine={false} axisLine={false} tickMargin={6} minTickGap={36} tickFormatter={hhmm} />
-						<YAxis
+						<XAxis
+							dataKey="t"
+							type="number"
+							scale="time"
+							domain={["dataMin", "dataMax"]}
+							ticks={xTicks}
 							tickLine={false}
 							axisLine={false}
-							width={44}
-							domain={[0, (max: number) => Math.max(minMax ?? 0, Math.ceil(max))]}
-							tickFormatter={(v: number) => fmtNum(v, 0)}
+							tickMargin={6}
+							tickFormatter={timeLabel((last?.t ?? first) - first)}
 						/>
+						<YAxis tickLine={false} axisLine={false} width={44} domain={[0, yTicks[4]]} ticks={yTicks} interval={0} tickFormatter={(v: number) => fmtNum(v, 1)} />
+
 						<ChartTooltip
 							content={
 								<ChartTooltipContent
@@ -56,7 +85,8 @@ function MetricChart({ title, unit, points, series, digits, minMax }: { title: s
 								/>
 							}
 						/>
-						{series.length > 1 ? <ChartLegend content={<ChartLegendContent />} /> : null}
+						{/* In the series' own order (Recharts sorts by name otherwise). */}
+						{series.length > 1 ? <ChartLegend itemSorter={null} content={<ChartLegendContent />} /> : null}
 						{series.map((s) => (
 							<Line key={s.key} dataKey={s.key} stroke={`var(--color-${s.key})`} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
 						))}
@@ -107,7 +137,7 @@ export function ServerCharts({ job, live }: { job: string; live: boolean }) {
 					{ key: "luaMb", label: "Lua heap", color: "var(--chart-2)" },
 				]}
 			/>
-			<MetricChart title="Players" unit="players" digits={0} points={points} series={[{ key: "players", label: "Players", color: "var(--chart-1)" }]} />
+			<MetricChart title="Players" unit="players" digits={0} minMax={4} points={points} series={[{ key: "players", label: "Players", color: "var(--chart-1)" }]} />
 		</div>
 	);
 }
@@ -151,11 +181,9 @@ export function StatusFacts({ data }: { data: RemoteStatus }) {
 	);
 }
 
-/** `status` is the page's (its header shows the place version from it). */
-export function StatusTab({ active, job, live, status }: { active: boolean; job: string; live: boolean; status: RemoteState<RemoteStatus> & { run: () => Promise<unknown> } }) {
-	const { ready } = useDebug();
+/** `status` is the page's: it is fetched once as soon as the server polls (the header shows its place version). */
+export function StatusTab({ job, live, status }: { job: string; live: boolean; status: RemoteState<RemoteStatus> & { run: () => Promise<unknown> } }) {
 	const run = status.run;
-	useFirstFetch(active && ready, run);
 	return (
 		<div className="space-y-6">
 			<section className="space-y-2">

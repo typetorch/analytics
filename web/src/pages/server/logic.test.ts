@@ -6,6 +6,7 @@ import { epochMs, limitRows } from "./InfoTabs";
 import { LOGS_KEPT, mergeLogs } from "./LogsTab";
 import { clientState } from "./PlayersTab";
 import { openEntry, stateQuery } from "./StateTab";
+import { timeTicks, valueTicks } from "./StatusTab";
 
 const line = (i: number, text = `line ${i}`): RemoteLogEntry => ({ i, t: 1_760_000_000 + i, kind: "output", text });
 
@@ -72,6 +73,18 @@ describe("tables", () => {
 		expect(clientState({ userId: 1, name: "a" })).toBe("waiting");
 		expect(clientState({ userId: 1, name: "a", client: { ok: true } })).toBe("ok");
 		expect(clientState({ userId: 1, name: "a", client: { ok: false, error: "boom" } })).toBe("failed");
+	});
+});
+
+describe("chart axes", () => {
+	it("goes from 0 to a round top in four steps, at least the floor; times spread evenly", () => {
+		expect(valueTicks(59.8, 60)).toEqual([0, 15, 30, 45, 60]);
+		expect(valueTicks(61, 60)).toEqual([0, 20, 40, 60, 80]);
+		expect(valueTicks(941)).toEqual([0, 250, 500, 750, 1000]);
+		expect(valueTicks(3, 4)).toEqual([0, 1, 2, 3, 4]);
+		expect(valueTicks(0)).toEqual([0, 1, 2, 3, 4]);
+		expect(timeTicks(0, 90_000)).toEqual([0, 30_000, 60_000, 90_000]);
+		expect(timeTicks(5, 5)).toEqual([5]);
 	});
 });
 

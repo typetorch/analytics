@@ -34,6 +34,22 @@ function playerColumns(onLogs: (userId: number) => void, ready: boolean): DataCo
 				</span>
 			),
 		},
+		// Next to the name, so it is on screen on a phone without scrolling the table sideways.
+		{
+			id: "actions",
+			header: "Logs",
+			accessor: () => null,
+			sortable: false,
+			filter: false,
+			searchable: false,
+			hideable: false,
+			cell: (p) => (
+				<Button type="button" variant="ghost" size="xs" onClick={() => onLogs(p.userId)} disabled={!ready} aria-label={`Client logs of ${p.name}`}>
+					<ScrollText aria-hidden />
+					Logs
+				</Button>
+			),
+		},
 		{ id: "userId", header: "UserId", type: "text", accessor: (p) => String(p.userId), className: "font-mono text-xs" },
 		{
 			id: "dev",
@@ -55,21 +71,6 @@ function playerColumns(onLogs: (userId: number) => void, ready: boolean): DataCo
 				<span title={p.client?.error ?? (p.client?.generation ? `generation ${p.client.generation}` : undefined)}>
 					<Tone tone={CLIENT_TONE[clientState(p)]}>{clientState(p)}</Tone>
 				</span>
-			),
-		},
-		{
-			id: "actions",
-			header: "Logs",
-			accessor: () => null,
-			sortable: false,
-			filter: false,
-			searchable: false,
-			hideable: false,
-			cell: (p) => (
-				<Button type="button" variant="ghost" size="xs" onClick={() => onLogs(p.userId)} disabled={!ready} aria-label={`Client logs of ${p.name}`}>
-					<ScrollText aria-hidden />
-					Logs
-				</Button>
 			),
 		},
 	];

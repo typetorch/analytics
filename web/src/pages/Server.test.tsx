@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
@@ -51,6 +51,16 @@ const answers: Partial<Record<RemoteOp, unknown>> = {
 	players: { players: [{ userId: 777001, name: MARKER, displayName: "Marker", dev: false, pingMs: 80, accountAge: 120, client: { ok: true, generation: "g2" } }], max: 20 },
 	"player.logs": { userId: 777001, name: MARKER, entries: [{ i: 1, t: 1_760_000_000, kind: "warning", text: `client says hi from ${MARKER}` }] },
 	logs: { entries: [{ i: 41, t: 1_760_000_000, kind: "output", text: "server line 41" }], last: 41 },
+	// One reply per query: the roots, or the Inventory table.
+	state: (args: { queries: { root: string }[] }) =>
+		args.queries.map((q) =>
+			q.root === ""
+				? { type: "roots", preview: "", size: 1, matched: 1, page: 0, pages: 1, hasMore: false, entries: [{ key: "Inventory", seg: "Inventory", type: "module", preview: "{2}", expandable: true }] }
+				: { type: "table", preview: "{2}", size: 2, matched: 2, page: 0, pages: 1, hasMore: false, entries: [{ key: "capacity", seg: "scapacity", type: "number", preview: "40", expandable: false }, { key: "items", seg: "sitems", type: "table", preview: "{3}", expandable: true }] },
+		),
+	"dex.children": (args: { nodes: { id: number }[] }) =>
+		args.nodes.map((n) => ({ id: n.id, offset: 0, total: n.id === 0 ? 2 : 0, rows: n.id === 0 ? [{ id: 1, name: "Workspace", className: "Workspace", childCount: 3, parent: 0 }, { id: 2, name: "Lighting", className: "Lighting", childCount: 0, parent: 0 }] : [] })),
+	"dex.props": (args: { id: number }) => ({ id: args.id, name: "Workspace", className: "Workspace", path: "game.Workspace", props: [{ name: "Gravity", category: "Physics", kind: "number", text: "196.2" }], attrs: [], tags: [] }),
 };
 
 function mockApi(d: FleetServerDetail = detail(), watchConnected = true) {
@@ -62,9 +72,11 @@ function mockApi(d: FleetServerDetail = detail(), watchConnected = true) {
 	]);
 	vi.spyOn(api, "debugAudit").mockResolvedValue([]);
 	let n = 0;
-	const remoteCommand = vi.spyOn(api, "remoteCommand").mockImplementation(async (_job, op) => {
+	const remoteCommand = vi.spyOn(api, "remoteCommand").mockImplementation(async (_job, op, args) => {
 		n += 1;
-		const command: RemoteCommand = { id: `c${n}`, op, state: "done", createdAt: 0, expiresAt: 0, doneAt: Date.now(), ms: 3, result: answers[op] ?? {} };
+		const answer = answers[op];
+		const result = typeof answer === "function" ? (answer as (a: unknown) => unknown)(args) : (answer ?? {});
+		const command: RemoteCommand = { id: `c${n}`, op, state: "done", createdAt: 0, expiresAt: 0, doneAt: Date.now(), ms: 3, result };
 		return command;
 	});
 	return { fleetServer, watchServer, remoteCommand };
@@ -153,7 +165,8 @@ describe("the server page", () => {
 		expect(await screen.findByText(`client says hi from ${MARKER}`)).toBeTruthy();
 		expect(screen.getByTestId("location").textContent).toBe(`/servers/${JOB}?tab=logs`);
 		// Straight to the player's log: the server log (fetched on its own first view) was not fetched on the way.
-		expect(remoteCommand.mock.calls.map((c) => c[1])).toEqual(["players", "player.logs"]);
+		// (status runs once on connect, whatever the tab: the header's place version)
+		expect(remoteCommand.mock.calls.map((c) => c[1]).sort()).toEqual(["player.logs", "players", "status"]);
 		for (let i = 0; i < localStorage.length; i++) expect(localStorage.getItem(localStorage.key(i) as string)).not.toContain(MARKER);
 		expect(JSON.stringify(client.getQueryCache().getAll().map((q) => q.state.data))).not.toContain(MARKER);
 	});
@@ -165,5 +178,36 @@ describe("the server page", () => {
 		expect(remoteCommand).toHaveBeenCalledWith(JOB, "logs", { limit: 200 }, expect.anything());
 		fireEvent.click(screen.getByRole("button", { name: "Fetch newer" }));
 		await waitFor(() => expect(remoteCommand).toHaveBeenCalledWith(JOB, "logs", { since: 41, limit: 500 }, expect.anything()));
+	});
+
+	it("State: the roots, then a click opens a module's table, and the breadcrumb goes back", async () => {
+		const { remoteCommand } = mockApi();
+		mount(`/servers/${JOB}?tab=state`);
+		const root = await screen.findByText("Inventory");
+		expect(remoteCommand).toHaveBeenCalledWith(JOB, "state", { queries: [{ root: "", path: [], page: 0 }] }, expect.anything());
+		fireEvent.click(root);
+		expect(await screen.findByText("capacity")).toBeTruthy();
+		expect(remoteCommand).toHaveBeenCalledWith(JOB, "state", { queries: [{ root: "Inventory", path: [], page: 0 }] }, expect.anything());
+		// A key that isn't a table doesn't open; a filter goes to the server.
+		const before = remoteCommand.mock.calls.length;
+		fireEvent.click(screen.getByText("capacity"));
+		expect(remoteCommand.mock.calls.length).toBe(before);
+		fireEvent.change(screen.getByLabelText("Filter keys"), { target: { value: "item" } });
+		fireEvent.click(screen.getByRole("button", { name: "Filter" }));
+		await waitFor(() => expect(remoteCommand).toHaveBeenCalledWith(JOB, "state", { queries: [{ root: "Inventory", path: [], page: 0, filter: "item" }] }, expect.anything()));
+		fireEvent.click(within(screen.getByRole("navigation", { name: "State path" })).getByRole("button", { name: "Roots" }));
+		await waitFor(() => expect(remoteCommand.mock.calls.filter((c) => c[1] === "state" && JSON.stringify(c[2]).includes('"root":""')).length).toBe(2));
+	});
+
+	it("Dex: game's children on first view, properties of the selected instance", async () => {
+		const { remoteCommand } = mockApi();
+		mount(`/servers/${JOB}?tab=dex`);
+		const workspace = await screen.findByRole("button", { name: "Workspace (Workspace, 3 children)" });
+		expect(remoteCommand).toHaveBeenCalledWith(JOB, "dex.children", { nodes: [{ id: 0, offset: 0, limit: 200 }] }, expect.anything());
+		fireEvent.click(workspace);
+		expect(await screen.findByText("196.2")).toBeTruthy();
+		expect(remoteCommand).toHaveBeenCalledWith(JOB, "dex.props", { id: 1 }, expect.anything());
+		// Nothing that writes exists on the page.
+		for (const word of [/^Set$/, /^Rename$/, /^Destroy$/, /^Delete$/, /^Kick$/]) expect(screen.queryByRole("button", { name: word })).toBeNull();
 	});
 });

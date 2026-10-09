@@ -23,7 +23,7 @@ import { DexTab } from "./server/DexTab";
 import { AuditTab, BudgetTab, BuildsTab, ErrorsTab, ModulesTab, NetworkTab } from "./server/InfoTabs";
 import { LogsTab, type PlayerLogRequest } from "./server/LogsTab";
 import { PlayersTab } from "./server/PlayersTab";
-import { DebugContext, type DebugContextValue, Tone } from "./server/shared";
+import { DebugContext, type DebugContextValue, Tone, useFirstFetch } from "./server/shared";
 import { StateTab } from "./server/StateTab";
 import { ServerCharts, StatusTab } from "./server/StatusTab";
 
@@ -156,8 +156,11 @@ function ServerView({ job }: { job: string }) {
 	const ready = live && session.connected;
 
 	const [tabParam, setTab] = useParam("tab", "status");
+	// (the remote ops below are declared before any early return: hooks run in the same order every render)
 	const tab: TabId = SERVER_TABS.some((t) => t.id === tabParam) ? (tabParam as TabId) : "status";
 	const status = useRemote<RemoteStatus>(call, "status");
+	// Once, as soon as the server polls, whatever the tab: the header's place version and the Status tab come from it.
+	useFirstFetch(ready, status.run);
 	const players = useRemote<RemotePlayers>(call, "players");
 	const [logRequest, setLogRequest] = useState<PlayerLogRequest | undefined>();
 	const showLogs = useCallback(
@@ -202,8 +205,8 @@ function ServerView({ job }: { job: string }) {
 						<Connection live={live} connected={session.connected} lastPollAt={session.lastPollAt} watchError={watch.error} watching={watch.reply !== undefined} />
 						<span className="text-xs text-muted-foreground">Read only. Every fetch is one audited command; answers stay in this page (gone on reload).</span>
 					</div>
-					<Tabs value={tab} onValueChange={(v) => setTab(v === "status" ? "" : v)} className="gap-4">
-						<div className="-mx-1 overflow-x-auto px-1 pb-1">
+					<Tabs value={tab} onValueChange={setTab} className="gap-4">
+						<div className="-mx-1 overflow-x-auto px-1 pb-1 [scrollbar-width:thin]">
 							<TabsList className="w-max" aria-label="Server debug">
 								{SERVER_TABS.map((t) => (
 									<TabsTrigger key={t.id} value={t.id} className="px-2.5">
@@ -213,7 +216,7 @@ function ServerView({ job }: { job: string }) {
 							</TabsList>
 						</div>
 						<TabsContent value="status" forceMount className="data-[state=inactive]:hidden">
-							<StatusTab active={tab === "status"} job={job} live={live} status={status} />
+							<StatusTab job={job} live={live} status={status} />
 						</TabsContent>
 						<TabsContent value="logs" forceMount className="data-[state=inactive]:hidden">
 							<LogsTab active={tab === "logs"} players={players} request={logRequest} />

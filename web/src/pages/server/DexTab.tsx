@@ -249,7 +249,13 @@ function TreeItem({
 				) : (
 					<span className="inline-block size-6 shrink-0" aria-hidden />
 				)}
-				<button type="button" onClick={onSelect} className={cn("flex min-w-0 items-baseline gap-1.5 py-1 text-left", node.gone && "text-muted-foreground line-through")} title={node.gone ? "This instance is gone" : undefined}>
+				<button
+					type="button"
+					onClick={onSelect}
+					aria-label={`${row.name} (${row.className}${row.childCount > 0 ? `, ${row.childCount} children` : ""})`}
+					className={cn("flex min-w-0 items-baseline gap-1.5 py-1 text-left", node.gone && "text-muted-foreground line-through")}
+					title={node.gone ? "This instance is gone" : undefined}
+				>
 					<span className="truncate">{row.name}</span>
 					<span className="shrink-0 text-xs text-muted-foreground">{row.className}</span>
 					{row.childCount > 0 ? <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{fmtInt(row.childCount)}</span> : null}
