@@ -104,9 +104,8 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_TOKEN_LOGIN` | no | `off` hides and refuses the admin-token login in the browser (the CLI's Bearer token still works). Default `on`. |
 | `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
-| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill. |
+| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake) |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
-| `TYPETORCH_MESSAGING_KEY` | no | Remote debug's [instant wake](#instant-wake): an Open Cloud key with **only** `universe-messaging-service:publish` on the game's universe (needs `TYPETORCH_UNIVERSE_ID`). Env only: never logged, returned or shown. Without it a watched server starts polling at its next heartbeat (up to 30 s). |
 | `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https; the server won't start with another scheme). Also settable on the Settings page. |
 
 <details><summary>Advanced (defaults suit a 1 GB machine)</summary>
@@ -173,7 +172,7 @@ as noted for the token login).
 The bounds apply to values saved on the page (the environment keeps its own, wider checks). A save is all or nothing: one
 wrong value and nothing changes. **Not editable** (change them on Coolify and redeploy): `TYPETORCH_API_KEY`,
 `TYPETORCH_API_KEY_PREVIOUS`, `TYPETORCH_ADMIN_TOKEN`, `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`,
-`TYPETORCH_MESSAGING_KEY`, `TYPETORCH_PUBLIC_URL`, `TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`, the data dir,
+`OPENCLOUD_API_KEY`, `TYPETORCH_PUBLIC_URL`, `TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`, the data dir,
 `PORT` / `HOST`, and everything else in the tables above.
 
 **Where it is kept.** `<data dir>/runtime-settings.json` (`/data` on Coolify, so it survives redeploys): the saved values and
@@ -319,7 +318,7 @@ unread. A failure goes back to the login page with a plain sentence, never a sta
 4. Optional: `TYPETORCH_ADMIN_ALLOW_IPS=<your IP or range>` to hide the admin side from everyone else (needs real addresses:
    no Cloudflare orange cloud, or see "Behind Cloudflare" under [Security](#security)).
 5. Optional: the Roblox OAuth variables above.
-6. Optional: `TYPETORCH_MESSAGING_KEY` (an Open Cloud key with only `universe-messaging-service:publish`) and
+6. Optional: `OPENCLOUD_API_KEY` with `universe-messaging-service:publish` on the game (for the instant wake) and
    `TYPETORCH_UNIVERSE_ID`: the server page connects to a game server within seconds ([instant wake](#instant-wake)).
 
 The full steps are in [Deploy on Coolify](#deploy-on-coolify).
@@ -378,8 +377,8 @@ here): the files are checked by tests that read them, so expect to fix a typo on
    - `TYPETORCH_PUBLIC_URL=https://backend.example.com`
    - `TYPETORCH_TRUST_PROXY=1` (default in `compose.yaml`; with the Dockerfile app set it yourself)
    - optional: `TYPETORCH_ADMIN_ALLOW_IPS`, `TYPETORCH_TRUSTED_PROXIES`, `TYPETORCH_CLOUDFLARE`,
-     `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`, `ROBLOX_WEBHOOK_SECRET`, `OPENCLOUD_API_KEY`,
-     `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_MESSAGING_KEY` ([instant wake](#instant-wake)), `TYPETORCH_ALERT_WEBHOOK_URL`
+     `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`, `ROBLOX_WEBHOOK_SECRET`, `OPENCLOUD_API_KEY` (also the [instant wake](#instant-wake)),
+     `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_ALERT_WEBHOOK_URL`
 4. Deploy. The health check is `GET /healthz` inside the container (30 s start period); `docker logs` shows the startup
    line (what is set, never the values) and any old-variable warnings.
 5. Check: `curl https://backend.example.com/healthz` -> `{"ok":true}`;
@@ -973,7 +972,7 @@ player's client log, the players, module state, a read-only Dex, modules and ass
 counters and network counters. **Read-only**: there is no op that changes the game server (no kick, ban, rollback, reload,
 pin, switch, Luau or Dex edit). Needs kernel 0.5.0 (the framework ops also framework 0.5.0 with devtools on; an older
 build answers "not supported" for those, the kernel's own ops still work). The [instant wake](#instant-wake) needs kernel
-0.5.1 and `TYPETORCH_MESSAGING_KEY`.
+0.5.1 and `OPENCLOUD_API_KEY`.
 
 A Roblox server can't be called into, so it **pulls**:
 
@@ -1027,12 +1026,12 @@ Unknown argument keys are refused; args are at most 16 KB.
 ### Instant wake
 
 Without it, a watched server learns it is watched from its next heartbeat reply: up to 30 s. With
-`TYPETORCH_MESSAGING_KEY` and `TYPETORCH_UNIVERSE_ID` set, a watch that **starts** (the page opens, or a lapsed watch
+`OPENCLOUD_API_KEY` and `TYPETORCH_UNIVERSE_ID` set, a watch that **starts** (the page opens, or a lapsed watch
 comes back) on a server that **isn't polling** also publishes one tiny message through Roblox Open Cloud Messaging:
 
 ```
 POST https://apis.roblox.com/cloud/v2/universes/<TYPETORCH_UNIVERSE_ID>:publishMessage
-x-api-key: <TYPETORCH_MESSAGING_KEY>
+x-api-key: <OPENCLOUD_API_KEY>
 { "topic": "TypeTorch/deploy", "message": "{\"k\":\"rd\",\"j\":\"<JobId>\"}" }
 ```
 
@@ -1057,9 +1056,9 @@ wake"; under **Access Permissions**, **Select API System** = **messaging-service
 on and pick the game, and in **Select Operations** choose only `universe-messaging-service:publish`; under **Security**,
 add the backend's outbound address in **Accepted IP Addresses** if it has a fixed one (leave **Restrict IP addresses** off
 otherwise); an expiration date is optional (renew the key before it ends). **Save & Generate key**, copy the key once, put
-it in `TYPETORCH_MESSAGING_KEY` on Coolify (as a secret) with `TYPETORCH_UNIVERSE_ID` = that game's universe id, and
-redeploy. Don't reuse the CLI's deploy key or `OPENCLOUD_API_KEY`: a key that can only publish messages can't touch
-DataStores, assets or places if it leaks (the server warns when `TYPETORCH_MESSAGING_KEY` equals `OPENCLOUD_API_KEY`).
+it in `OPENCLOUD_API_KEY` on Coolify (as a secret) with `TYPETORCH_UNIVERSE_ID` = that game's universe id, and
+redeploy. If `OPENCLOUD_API_KEY` is already set for erasure, add the messaging-service API system with
+`universe-messaging-service:publish` to that key instead of making a second one.
 
 ## Privacy
 

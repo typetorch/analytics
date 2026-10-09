@@ -118,7 +118,7 @@ export interface App {
 	readonly live: LiveHub;
 	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
 	readonly remoteDebug?: RemoteDebugHub;
-	/** Plans/25 "Instant wake": the wake publisher (off without TYPETORCH_MESSAGING_KEY and TYPETORCH_UNIVERSE_ID). */
+	/** Plans/25 "Instant wake": the wake publisher (off without OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID). */
 	readonly waker?: RemoteDebugWaker;
 	/** Explorer sessions open right now. */
 	sessionCount(): number;
@@ -224,7 +224,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const access = AccessStore.at(config.dataDir, clock);
 	// Plans/25: remote debug. Answers stay in this process's memory; only the audit (no answers) goes to disk.
 	const remoteDebug = fleet ? new RemoteDebugHub({ clock, log, auditDir: join(config.dataDir, "audit") }) : undefined;
-	// Plans/25 "Instant wake": with TYPETORCH_MESSAGING_KEY and TYPETORCH_UNIVERSE_ID, a watch that starts on a server
+	// Plans/25 "Instant wake": with OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID, a watch that starts on a server
 	// that isn't polling publishes a wake (Open Cloud Messaging); without them, the heartbeat reply alone wakes it.
 	const waker = remoteDebug
 		? new RemoteDebugWaker({

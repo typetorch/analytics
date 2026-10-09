@@ -42,7 +42,7 @@ const admin = (h: Harness, path: string, init: RequestInit = {}) => h.call(path,
 const watch = (h: Harness, job: string) => admin(h, `/v1/fleet/servers/${job}/watch`, { method: "POST" });
 const poll = (h: Harness, job: string) => h.call("/v1/fleet/commands?wait=0", { headers: { ...bearer(API), "x-tt-job": job } });
 
-describe("with TYPETORCH_MESSAGING_KEY and TYPETORCH_UNIVERSE_ID", () => {
+describe("with OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID", () => {
 	let h: Harness;
 	const oc = fakeOpenCloud();
 	/** Every response body the tests read, to check the key never appears. */
@@ -54,7 +54,7 @@ describe("with TYPETORCH_MESSAGING_KEY and TYPETORCH_UNIVERSE_ID", () => {
 	};
 
 	beforeAll(async () => {
-		h = await harness({ TYPETORCH_PARTS: "fleet", TYPETORCH_MESSAGING_KEY: KEY, TYPETORCH_UNIVERSE_ID: String(UNIVERSE) }, { fetch: oc.fetch });
+		h = await harness({ TYPETORCH_PARTS: "fleet", OPENCLOUD_API_KEY: KEY, TYPETORCH_UNIVERSE_ID: String(UNIVERSE) }, { fetch: oc.fetch });
 	});
 	afterAll(async () => {
 		await h.close();
@@ -165,7 +165,7 @@ describe("with TYPETORCH_MESSAGING_KEY and TYPETORCH_UNIVERSE_ID", () => {
 		expect(JSON.parse(health).remoteDebug.wake).toMatchObject({ published: expect.any(Number), failed: 2, limited: 3 });
 		const settings = await (await admin(h, "/v1/admin/settings")).text();
 		bodies.push(settings);
-		expect(JSON.parse(settings).envOnly).toContain("TYPETORCH_MESSAGING_KEY");
+		expect(JSON.parse(settings).envOnly).toContain("OPENCLOUD_API_KEY");
 		for (const body of bodies) expect(body).not.toContain(KEY);
 		for (const line of h.logs) expect(line).not.toContain(KEY);
 	});
@@ -176,7 +176,7 @@ describe("without the key", () => {
 		const oc = fakeOpenCloud();
 		const h = await harness({ TYPETORCH_PARTS: "fleet", TYPETORCH_UNIVERSE_ID: String(UNIVERSE) }, { fetch: oc.fetch });
 		try {
-			expect(h.logs.filter((l) => l.startsWith("remote debug wake is off (TYPETORCH_MESSAGING_KEY not set)"))).toHaveLength(1);
+			expect(h.logs.filter((l) => l.startsWith("remote debug wake is off (OPENCLOUD_API_KEY not set)"))).toHaveLength(1);
 			await heartbeat(h, "nokey-1");
 			expect(await asJson(await watch(h, "nokey-1"))).toMatchObject({ watched: true, connected: false, wake: false });
 			expect(await asJson(await heartbeat(h, "nokey-1"))).toEqual({ ok: true, rd: 1 });
@@ -190,7 +190,7 @@ describe("without the key", () => {
 
 	test("a key without the universe id stays off too", async () => {
 		const oc = fakeOpenCloud();
-		const h = await harness({ TYPETORCH_PARTS: "fleet", TYPETORCH_MESSAGING_KEY: KEY }, { fetch: oc.fetch });
+		const h = await harness({ TYPETORCH_PARTS: "fleet", OPENCLOUD_API_KEY: KEY }, { fetch: oc.fetch });
 		try {
 			expect(h.logs.some((l) => l.startsWith("remote debug wake is off (TYPETORCH_UNIVERSE_ID not set)"))).toBe(true);
 			await heartbeat(h, "nouniverse-1");
@@ -250,23 +250,19 @@ describe("the waker", () => {
 
 describe("config", () => {
 	const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN };
-	test("TYPETORCH_MESSAGING_KEY: read, checked, never echoed", () => {
-		expect(loadConfig([], { ...base, TYPETORCH_MESSAGING_KEY: KEY }).messagingKey).toBe(KEY);
+	test("OPENCLOUD_API_KEY: read, checked, never echoed", () => {
+		expect(loadConfig([], { ...base, OPENCLOUD_API_KEY: KEY }).messagingKey).toBe(KEY);
 		expect(loadConfig([], base).messagingKey).toBeUndefined();
 		for (const bad of ["short", `${KEY} with spaces`, `${KEY}\n`]) {
-			let message = "";
-			try {
-				loadConfig([], { ...base, TYPETORCH_MESSAGING_KEY: bad });
-			} catch (error) {
-				message = (error as Error).message;
-			}
-			expect(message).toContain("TYPETORCH_MESSAGING_KEY");
-			expect(message).not.toContain(bad.trim());
+			// Not key-shaped: the wake stays off with a warning that names the variable, never the value; no throw.
+			const config = loadConfig([], { ...base, OPENCLOUD_API_KEY: bad });
+			expect(config.messagingKey).toBeUndefined();
+			const warning = config.warnings.join(" ");
+			expect(warning).toContain("OPENCLOUD_API_KEY");
+			expect(warning).not.toContain(bad.trim());
 		}
-		expect(() => loadConfig([], { ...base, TYPETORCH_MESSAGING_KEY: API })).toThrow("not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
-		expect(() => loadConfig([], { ...base, TYPETORCH_MESSAGING_KEY: ADMIN })).toThrow("not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
-		const shared = loadConfig([], { ...base, TYPETORCH_MESSAGING_KEY: KEY, OPENCLOUD_API_KEY: KEY });
-		expect(shared.warnings.some((w) => w.includes("TYPETORCH_MESSAGING_KEY is the same key as OPENCLOUD_API_KEY"))).toBe(true);
-		expect(shared.warnings.join(" ")).not.toContain(KEY);
+		expect(() => loadConfig([], { ...base, OPENCLOUD_API_KEY: API })).toThrow("not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
+		expect(() => loadConfig([], { ...base, OPENCLOUD_API_KEY: ADMIN })).toThrow("not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
+		expect(loadConfig([], { ...base, OPENCLOUD_API_KEY: KEY }).warnings.join(" ")).not.toContain(KEY);
 	});
 });

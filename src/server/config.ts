@@ -124,7 +124,7 @@ export interface ServerConfig {
 	universeId?: number;
 	erasureDeleteLink: boolean;
 	/**
-	 * Plans/25 "Instant wake": TYPETORCH_MESSAGING_KEY, an Open Cloud key with only universe-messaging-service:publish.
+	 * Plans/25 "Instant wake": OPENCLOUD_API_KEY (needs universe-messaging-service:publish on the universe).
 	 * With TYPETORCH_UNIVERSE_ID, a watch that starts on a server that isn't polling publishes a wake message. Env-only,
 	 * never logged or returned.
 	 */
@@ -381,13 +381,14 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (webDir) config.webDir = webDir;
 	if (env.ROBLOX_WEBHOOK_SECRET) config.webhookSecret = env.ROBLOX_WEBHOOK_SECRET;
 	if (env.OPENCLOUD_API_KEY) config.openCloudKey = env.OPENCLOUD_API_KEY;
-	const messagingKey = env.TYPETORCH_MESSAGING_KEY;
+	// The instant wake (plans/25) publishes with OPENCLOUD_API_KEY (it needs universe-messaging-service:publish).
+	const messagingKey = env.OPENCLOUD_API_KEY;
 	if (messagingKey) {
 		// Never put the value in an error or a warning.
-		if (!/^[\x21-\x7e]{16,4096}$/.test(messagingKey)) throw new Error("TYPETORCH_MESSAGING_KEY must be an Open Cloud API key (16-4096 printable characters, no spaces)");
-		if (apiKeys.includes(messagingKey) || messagingKey === adminToken) throw new Error("TYPETORCH_MESSAGING_KEY must be an Open Cloud API key, not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
-		if (messagingKey === env.OPENCLOUD_API_KEY) warnings.push("TYPETORCH_MESSAGING_KEY is the same key as OPENCLOUD_API_KEY: give the wake its own Open Cloud key with only universe-messaging-service:publish");
-		config.messagingKey = messagingKey;
+		if (apiKeys.includes(messagingKey) || messagingKey === adminToken) throw new Error("OPENCLOUD_API_KEY must be an Open Cloud API key, not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
+		// It also serves the erasure path, so a value that doesn't look like a key only turns the wake off.
+		if (/^[\x21-\x7e]{16,4096}$/.test(messagingKey)) config.messagingKey = messagingKey;
+		else warnings.push("OPENCLOUD_API_KEY doesn't look like an Open Cloud API key (16-4096 printable characters, no spaces): remote debug wake is off");
 	}
 	if (universe) {
 		const u = Number(universe);

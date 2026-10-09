@@ -4,7 +4,7 @@
  * Messaging instead, so the kernel (0.5.1+) starts its debug poll within a second:
  *
  *   POST https://apis.roblox.com/cloud/v2/universes/<TYPETORCH_UNIVERSE_ID>:publishMessage
- *   x-api-key: <TYPETORCH_MESSAGING_KEY>
+ *   x-api-key: <OPENCLOUD_API_KEY>
  *   { "topic": "TypeTorch/deploy", "message": "{\"k\":\"rd\",\"j\":\"<JobId>\"}" }
  *
  * The topic: TypeTorch/deploy, the kernel's control topic. Every kernel holds that subscription for its life and it
@@ -41,7 +41,7 @@ export const WAKE_TIMEOUT_MS = 10_000;
 export type WakeResult = "sent" | "recent" | "limited" | "off";
 
 export interface RemoteDebugWakerOptions {
-	/** TYPETORCH_MESSAGING_KEY (Open Cloud, universe-messaging-service:publish only). */
+	/** OPENCLOUD_API_KEY (Open Cloud, universe-messaging-service:publish only). */
 	apiKey?: string;
 	/** TYPETORCH_UNIVERSE_ID. */
 	universeId?: number;
@@ -77,7 +77,7 @@ export class RemoteDebugWaker {
 	/** The startup line (names only, never a value). */
 	describe(): string {
 		if (this.enabled) return `remote debug wake is on (Open Cloud Messaging, universe ${this.options.universeId}, topic ${WAKE_TOPIC}): a watched server starts polling within seconds`;
-		const missing = [!this.options.apiKey ? "TYPETORCH_MESSAGING_KEY" : "", !this.options.universeId ? "TYPETORCH_UNIVERSE_ID" : ""].filter(Boolean).join(" and ");
+		const missing = [!this.options.apiKey ? "OPENCLOUD_API_KEY" : "", !this.options.universeId ? "TYPETORCH_UNIVERSE_ID" : ""].filter(Boolean).join(" and ");
 		return `remote debug wake is off (${missing} not set): a watched server starts polling at its next heartbeat, up to 30 s`;
 	}
 
