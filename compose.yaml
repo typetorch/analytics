@@ -11,9 +11,11 @@ services:
       dockerfile: Dockerfile
     image: typetorch-backend
     restart: unless-stopped
+    # A small init as PID 1 passes SIGTERM on to bun.
     init: true
-    # The server loads the last raw files and checkpoints DuckDB on SIGTERM.
-    stop_grace_period: 60s
+    # On SIGTERM the server finishes the requests running, closes DuckDB and SQLite and exits within seconds (20 s at
+    # most), so a rolling update's new container can take the data folder over (README "Deploys on Coolify").
+    stop_grace_period: 30s
     expose:
       - "8787"
     environment:

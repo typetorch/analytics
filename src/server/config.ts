@@ -113,6 +113,11 @@ export interface ServerConfig {
 	sql: boolean;
 	/** memory_limit of the separate DuckDB instance that runs ad-hoc SQL. */
 	sqlMemoryLimit: string;
+	/**
+	 * Rolling deploys: seconds to wait for the previous server to let go of the data folder's DuckDB files (meanwhile the
+	 * fleet and error logs work and analytics answers 503) before giving up with an error.
+	 */
+	handoverSeconds: number;
 	// Right to Erasure
 	webhookSecret?: string;
 	openCloudKey?: string;
@@ -353,6 +358,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		fsyncMs: num(env, "TYPETORCH_FSYNC_MS", 1000, 0, 60_000),
 		sql: flag(env, "TYPETORCH_SQL", true),
 		sqlMemoryLimit: env.TYPETORCH_SQL_MEMORY ?? "256MB",
+		handoverSeconds: num(env, "TYPETORCH_HANDOVER_SECONDS", 600, 1, 86_400),
 		erasureDeleteLink: flag(env, "TYPETORCH_ERASURE_DELETE_LINK"),
 		fleetDb: resolve(env.TYPETORCH_SQLITE ?? resolve(dataDir, "fleet.sqlite")),
 		alertWebhookLevels: levels,

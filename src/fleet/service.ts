@@ -677,6 +677,22 @@ const ADDED_DEPLOY_COLUMNS: [string, string][] = [
 	["message", "TEXT"],
 ];
 
+/**
+ * Adds the columns a fleet file made by an older version lacks. Two servers can open the same file at the same moment
+ * (a rolling deploy's handover), so a column the other one added in between ("duplicate column name") is fine.
+ */
+async function addColumns(db: FleetDb, table: string, columns: [string, string][]): Promise<void> {
+	const have = new Set((await db.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name));
+	for (const [name, type] of columns) {
+		if (have.has(name)) continue;
+		try {
+			await db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+		} catch (error) {
+			if (!/duplicate column name/i.test(String((error as Error)?.message ?? error))) throw error;
+		}
+	}
+}
+
 export interface FleetServiceOptions {
 	db: FleetDb;
 	clock?: () => number;
@@ -704,15 +720,9 @@ export class FleetService {
 		const service = new FleetService(options);
 		await options.db.exec(SCHEMA);
 		// Kernel 0.4.0 (the budget summary) and 0.4.2 (TPS, memory): columns added to files made before them.
-		const columns = new Set((await options.db.all<{ name: string }>("PRAGMA table_info(servers)")).map((c) => c.name));
-		for (const [name, type] of ADDED_SERVER_COLUMNS) {
-			if (!columns.has(name)) await options.db.exec(`ALTER TABLE servers ADD COLUMN ${name} ${type}`);
-		}
+		await addColumns(options.db, "servers", ADDED_SERVER_COLUMNS);
 		// Release kinds for the deploy marks, to deploys tables made before them.
-		const deployColumns = new Set((await options.db.all<{ name: string }>("PRAGMA table_info(deploys)")).map((c) => c.name));
-		for (const [name, type] of ADDED_DEPLOY_COLUMNS) {
-			if (!deployColumns.has(name)) await options.db.exec(`ALTER TABLE deploys ADD COLUMN ${name} ${type}`);
-		}
+		await addColumns(options.db, "deploys", ADDED_DEPLOY_COLUMNS);
 		return service;
 	}
 
@@ -1148,7 +1158,9 @@ export class FleetService {
 		const lostRows = await this.db.all<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen < ?`, [now - LOST_AFTER_MS]);
 		const groups = new Map<string, ServerRow[]>();
 		for (const r of lostRows) {
-			await this.db.run("UPDATE servers SET lost_at = ? WHERE job = ?", [now, r.job]);
+			// Only if still unmarked: during a deploy's handover two servers sweep the same file, and one alert is enough.
+			const marked = await this.db.run("UPDATE servers SET lost_at = ? WHERE job = ? AND lost_at IS NULL AND closed_at IS NULL", [now, r.job]);
+			if (!marked.changes) continue;
 			this.emit({ type: "server", change: "lost", server: serverInfo({ ...r, lost_at: now }, now) });
 			const key = `${r.branch ?? ""}\u0000${r.artifact ?? ""}`;
 			groups.set(key, [...(groups.get(key) ?? []), r]);
@@ -1184,7 +1196,7 @@ export class FleetService {
 				[now - LOST_AFTER_MS, d.branch, d.seq, d.seq],
 			);
 			if (!rows.length) continue;
-			await this.db.run("UPDATE deploys SET stuck_at = ? WHERE seq = ?", [now, d.seq]);
+			if (!(await this.db.run("UPDATE deploys SET stuck_at = ? WHERE seq = ? AND stuck_at IS NULL", [now, d.seq])).changes) continue;
 			stuck += rows.length;
 			await this.addAlert({
 				level: "warning",
@@ -1217,7 +1229,7 @@ export class FleetService {
 			await this.db.run("DELETE FROM marks WHERE id <= (SELECT MAX(id) FROM marks) - ?", [MARKS_MAX_ROWS]);
 			await this.db.run("DELETE FROM servers WHERE (closed_at IS NOT NULL AND closed_at < ?) OR (lost_at IS NOT NULL AND lost_at < ?)", [now - KEEP_GONE_SERVERS_MS, now - KEEP_GONE_SERVERS_MS]);
 		}
-		return { lost: lostRows.length, stuck };
+		return { lost: [...groups.values()].reduce((n, rows) => n + rows.length, 0), stuck };
 	}
 
 	async counts(): Promise<{ servers: number; reports: number; alerts: number; unacked: number }> {

@@ -34,6 +34,9 @@ RUN mkdir -p /data && chown bun:bun /data
 VOLUME /data
 EXPOSE 8787
 USER bun
+# The exec-form CMD below makes bun PID 1 (or the child of compose's `init: true`), so SIGTERM reaches it: the server
+# then finishes the requests running, closes DuckDB and SQLite and exits within seconds (20 s at most; give the container
+# a stop grace period of 30 s). A rolling update's new container meanwhile serves the fleet and waits for DuckDB.
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD bun -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

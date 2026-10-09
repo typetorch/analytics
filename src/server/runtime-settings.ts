@@ -304,6 +304,19 @@ export class RuntimeSettings {
 		});
 	}
 
+	/**
+	 * Reads the file again (a deploy's previous server may have saved values while both ran) and applies it at once.
+	 * Returns the keys whose value changed (names only).
+	 */
+	reload(): RuntimeKey[] {
+		const before = SETTINGS.map((d) => JSON.stringify(this.get(d.key)));
+		this.stored = {};
+		this.auditList = [];
+		this.load();
+		this.refresh();
+		return SETTINGS.filter((d, i) => JSON.stringify(this.get(d.key)) !== before[i]).map((d) => d.key);
+	}
+
 	/** The current value: the dashboard's when one is saved, else the environment's (or the default). */
 	get<K extends RuntimeKey>(key: K): RuntimeValues[K] {
 		return Object.hasOwn(this.stored, key) ? (this.stored[key] as RuntimeValues[K]) : this.fallback[key];

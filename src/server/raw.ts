@@ -29,11 +29,20 @@ export interface ReadyFile {
 
 const FILE = /^(events|recordings)-(\d+)-(\d+)\.ndjson(\.open)?$/;
 
+/** An append after close(): the server is stopping (the request answers 503; the sender retries). */
+export class RawLogClosed extends Error {
+	override name = "RawLogClosed";
+	constructor() {
+		super("the raw log is closed: the server is stopping");
+	}
+}
+
 export class RawLog {
 	private files = new Map<RawTable, OpenFile>();
 	private chain: Promise<unknown> = Promise.resolve();
 	private counter = 0;
 	private syncTimer: ReturnType<typeof setInterval> | undefined;
+	private closed = false;
 	/** Bytes appended since start (stats). */
 	appended = 0;
 
@@ -58,9 +67,14 @@ export class RawLog {
 		return next;
 	}
 
-	/** Appends lines (each ends with \n) to the table's open file. Resolves once written. */
+	/**
+	 * Appends lines (each ends with \n) to the table's open file. Resolves once written. After close() it throws
+	 * RawLogClosed: a file opened then would stay ".open" until a later restart, since the next server may already own
+	 * the folder.
+	 */
 	append(table: RawTable, text: string): Promise<void> {
 		return this.serial(async () => {
+			if (this.closed) throw new RawLogClosed();
 			let file = this.files.get(table);
 			if (!file) {
 				const started = this.clock();
@@ -129,7 +143,9 @@ export class RawLog {
 		return bytes;
 	}
 
+	/** Syncs and closes the open files, makes them ready for the loader (this run's or the next one's), refuses appends. */
 	async close(): Promise<void> {
+		this.closed = true;
 		if (this.syncTimer) clearInterval(this.syncTimer);
 		await this.rotate();
 	}

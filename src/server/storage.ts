@@ -80,7 +80,7 @@ export async function measureStorage(o: MeasureOptions): Promise<StorageReport> 
 	const l = o.layout;
 	const parts: StoragePart[] = [];
 	if (o.sql) {
-		parts.push({ key: "live", label: "DuckDB live (today)", ...sum(sizeOf(l.live), sizeOf(`${l.live}.wal`)) });
+		parts.push({ key: "live", label: "DuckDB live (today)", ...sum(sizeOf(l.live), sizeOf(`${l.live}.wal`), sizeOf(l.lock)) });
 		parts.push(dayPart("events", "Parquet events", l.events));
 		parts.push(dayPart("recordings", "Parquet recordings", l.recordings));
 		parts.push({ key: "rawIncoming", label: "Raw incoming", ...sizeOf(l.rawIncoming) });
