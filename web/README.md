@@ -28,8 +28,8 @@ variables) with `TT_ANALYTICS_URL=https://...` and `TT_ANALYTICS_ADMIN_TOKEN`. I
 analytics server and adds `Authorization: Bearer <admin token>` (`server/proxy.ts`). Because any other page open in
 the same browser could also send requests to localhost, a guard runs first: only the read endpoints the explorer uses
 (`POST /v1/query/*`, `POST /v1/sql`, `GET /v1/queries`, `GET /v1/storage`, `GET /v1/identity`, `POST /v1/identity/backfill`, `GET /v1/rollups/*`, `GET /v1/fleet/servers|reports|alerts|stream`,
-`GET /healthz`), only from the explorer's own origin (Sec-Fetch-Site / Origin), JSON bodies only. Erasure, ingest,
-alert acks and settings are never forwarded. The servers listen on localhost only. No CORS change is needed on the
+`GET /v1/admin/settings`, `GET /healthz`), only from the explorer's own origin (Sec-Fetch-Site / Origin), JSON bodies only. Erasure, ingest,
+alert acks and settings changes (`PATCH /v1/admin/settings`, the test alert) are never forwarded. The servers listen on localhost only. No CORS change is needed on the
 analytics server.
 
 Without a token every `/api` call answers 503 and the header shows "no admin token".
@@ -52,6 +52,7 @@ it lives in the URL, so a view can be bookmarked.
 | Events | top event names by kind, then the newest rows of a picked name (fleet rows without props) | `top-events`, `events` |
 | Fleet | live servers, latest deploy, alerts, live event log, updated over the SSE stream | fleet API |
 | Query | any named query with JSON filters/options (raw JSON), and read-only SQL over `events` / `recordings` | `/v1/query/*`, `/v1/sql` |
+| Settings | the backend's runtime settings (alert webhook as set / not set, format and levels, admin allow list, token login, rate limits, retention): source badge per field (Dashboard / Env / Default), bounds checked before saving, Reset to env, Send test alert, recent changes, the env-only names. Through the dev proxy it is read only | `/v1/admin/settings` |
 
 Graphs are drawn with React Flow and laid out by dagre (left to right; top to bottom in a narrow column), edges labelled
 "count · average time before the move" (one session: #1, #2, ... in order), width by count, moves back to an earlier

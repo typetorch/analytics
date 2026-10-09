@@ -20,6 +20,7 @@ or Bun). Ships as one Docker image that works as a Coolify app.
 
 - [Quick start (local)](#quick-start-local)
 - [Settings](#settings)
+- [Runtime settings (the Settings page)](#runtime-settings-the-settings-page)
 - [Security](#security)
 - [Routes and roles](#routes-and-roles)
 - [Deploy on Coolify](#deploy-on-coolify)
@@ -83,6 +84,10 @@ Everything is an environment variable (a Docker/Coolify env, a systemd `Environm
 `TYPETORCH_ENV_FILE` for a local file; real variables win over the file). Values are never printed; the startup line and
 `/healthz` only say whether something is set. The server **refuses to start** without the two required values.
 
+A few of them (the alert webhook, the admin allow list, the token login, the rate limits and retention numbers) can also be
+changed on the explorer's **Settings page** without a redeploy: the environment gives the defaults, a value saved there wins.
+See [Runtime settings](#runtime-settings-the-settings-page).
+
 | Variable | Required | What |
 |---|---|---|
 | `TYPETORCH_API_KEY` | yes | The game role: game servers write events, heartbeats, deploy reports, alerts and error logs with it. 32+ characters. It reads nothing. |
@@ -100,7 +105,7 @@ Everything is an environment variable (a Docker/Coolify env, a systemd `Environm
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
 | `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill. |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests). |
-| `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https). |
+| `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https; the server won't start with another scheme). Also settable on the Settings page. |
 
 <details><summary>Advanced (defaults suit a 1 GB machine)</summary>
 
@@ -128,12 +133,85 @@ Everything is an environment variable (a Docker/Coolify env, a systemd `Environm
 | `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
 | `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams, and the same number of `GET /v1/fleet/stream` streams. |
 | `TYPETORCH_WEB_DIR`, `TYPETORCH_EXPLORER` | `web/dist`, `on` | Where the built explorer is; `off` serves the API only. |
+| `TYPETORCH_RUNTIME_SETTINGS` | `on` | `off` ignores what the Settings page saved (the file stays) and makes the page read only: the way back in after locking yourself out. |
 
 </details>
 
 **Old names** (`TT_ANALYTICS_*`, `TT_FLEET_*`, `TT_SERVER_PARTS`, `TYPETORCH_FLEET_TOKEN`,
 `TYPETORCH_FLEET_INGEST_TOKEN`) still work for this release: each one read prints a one-line warning that names the new
 variable (`TT_ANALYTICS_INGEST_TOKENS` was a list: every entry stays accepted). Remove them. See the CHANGELOG for the map.
+
+## Runtime settings (the Settings page)
+
+Coolify (like Docker) hands environment variables to the container when it is created, so a running server can't re-read
+them. Instead, the explorer's **Settings** page (owners and the admin token) changes a short list of settings **while the
+server runs**: the environment's value is the default, a value saved on the page wins over it, and **Reset to env** goes back
+to the environment's value. A change applies to the next request: every part reads the current value (rate limiters, the
+allow list, the login, the error store, the nightly pruning, the alert sender). Nothing restarts and no session ends (except
+as noted for the token login).
+
+| Setting (key) | Variable | Values a save accepts |
+|---|---|---|
+| Alert webhook (`alertWebhookUrl`) | `TYPETORCH_ALERT_WEBHOOK_URL` | an `https://` URL, or `""` for none. **A secret:** never shown or returned again |
+| Webhook format (`alertWebhookFormat`) | `TYPETORCH_ALERT_WEBHOOK_FORMAT` | `auto` (from the URL's host), `discord`, `slack`, `json` |
+| Alert levels sent (`alertWebhookLevels`) | `TYPETORCH_ALERT_WEBHOOK_LEVELS` | one or more of `critical`, `warning`, `info` |
+| Admin allow list (`adminAllowIps`) | `TYPETORCH_ADMIN_ALLOW_IPS` | up to 64 addresses / CIDR ranges; empty = any address. **Guarded**, below |
+| Admin token login (`tokenLogin`) | `TYPETORCH_TOKEN_LOGIN` | on / off. **Guarded**, below |
+| Ingest per address (`ipPerMinute`) | `TYPETORCH_IP_PER_MINUTE` | 100 to 1,000,000 a minute |
+| Ingest per server (`jobPerMinute`) | `TYPETORCH_JOB_PER_MINUTE` | 10 to 100,000 a minute |
+| Error logs per address (`errorsIpPerMinute`) | `TYPETORCH_ERRORS_IP_PER_MINUTE` | 60 to 1,000,000 a minute |
+| New servers per minute (`fleetNewJobsPerMinute`) | `TYPETORCH_NEW_JOBS_PER_MINUTE` | 100 to 1,000,000 a minute |
+| Analytics history (`keepDays`) | `TYPETORCH_KEEP_DAYS` | 7 to 36,500 days, or 0 = forever (applied at the nightly export) |
+| Raw archives (`rawKeepDays`) | `TYPETORCH_RAW_KEEP_DAYS` | 1 to 3,650 days, or 0 = forever (nightly) |
+| Error log history (`errorKeepDays`) | `TYPETORCH_ERROR_KEEP_DAYS` | 1 to 3,650 days (pruned hourly; reads are clamped at once) |
+| Error kinds stored (`errorMaxKinds`) | `TYPETORCH_ERROR_MAX_KINDS` | 100 to 1,000,000 |
+| Error rows per day (`errorRowsPerDay`) | `TYPETORCH_ERROR_ROWS_PER_DAY` | 10,000 to 1,000,000,000 |
+
+The bounds apply to values saved on the page (the environment keeps its own, wider checks). A save is all or nothing: one
+wrong value and nothing changes. **Not editable** (change them on Coolify and redeploy): `TYPETORCH_API_KEY`,
+`TYPETORCH_API_KEY_PREVIOUS`, `TYPETORCH_ADMIN_TOKEN`, `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`,
+`TYPETORCH_PUBLIC_URL`, `TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`, the data dir,
+`PORT` / `HOST`, and everything else in the tables above.
+
+**Where it is kept.** `<data dir>/runtime-settings.json` (`/data` on Coolify, so it survives redeploys): the saved values and
+the last 50 audit entries, written atomically (a fresh temp file, fsync, rename) with file mode `0600`. It holds the webhook URL,
+so treat the volume backup as secret. On start, a stored value that no longer passes the checks (or an unknown key) is ignored
+with a log line that names the key, never the value; an unreadable file means the environment applies until the next save.
+The startup line ends with the names of the saved settings that win over the environment.
+
+**The webhook is a secret.** No route returns it: the API says only `set: true/false`, where it comes from, and whether the
+environment has one. It is never logged, never put in an error (a wrong value is refused without repeating it), never in the
+audit list. On the page it is typed into a password field that empties after the save. **Send test alert** posts one `info`
+alert (`test_alert`) through the saved webhook, at most 3 a minute, and answers only the receiver's HTTP status or the error
+code (never the URL or the receiver's body).
+
+**Lockout guards.**
+- **Admin allow list:** a list (or a reset to the environment's list) that would not include *your own address as the server
+  sees it* (after `TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`) is refused (409). The page
+  shows that address. Only addresses in the list reach the admin side from the next request on; game routes stay open.
+- **Token login:** turning it off is refused (409) unless Sign in with Roblox is configured **and** you are signed in with Roblox
+  right now (the admin token, the CLI or a token session can't do it). Turning it off also signs out the browser sessions made
+  with the token. Turning it on needs nothing (the CLI's `PATCH` with the admin token works even with the token login off).
+- **Locked out anyway** (say your address changed): set `TYPETORCH_RUNTIME_SETTINGS=off` on Coolify and redeploy. The file is
+  kept but ignored, the environment applies, the page is read only. Fix the value, remove the variable, redeploy.
+
+**Who changed what.** Every save is a log line and an audit entry with the time, who (`admin token`, or `roblox user <id>
+(<name>)`), how (`bearer` = the CLI token, `session` = the explorer) and which keys were set or reset, never the values. Test
+alerts are listed too. The page shows the list under "Recent changes".
+
+**The API** (admin role; a cookie request also needs `X-TypeTorch: 1` and a same-site `Origin`, like every other write):
+
+```sh
+# Values, sources ("env" | "dashboard" | "default"), bounds, the env-only names, the audit list
+curl -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" https://backend.example.com/v1/admin/settings
+# A partial change; null = back to the environment
+curl -X PATCH -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"ipPerMinute":8000,"keepDays":null}' https://backend.example.com/v1/admin/settings
+curl -X POST -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" https://backend.example.com/v1/admin/settings/test-alert
+```
+
+`PATCH` answers the new view plus `changed` (the keys whose saved value changed) and `sessionsEnded` when the token login was
+turned off; `400` names the key and the rule, `409` carries `guard: "allow-list" | "token-login"`. Unknown keys are refused.
 
 ## Security
 
@@ -167,7 +245,8 @@ start/callback are rate limited too, and each address may hold 5 Roblox sign-ins
 and the login answer `404` to every other address. Game routes stay open to any address (Roblox servers' addresses vary)
 but need the API key. Client addresses come from the TCP peer, or from `X-Forwarded-For` only when the proxy is trusted
 (`TYPETORCH_TRUST_PROXY`; set it to `1` on Coolify, leave it off when nothing sits in front). The allow list only works when
-the address is real.
+the address is real. The allow list and the token login can also be changed on the Settings page, behind lockout guards
+(see [Runtime settings](#runtime-settings-the-settings-page)).
 
 **Let the proxy be the only way in.** With `TYPETORCH_TRUST_PROXY` on, whoever reaches port 8787 *directly* can send their
 own `X-Forwarded-For` and pick the address the allow list and the lockout see. So: on Coolify use **Ports Exposes** `8787`
@@ -262,6 +341,9 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `GET /v1/fleet/servers`, `reports`, `alerts`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads and alert acknowledgement |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
+| `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
+| `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
+| `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
 | `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
@@ -303,7 +385,8 @@ here): the files are checked by tests that read them, so expect to fix a typo on
 Things to know: the container runs as the non-root `bun` user (uid 1000), so a **bind-mounted** `/data` must be writable by
 it (`chown 1000:1000`; a named volume just works). The server loads the last raw files and checkpoints DuckDB on `SIGTERM`
 (60 s grace). Give the container at least 1 GB; DuckDB takes `TYPETORCH_MEMORY_LIMIT` (400 MB) of it. Back up the volume
-(`events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `access.json`). Rotating the API key: put the new one in
+(`events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `access.json`, `runtime-settings.json`: it holds the alert webhook URL,
+so keep the backup as secret as the env). Rotating the API key: put the new one in
 `TYPETORCH_API_KEY`, the old in `TYPETORCH_API_KEY_PREVIOUS`, update the games (`typetorch backend setup`), then remove the
 old one. Locally, `docker compose -f compose.yaml -f compose.local.yaml up --build` publishes 127.0.0.1:8787.
 
@@ -400,14 +483,17 @@ window touches. The explorer's **Errors** page shows both.
 
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
-Roblox, Retention, Funnels, Players, Flow, Experiments, First session, Events, Fleet, **Errors**, Query. The header shows who is
-signed in (Roblox name and avatar, or "admin token") and a Sign out button.
+Roblox, Retention, Funnels, Players, Flow, Experiments, First session, Events, Fleet, **Errors**, Query, **Settings** (the
+runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
+[Runtime settings](#runtime-settings-the-settings-page)). The header shows who is signed in (Roblox name and avatar, or
+"admin token") and a Sign out button.
 
 Working on it: `bun run web:dev` (or `cd web && bun run dev -- --game <game repo>`) starts Vite with a proxy: `/api` goes to the
 backend with the admin token **from the game repo's `.env`** (`TYPETORCH_ADMIN_TOKEN`, or `TYPETORCH_ENV_FILE`), at the URL in the
 game's `typetorch.json` (`backend.url`, else the old `fleet.url`), or `--url http://127.0.0.1:8787`. The token never reaches the
 browser; the proxy forwards only the endpoints the explorer uses, only from its own origin, and refuses plain http to another
-machine. With the proxy there is no login page (the proxy is the login). `.explorer.local` and the `fleet.env` default are gone.
+machine. With the proxy there is no login page (the proxy is the login). The Settings page can read through the proxy but not
+save or send a test alert (change settings on the backend's own explorer). `.explorer.local` and the `fleet.env` default are gone.
 
 ## Row format
 
