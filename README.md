@@ -8,7 +8,7 @@ The TypeTorch backend: one server for everything a game's TypeTorch needs from t
   queries, the server for a 1 GB VPS;
 - **error logs**: game servers post error kinds (names and ids already replaced), the backend counts them per minute;
 - an in-process **event bus** between them, and a live stream of it (`GET /v1/live`);
-- the **web explorer** (`web/`), served at `/`, with login (the admin token, or Sign in with Roblox for owners);
+- the **web explorer** (`web/`), served at `/`, with login (the admin token, or Sign in with Roblox for owners; a read-only **web** role for the web token or Roblox viewers);
 - a small programmatic API for the CLI: `createStore`, `store.query`, `writeBackendSettings` (through the game's TypeTorch
   CLI), `createFleetClient`, `graph.toMermaid()`.
 
@@ -93,6 +93,8 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 |---|---|---|
 | `TYPETORCH_API_KEY` | yes | The game role: game servers write events, heartbeats, deploy reports, alerts and error logs with it. 32+ characters. It reads nothing. |
 | `TYPETORCH_ADMIN_TOKEN` | yes | The admin role: the CLI (Bearer) and the explorer's token login read and manage with it. 32+ characters, **different** from the API key. |
+| `TYPETORCH_WEB_TOKEN` | no | The **web** role: read-only access to the explorer and the read routes (paste it into the explorer's login, or send it as a Bearer). 32+ characters, different from the other two. Hand it to people who may look but not change anything. See [Read-only access](#read-only-access-the-web-role). |
+| `TYPETORCH_WEB_VIEWERS` | no | Comma-separated Roblox UserIds who may **Sign in with Roblox** as read-only viewers (the web role). Owners (the access list) are admins regardless. Also settable on the Settings page. |
 | `TYPETORCH_API_KEY_PREVIOUS` | no | Also accepted as a game key, for a rotation without downtime: put the old key here, update the games, remove it. The server prints a reminder at every start while it is set. |
 | `TYPETORCH_DATA_DIR` | no | Where the data lives. `/data` in Docker, `./data` otherwise. |
 | `PORT`, `HOST` | no | Listen address (8787; `127.0.0.1`, `0.0.0.0` in Docker). |
@@ -101,7 +103,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_TRUSTED_PROXIES` | no | Addresses and CIDR ranges of the proxies. When set, `X-Forwarded-For` is only read when the TCP peer is one of them (a client that reaches port 8787 directly is taken at its own address). E.g. the Docker network's range on Coolify. |
 | `TYPETORCH_CLOUDFLARE` | no | `on` when Cloudflare's proxy (orange cloud) sits in front: an address inside Cloudflare's ranges is replaced by the `CF-Connecting-IP` header. `TYPETORCH_CLOUDFLARE_IPS` replaces the built-in list of ranges. See "Behind Cloudflare" under [Security](#security). |
 | `TYPETORCH_ADMIN_ALLOW_IPS` | no | Comma-separated addresses and CIDR ranges. When set, admin routes, the explorer and the login answer 404 to every other address. Game routes stay open. |
-| `TYPETORCH_TOKEN_LOGIN` | no | `off` hides and refuses the admin-token login in the browser (the CLI's Bearer token still works). Default `on`. |
+| `TYPETORCH_TOKEN_LOGIN` | no | `off` hides and refuses the token login in the browser (the admin token and the web token; Bearer tokens still work). Default `on`. |
 | `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
 | `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake) |
@@ -158,7 +160,8 @@ as noted for the token login).
 | Webhook format (`alertWebhookFormat`) | `TYPETORCH_ALERT_WEBHOOK_FORMAT` | `auto` (from the URL's host), `discord`, `slack`, `json` |
 | Alert levels sent (`alertWebhookLevels`) | `TYPETORCH_ALERT_WEBHOOK_LEVELS` | one or more of `critical`, `warning`, `info` |
 | Admin allow list (`adminAllowIps`) | `TYPETORCH_ADMIN_ALLOW_IPS` | up to 64 addresses / CIDR ranges; empty = any address. **Guarded**, below |
-| Admin token login (`tokenLogin`) | `TYPETORCH_TOKEN_LOGIN` | on / off. **Guarded**, below |
+| Token login (`tokenLogin`) | `TYPETORCH_TOKEN_LOGIN` | on / off (the admin token and the web token). **Guarded**, below |
+| Viewers (`webViewers`) | `TYPETORCH_WEB_VIEWERS` | up to 200 Roblox UserIds who sign in with Roblox as read-only viewers (the web role); a viewer taken off the list is signed out at once |
 | Ingest per address (`ipPerMinute`) | `TYPETORCH_IP_PER_MINUTE` | 100 to 1,000,000 a minute |
 | Ingest per server (`jobPerMinute`) | `TYPETORCH_JOB_PER_MINUTE` | 10 to 100,000 a minute |
 | Error logs per address (`errorsIpPerMinute`) | `TYPETORCH_ERRORS_IP_PER_MINUTE` | 60 to 1,000,000 a minute |
@@ -171,7 +174,7 @@ as noted for the token login).
 
 The bounds apply to values saved on the page (the environment keeps its own, wider checks). A save is all or nothing: one
 wrong value and nothing changes. **Not editable** (change them on Coolify and redeploy): `TYPETORCH_API_KEY`,
-`TYPETORCH_API_KEY_PREVIOUS`, `TYPETORCH_ADMIN_TOKEN`, `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`,
+`TYPETORCH_API_KEY_PREVIOUS`, `TYPETORCH_ADMIN_TOKEN`, `TYPETORCH_WEB_TOKEN`, `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`,
 `OPENCLOUD_API_KEY`, `TYPETORCH_PUBLIC_URL`, `TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`, the data dir,
 `PORT` / `HOST`, and everything else in the tables above.
 
@@ -224,12 +227,13 @@ alerts, error logs) and nothing else: no read route accepts it, so a leaked game
 token** lives on your PC (the game repo's `.env`) and in the explorer's login; it reads and manages. The two must differ
 and be 32+ random characters, or the server won't start. Tokens are compared in constant time and are only accepted in
 the `Authorization: Bearer` header, never in a URL. `GET /v1/auth/check` tells a caller which role its token has (no side
-effects; the CLI checks before it signs settings).
+effects; the CLI checks before it signs settings). A third, optional role, **web**, only reads: see
+[Read-only access](#read-only-access-the-web-role).
 
-**The explorer's login.** You paste the admin token once (or sign in with Roblox, below); the backend answers with a
-session cookie and forgets the token. The session is a random 32-byte id kept in memory on the server, ending after 12 hours
-idle or 7 days at most, bound to the admin token it was made with (changing `TYPETORCH_ADMIN_TOKEN` and restarting ends every
-session; so does any restart). The cookie is `HttpOnly`, `SameSite=Strict`, `Path=/` and `Secure` whenever the request
+**The explorer's login.** You paste the admin token once (or the web token, or sign in with Roblox, below); the backend
+answers with a session cookie and forgets the token. The session is a random 32-byte id kept in memory on the server, ending
+after 12 hours idle or 7 days at most, bound to the token it was made with (changing `TYPETORCH_ADMIN_TOKEN` and restarting
+ends every session except web-token ones, which `TYPETORCH_WEB_TOKEN` ends the same way; any restart ends them all). The cookie is `HttpOnly`, `SameSite=Strict`, `Path=/` and `Secure` whenever the request
 came over https (also behind a trusted proxy that says so, or with an https `TYPETORCH_PUBLIC_URL`). Sign out ends it on the
 server. A request that changes something and is authenticated by the cookie must also carry the header `X-TypeTorch: 1`
 (a web page on another site can't send it) and, when the browser sends an `Origin`, that must be this site. Bearer requests
@@ -281,14 +285,37 @@ ever sent.
 
 **What is public.** `GET /healthz` answers only `{ ok: true }` without the admin role (the server's state, memory, loader lag
 and the bus counters need it), also while a deploy hands over. The explorer's files are public (they hold no data); its data
-needs the admin role. `GET /v1/auth/check` and the login routes only say yes or no.
+needs the admin or the web role. `GET /v1/auth/check` and the login routes only say yes or no.
+
+### Read-only access (the web role)
+
+To let someone look at the explorer without letting them change anything, give them the **web** role. It sees everything
+the explorer shows (the queries, the SQL page, the rollups, error logs, the live stream, the fleet lists and streams, a
+server's page with its heartbeats and audit) and gets `403 read-only access` on everything that changes something or is
+for owners: the identity backfill, the alert acknowledgement, remote debug watches and commands (they run on a live game
+server), the Settings page and its API, the owner list, erasure, and `/healthz`'s admin view. Two ways to hand it out,
+both optional and usable together:
+
+- **A web token.** Set `TYPETORCH_WEB_TOKEN` (32+ random characters, different from the admin token and the API key).
+  People paste it into the explorer's login (the same box as the admin token; the backend tells the roles apart) or send it
+  as `Authorization: Bearer` to the read routes. `TYPETORCH_TOKEN_LOGIN=off` hides and refuses both token logins in the
+  browser. Changing the web token and restarting ends every web-token session.
+- **Roblox viewers.** List Roblox UserIds in `TYPETORCH_WEB_VIEWERS`, or on the Settings page under **Viewers (read-only)**
+  (saved while the server runs; see [Runtime settings](#runtime-settings-the-settings-page)). They use **Sign in with
+  Roblox** like owners do and get the web role; an owner on both lists is an admin. Taking a viewer off the list ends their
+  session on the next request.
+
+A web session shows **read-only** next to the name in the sidebar, hides the Settings page, and sends no watches or commands
+from a server's page. The backend enforces all of it regardless of what the page hides: `GET /v1/auth/check` answers
+`role: "web"` for these credentials.
 
 ### Sign in with Roblox
 
-Only the game's **owners** get in this way (no admins): the owner list is the access list in the game's signed settings
-record, which the CLI sends to the backend with the admin token whenever it writes the settings (`PUT /v1/access`, below).
-The admin-token login stays as the way in before any owner list has reached the backend, and for the CLI;
-`TYPETORCH_TOKEN_LOGIN=off` hides it in the browser.
+The game's **owners** get in this way as admins: the owner list is the access list in the game's signed settings record,
+which the CLI sends to the backend with the admin token whenever it writes the settings (`PUT /v1/access`, below). Roblox
+users on the **viewer** list (`TYPETORCH_WEB_VIEWERS`, or the Settings page) get in too, with the read-only web role; anyone
+else is refused. The admin-token login stays as the way in before any owner list has reached the backend, and for the
+CLI; `TYPETORCH_TOKEN_LOGIN=off` hides it in the browser.
 
 1. On <https://create.roblox.com/dashboard/credentials> create an **OAuth 2.0 app** (a confidential client). Scopes:
    **`openid`** and **`profile`** only. Redirect URL: `<your public URL>/v1/auth/roblox/callback`, e.g.
@@ -325,8 +352,9 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 
 ## Routes and roles
 
-**game** = the API key (or the previous key). **admin** = the admin token as a Bearer header, or an explorer session cookie.
-**open** = no credentials.
+**game** = the API key (or the previous key). **admin** = the admin token as a Bearer header, or an owner's explorer session
+cookie. **web** = the read-only role: the web token as a Bearer header, or a viewer's session cookie; it gets every route
+marked `admin, web` below and `403` on the rest of the admin routes. **open** = no credentials.
 
 | Route | Role | What |
 |---|---|---|
@@ -335,25 +363,28 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
 | `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `deploy`, `mark` | game | the kernel's fleet posts and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
 | `GET /v1/fleet/commands`, `POST /v1/fleet/results` | game | [remote debug](#remote-debug): a watched server's long-poll for read-only commands, and its answers |
-| `POST /v1/query/<name>`, `GET /v1/queries` | admin | the logical queries |
-| `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
-| `POST /v1/sql` | admin | one read-only SELECT |
-| `GET /v1/storage` | admin | what the data folder holds |
-| `GET /v1/settings` | admin | live dials from `data/settings.json` |
-| `GET /v1/identity`, `POST /v1/identity/backfill` | admin | pid <-> UserId lookups and backfill |
-| `GET /v1/identity/<pid>/profile` | admin | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
-| `GET /v1/errors`, `GET /v1/errors/<fp>` | admin | error kinds with counts; one kind |
-| `GET /v1/live` | admin | Server-Sent Events of the event bus |
-| `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) and alert acknowledgement |
-| `GET /v1/fleet/servers/<jobId>`, `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
+| `POST /v1/query/<name>`, `GET /v1/queries` | admin, web | the logical queries |
+| `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin, web | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
+| `POST /v1/sql` | admin, web | one read-only SELECT |
+| `GET /v1/storage` | admin, web | what the data folder holds |
+| `GET /v1/settings` | admin, web | live dials from `data/settings.json` |
+| `GET /v1/identity` | admin, web | pid <-> UserId lookups |
+| `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
+| `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
+| `GET /v1/errors`, `GET /v1/errors/<fp>` | admin, web | error kinds with counts; one kind |
+| `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
+| `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
+| `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
+| `GET /v1/fleet/servers/<jobId>`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin, web | [remote debug](#remote-debug) reads: one server's view, a command's answer, the audit |
+| `POST /v1/fleet/servers/<jobId>/watch`, `POST .../commands` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
-| `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
+| `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session (`{ token }`: the admin token or the web token; the answer says which `role`) |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
 | `GET /healthz` | open | `{ ok }`; with the admin role: `state` (`ready`, `handover`, `failed`, `stopping`), memory, loader lag, row counts, the bus |
 | `GET /` and the explorer's files | open | the built explorer (404 when it isn't built) |

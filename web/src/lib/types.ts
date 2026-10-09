@@ -879,12 +879,15 @@ export interface StorageReport {
 
 // Sign-in (GET /v1/auth/check) -----------------------------------------------------------------------------------------
 
-/** Who is signed in: the admin token, or a Roblox owner. */
+/** Who is signed in: a token (the admin token, or the web token), or a Roblox owner or viewer. */
 export type AuthUser = { kind: "token" } | { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string };
+
+/** "admin" reads and manages; "web" is read-only (the web token, or a Roblox viewer); "game" is the API key (no explorer). */
+export type AuthRole = "admin" | "web" | "game";
 
 export interface AuthInfo {
 	ok: true;
-	role: "admin" | "game";
+	role: AuthRole;
 	/** "cookie" = an explorer session; "bearer" = a token in the request (the dev proxy adds one). */
 	via: "bearer" | "cookie";
 	user?: AuthUser;
@@ -943,7 +946,7 @@ export interface ErrorDetail {
 
 /** "dashboard" = saved on the Settings page; "env" = the environment; "default" = neither (the built-in default). */
 export type SettingSource = "env" | "dashboard" | "default";
-export type SettingKind = "secret" | "choice" | "levels" | "ips" | "switch" | "number";
+export type SettingKind = "secret" | "choice" | "levels" | "ips" | "users" | "switch" | "number";
 
 interface SettingBase {
 	key: string;

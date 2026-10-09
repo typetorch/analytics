@@ -214,7 +214,7 @@ describe("sessions", () => {
 		expect(alive).toBeGreaterThan(7 * 86_400_000);
 		expect(alive).toBeLessThanOrEqual(7 * 86_400_000 + 11 * 3_600_000);
 		// A session made under another admin token is dead under this one.
-		const foreign = s.create({ kind: "token" }, Sessions.hashToken("another-admin-token-0123456789abcdef"));
+		const foreign = s.create({ kind: "token" }, "admin", Sessions.hashToken("another-admin-token-0123456789abcdef"));
 		expect(s.get(foreign)).toBeUndefined();
 		// Logout.
 		const mine = s.create({ kind: "token" });
@@ -463,7 +463,7 @@ describe("explorer login", () => {
 		// The log names the address, never what was typed.
 		const lines = h.logs.filter((l) => l.includes(ip));
 		expect(lines.length).toBeGreaterThanOrEqual(5);
-		expect(lines.some((l) => l.includes("admin login failed from"))).toBe(true);
+		expect(lines.some((l) => l.includes("token login failed from"))).toBe(true);
 		for (const g of guesses) expect(h.logs.join("\n")).not.toContain(g);
 		expect(h.logs.join("\n")).not.toContain(ADMIN);
 		// After the window the address may try again.

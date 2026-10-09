@@ -1,7 +1,7 @@
 /**
  * The TypeTorch backend: analytics (DuckDB), the fleet API (SQLite), error logs, the event bus, the explorer, in one
- * process. Two roles (server/auth.ts): `game` (the API key) writes; `admin` (the admin token, or an explorer session)
- * reads and manages.
+ * process. Three roles (server/auth.ts): `game` (the API key) writes; `admin` (the admin token, or an owner's explorer
+ * session) reads and manages; `web` (the web token, or a viewer's explorer session) reads only.
  *
  *   game routes (API key)
  *   POST /v1/ingest                 gzip JSON { events, recordings, identities? } -> 202 after the raw write
@@ -9,7 +9,9 @@
  *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy      (fleet/http.ts)
  *
- *   admin routes (admin token as Bearer, or the explorer's session cookie)
+ *   admin routes (admin token as Bearer, or the explorer's session cookie); the `web` role gets the reads (GET, the
+ *   queries, the SQL), not the changes: the backfill, the alert ack, remote debug watches and commands, the settings, the
+ *   access list, erasure
  *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
  *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=   (from / to: dates, or unix ms / ISO instants)
  *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
@@ -63,10 +65,10 @@ import { validateSettings } from "../settings.ts";
 import { BatchShapeError, validateBatch } from "../validate.ts";
 import { PACKAGE } from "../version.ts";
 import { AccessError, AccessStore } from "./access.ts";
-import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type Principal } from "./auth.ts";
+import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type Principal, type SignedIn } from "./auth.ts";
 import type { ServerConfig } from "./config.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
-import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie, clientIp, json, readCapped, readCookie, setCookie, tokenIn, tooMany, withSecurityHeaders } from "./http.ts";
+import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie, clientIp, json, readCapped, readCookie, setCookie, tooMany, withSecurityHeaders } from "./http.ts";
 import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
@@ -134,6 +136,8 @@ const LIVE_DIALS = ["flushSeconds", "recordShare", "techEvery", "experiments"] a
 const ERRORS_MAX_BODY = 512 * 1024;
 const ERRORS_MAX_INFLATE = 2 * 1024 * 1024;
 /** The OAuth state cookie. */
+/** The answer to the web role on a route that changes something or is for owners. */
+const READ_ONLY = "read-only access: this needs the admin token or an owner's session";
 const OAUTH_COOKIE = "tt_oauth";
 const OAUTH_PATH = "/v1/auth/roblox";
 const FLEET_GAME_ROUTES = new Set(Object.keys(FLEET_LIMITS));
@@ -262,8 +266,17 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	live.start();
 
 	// Auth -------------------------------------------------------------------------------------------------------------
-	const sessions = new Sessions({ adminToken: config.adminToken, idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
-	const auth = new Auth({ adminToken: config.adminToken, apiKeys: config.apiKeys, sessions, isOwner: (id) => access.isOwner(id) });
+	const sessions = new Sessions({ adminToken: config.adminToken, ...(config.webToken ? { webToken: config.webToken } : {}), idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
+	const auth = new Auth({
+		adminToken: config.adminToken,
+		...(config.webToken ? { webToken: config.webToken } : {}),
+		apiKeys: config.apiKeys,
+		sessions,
+		isOwner: (id) => access.isOwner(id),
+		isViewer: (id) => runtime.isViewer(id),
+	});
+	/** Ends the Roblox sessions whose user no longer holds the role they signed in with (an owner removed, a viewer removed). */
+	const endStaleRobloxSessions = () => sessions.endWhere((s) => s.user.kind === "roblox" && !auth.robloxStillHolds(s.user.userId, s.role));
 	const proxyOpts = { trustProxy: config.trustProxy, ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}) };
 	const proxyTrust = { hops: config.trustProxy, ...(config.trustedProxies ? { proxies: config.trustedProxies } : {}), ...(config.cloudflareIps ? { cloudflare: config.cloudflareIps } : {}) };
 	const authFailures = new FailureLimiter(config.loginMaxFailures, config.loginWindowMs, clock);
@@ -699,6 +712,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(400, { error: "body is not JSON" });
 		}
 		const principal = adminIpOk(ip) ? auth.principal(req) : undefined;
+		if (principal?.role === "web") return json(403, { error: READ_ONLY });
 		if (principal?.role === "admin") {
 			if (principal.via === "cookie") {
 				const problem = cookieMutationProblem(req, proxyOpts);
@@ -869,13 +883,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		} catch {
 			return json(400, { error: "body is not JSON" });
 		}
-		if (typeof token !== "string" || !tokenIn(token, [config.adminToken])) {
-			failedAuth(ip, "admin login");
+		const role = typeof token === "string" ? auth.roleOfToken(token) : undefined;
+		if (!role) {
+			failedAuth(ip, "token login");
 			return json(401, { error: "wrong token" });
 		}
 		authFailures.reset(ip);
-		const id = sessions.create({ kind: "token" });
-		return json(200, { ok: true, role: "admin", via: "cookie", user: { kind: "token" } }, { "set-cookie": sessionCookie(req, id) });
+		const id = sessions.create({ kind: "token" }, role);
+		return json(200, { ok: true, role, via: "cookie", user: { kind: "token" } }, { "set-cookie": sessionCookie(req, id) });
 	}
 
 	function logout(req: Request): Response {
@@ -918,11 +933,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				{ code: url.searchParams.get("code"), state: url.searchParams.get("state"), error: url.searchParams.get("error") },
 				readCookie(req, OAUTH_COOKIE),
 			);
-			if (!access.isOwner(who.userId)) {
-				log(`roblox sign-in refused from ${ip}: user ${who.userId} is not an owner`);
+			const role = auth.roleOfRobloxUser(who.userId);
+			if (!role) {
+				log(`roblox sign-in refused from ${ip}: user ${who.userId} is not an owner or a viewer`);
 				return redirect("/?login_error=not_owner", [clear]);
 			}
-			const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) });
+			const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) }, role);
 			return redirect("/", [clear, sessionCookie(req, id)]);
 		} catch (error) {
 			if (error instanceof OAuthError) {
@@ -947,8 +963,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		try {
 			const result = access.put(body);
-			// Owners who were removed (or never were) lose their sessions at once.
-			const ended = sessions.endWhere((s) => s.user.kind === "roblox" && !access.isOwner(s.user.userId));
+			// Owners who were removed (or never were) lose their admin sessions at once (a viewer's web session stays).
+			const ended = endStaleRobloxSessions();
 			if (result.changed) log(`owner list updated to seq ${result.record.seq}: ${result.record.owners.length} owner(s)${ended ? `, ${ended} session(s) ended` : ""}`);
 			return json(200, { ...result.record, changed: result.changed, sessionsEnded: ended });
 		} catch (error) {
@@ -998,8 +1014,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		try {
 			const result = runtime.patch(body, { ...actorOf(principal), ip, robloxSession: isRobloxSession(principal), robloxSignIn: Boolean(oauth) });
-			// The token login turned off: browser sessions made with the token end too (the caller's is a Roblox session).
-			const sessionsEnded = result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0;
+			// The token login turned off: browser sessions made with a token end too (the caller's is a Roblox session).
+			// Viewers taken off the list lose their sessions at once.
+			const sessionsEnded = (result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0) + (result.changed.includes("webViewers") ? endStaleRobloxSessions() : 0);
 			return json(200, { ...settingsView(ip, principal), changed: result.changed, ...(sessionsEnded ? { sessionsEnded } : {}) });
 		} catch (error) {
 			if (error instanceof SettingsError) return json(error.status, { error: error.message, ...(error.key ? { key: error.key } : {}), ...(error.guard ? { guard: error.guard } : {}) });
@@ -1039,8 +1056,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// Routing -----------------------------------------------------------------------------------------------------------
 
-	/** The admin gate: allow list, failure limit, credentials, and the cookie's extra checks. Returns the principal or the answer. */
-	function adminGate(req: Request, ip: string): { principal: Principal & { role: "admin" } } | { response: Response } {
+	/**
+	 * The signed-in gate: allow list, failure limit, credentials (the admin or the web role), and the cookie's extra checks.
+	 * Returns the principal or the answer.
+	 */
+	function readGate(req: Request, ip: string): { principal: SignedIn } | { response: Response } {
 		if (!adminIpOk(ip)) return { response: notFound() };
 		const blocked = blockedResponse(ip);
 		if (blocked) return { response: blocked };
@@ -1049,12 +1069,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (bearer(req) !== undefined) failedAuth(ip, "admin request");
 			return { response: json(401, { error: "admin token required" }) };
 		}
-		if (principal.role !== "admin") return { response: json(401, { error: "admin token required (the API key can write, not read)" }) };
+		if (principal.role === "game") return { response: json(401, { error: "admin token required (the API key can write, not read)" }) };
 		if (principal.via === "cookie") {
 			const problem = cookieMutationProblem(req, proxyOpts);
 			if (problem) return { response: json(403, { error: problem }) };
 		}
 		return { principal };
+	}
+
+	/** The admin gate: readGate, and the web role is refused (403): the route changes something, or is for owners. */
+	function adminGate(req: Request, ip: string): { principal: Principal & { role: "admin" } } | { response: Response } {
+		const gate = readGate(req, ip);
+		if ("response" in gate) return gate;
+		return gate.principal.role === "admin" ? { principal: gate.principal as Principal & { role: "admin" } } : { response: json(403, { error: READ_ONLY }) };
 	}
 
 	async function route(req: Request, url: URL, path: string, ip: string): Promise<Response> {
@@ -1080,8 +1107,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				fleet,
 				isGame: (r) => auth.hasGameKey(r),
 				badGameKey: (r) => badGameKey(r, ip, "remote debug"),
-				admin: (r) => {
-					const gate = adminGate(r, ip);
+				admin: (r, need) => {
+					const gate = need === "read" ? readGate(r, ip) : adminGate(r, ip);
 					if ("response" in gate) return gate;
 					const user = gate.principal.user;
 					const caller: Caller = user.kind === "roblox" ? { kind: "roblox", userId: user.userId } : { kind: "token" };
@@ -1097,9 +1124,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (path.startsWith("/v1/fleet/")) {
 			if (!fleet) return json(404, { error: "the fleet part is off on this server" });
 			const gameWrite = method === "POST" && FLEET_GAME_ROUTES.has(path.slice("/v1/fleet/".length));
-			let gate: ReturnType<typeof adminGate> | undefined;
+			let gate: ReturnType<typeof readGate> | undefined;
 			if (!gameWrite) {
-				gate = adminGate(req, ip);
+				// Reads (the lists, the streams) for every signed-in role; the alert ack for admins.
+				gate = method === "GET" ? readGate(req, ip) : adminGate(req, ip);
 				if ("response" in gate) return gate.response;
 			} else if (!auth.hasGameKey(req)) return badGameKey(req, ip, "fleet");
 			// Event streams are capped like /v1/live (each holds a connection and a listener).
@@ -1128,10 +1156,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		if (path === "/v1/erasure") return method === "POST" ? erasure(req, ip) : json(405, { error: "POST only" });
 
-		// Everything else under /v1 reads or manages: admin only.
+		// Everything else under /v1 reads (every signed-in role) or manages (admin only; `manage` answers 403 to the web role).
 		if (path.startsWith("/v1/")) {
-			const gate = adminGate(req, ip);
+			const gate = readGate(req, ip);
 			if ("response" in gate) return gate.response;
+			const manage = (): (Principal & { role: "admin" }) | Response => (gate.principal.role === "admin" ? (gate.principal as Principal & { role: "admin" }) : json(403, { error: READ_ONLY }));
 			if (path === "/v1/settings" && method === "GET") return json(200, liveDials());
 			if (path === "/v1/queries" && method === "GET") return json(200, { queries: describeQueries() });
 			if (path === "/v1/sql") return method === "POST" ? adhocSql(req) : json(405, { error: "POST only" });
@@ -1140,21 +1169,31 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				return json(200, await storage());
 			}
 			if (path === "/v1/identity" && method === "GET") return getIdentity(url);
-			if (path === "/v1/identity/backfill") return method === "POST" ? backfill(req) : json(405, { error: "POST only" });
+			if (path === "/v1/identity/backfill") {
+				if (method !== "POST") return json(405, { error: "POST only" });
+				const admin = manage();
+				return admin instanceof Response ? admin : backfill(req);
+			}
 			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays") });
 			if (path === "/v1/admin/settings") {
-				if (method === "GET") return json(200, settingsView(ip, gate.principal));
-				if (method === "PATCH") return patchSettings(req, ip, gate.principal);
-				return json(405, { error: "GET or PATCH only" });
+				if (method !== "GET" && method !== "PATCH") return json(405, { error: "GET or PATCH only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				return method === "GET" ? json(200, settingsView(ip, admin)) : patchSettings(req, ip, admin);
 			}
-			if (path === "/v1/admin/settings/test-alert") return method === "POST" ? testAlert(gate.principal) : json(405, { error: "POST only" });
+			if (path === "/v1/admin/settings/test-alert") {
+				if (method !== "POST") return json(405, { error: "POST only" });
+				const admin = manage();
+				return admin instanceof Response ? admin : testAlert(admin);
+			}
 			if (path === "/v1/live" && method === "GET") return live.connect(req, url, () => keepOpen.get(req)?.());
 			if (path === "/v1/access") {
-				if (method === "GET") return json(200, access.get());
-				if (method === "PUT") return putAccess(req, gate.principal);
-				return json(405, { error: "GET or PUT only" });
+				if (method !== "GET" && method !== "PUT") return json(405, { error: "GET or PUT only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				return method === "GET" ? json(200, access.get()) : putAccess(req, admin);
 			}
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
 			if (q) return method === "POST" ? query(req, q[1]) : json(405, { error: "POST only" });
@@ -1163,7 +1202,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return notFound();
 		}
 
-		// The explorer (open to the allow list's addresses; its data still needs the admin role).
+		// The explorer (open to the allow list's addresses; its data still needs a signed-in role).
 		if (site && adminIpOk(ip)) {
 			const page = await site.serve(method, path);
 			if (page) return page;
@@ -1309,9 +1348,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		log(`handover: DuckDB is open after ${((Date.now() - handover.since) / 1000).toFixed(1)} s; analytics is on`);
 		// The previous server is gone now; what it saved while both ran (the Settings page, the owner list) applies here too.
 		const changed = runtime.reload();
-		const ended =
-			(access.reload() ? sessions.endWhere((s) => s.user.kind === "roblox" && !access.isOwner(s.user.userId)) : 0) +
-			(changed.includes("tokenLogin") && !runtime.get("tokenLogin") ? sessions.endWhere((s) => s.user.kind === "token") : 0);
+		const listsChanged = access.reload() || changed.includes("webViewers");
+		const ended = (listsChanged ? endStaleRobloxSessions() : 0) + (changed.includes("tokenLogin") && !runtime.get("tokenLogin") ? sessions.endWhere((s) => s.user.kind === "token") : 0);
 		if (changed.length || ended) log(`handover: picked up what the previous server saved meanwhile${changed.length ? ` (settings: ${changed.join(", ")})` : ""}${ended ? `; ${ended} session(s) ended` : ""}`);
 	}
 	if (lockedAtStart) {

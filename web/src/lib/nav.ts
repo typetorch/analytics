@@ -41,9 +41,8 @@ export interface NavItem {
 	/** The page doesn't use the shared filters (Fleet is live, Query has its own): the header leaves the filter bar out. */
 	noFilters?: boolean;
 	/**
-	 * Only for an owner / admin session (the role the explorer lets in; a Roblox owner or the admin token). Today every
-	 * signed-in session is one, so nothing is hidden yet: it marks the pages that must stay out of a future read-only role.
-	 * Only a convenience: the backend enforces access either way.
+	 * Only for an owner / admin session (a Roblox owner or the admin token): hidden from the read-only `web` role (the web
+	 * token, or a Roblox viewer). Only a convenience: the backend enforces access either way.
 	 */
 	ownerOnly?: boolean;
 }

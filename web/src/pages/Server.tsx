@@ -16,6 +16,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { isReadOnly, useAuth } from "@/lib/auth";
 import { fmtAgo, fmtDuration, fmtInt, fmtTime, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
 import { CONNECTED_GRACE_MS, useRemote, useRemoteRunner, useServerWatch } from "@/lib/remote-debug";
@@ -46,6 +47,8 @@ type TabId = (typeof SERVER_TABS)[number]["id"];
 export const CONNECTING_TEXT = "Connecting: the server picks this up at its next heartbeat, up to 30 s.";
 /** Plans/25 "Instant wake": the backend sent the server a wake message (the watch reply's `wake`). */
 export const WAKING_TEXT = "Waking server...";
+/** The read-only web role: no debug session (the backend refuses its watches and commands). */
+export const READ_ONLY_TEXT = "Read-only session: remote debug needs an owner.";
 
 /** How the session looks from here: the backend's view, the last watch reply, and whether an answer came lately. */
 export function sessionState(
@@ -156,12 +159,15 @@ function ServerView({ job }: { job: string }) {
 	});
 	const d = detail.data;
 	const live = d?.state === "live";
-	const watch = useServerWatch(job, live);
+	// The read-only web role sees the server (its heartbeats, the audit) but opens no debug session: a watch wakes the
+	// server and a fetch runs a command on it, and the backend refuses both to that role.
+	const readOnly = isReadOnly(useAuth());
+	const watch = useServerWatch(job, live && !readOnly);
 	const [answeredAt, setAnsweredAt] = useState<number | undefined>();
 	const onAnswer = useCallback(() => setAnsweredAt(Date.now()), []);
 	const call = useRemoteRunner(job, onAnswer);
 	const session = sessionState(d?.debug, watch.reply, answeredAt);
-	const ready = live && session.connected;
+	const ready = live && !readOnly && session.connected;
 	const wakingNow = live && !session.connected && watch.reply?.wake === true;
 	if (wakingNow !== waking) setWaking(wakingNow);
 
@@ -180,7 +186,10 @@ function ServerView({ job }: { job: string }) {
 		},
 		[setTab],
 	);
-	const context = useMemo<DebugContextValue>(() => ({ job, call, ready, waitReason: live ? (wakingNow ? WAKING_TEXT : CONNECTING_TEXT) : "This server isn't running." }), [job, call, ready, live, wakingNow]);
+	const context = useMemo<DebugContextValue>(
+		() => ({ job, call, ready, waitReason: readOnly ? READ_ONLY_TEXT : live ? (wakingNow ? WAKING_TEXT : CONNECTING_TEXT) : "This server isn't running." }),
+		[job, call, ready, live, wakingNow, readOnly],
+	);
 
 	if (detail.isPending)
 		return (
@@ -212,8 +221,14 @@ function ServerView({ job }: { job: string }) {
 			) : (
 				<>
 					<div className="flex flex-wrap items-center justify-between gap-2">
-						<Connection live={live} connected={session.connected} lastPollAt={session.lastPollAt} watchError={watch.error} watching={watch.reply !== undefined} waking={wakingNow} />
-						<span className="text-xs text-muted-foreground">Read only. Every fetch is one audited command; answers stay in this page (gone on reload).</span>
+						{readOnly ? (
+							<Tone tone="bg-muted-foreground">{READ_ONLY_TEXT}</Tone>
+						) : (
+							<Connection live={live} connected={session.connected} lastPollAt={session.lastPollAt} watchError={watch.error} watching={watch.reply !== undefined} waking={wakingNow} />
+						)}
+						<span className="text-xs text-muted-foreground">
+							{readOnly ? "Heartbeats and the audit only: no commands go to the server from this session." : "Read only. Every fetch is one audited command; answers stay in this page (gone on reload)."}
+						</span>
 					</div>
 					<Tabs value={tab} onValueChange={setTab} className="gap-4">
 						<div className="-mx-1 overflow-x-auto px-1 pb-1 [scrollbar-width:thin]">

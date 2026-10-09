@@ -61,7 +61,7 @@ describe("login page", () => {
 		const input = screen.getByLabelText(/admin token/i);
 		fireEvent.change(input, { target: { value: "nope" } });
 		fireEvent.submit(input.closest("form") as HTMLFormElement);
-		expect(await screen.findByText("That is not the admin token.")).toBeTruthy();
+		expect(await screen.findByText("That is not the admin token or the web token.")).toBeTruthy();
 		login.mockRejectedValueOnce(new ApiError(429, "rate limited", "/v1/auth/login"));
 		fireEvent.change(input, { target: { value: "nope again" } });
 		fireEvent.submit(input.closest("form") as HTMLFormElement);
@@ -71,12 +71,12 @@ describe("login page", () => {
 	it("shows why a Roblox sign-in failed, from the address, once", () => {
 		window.history.replaceState(null, "", "/errors?login_error=not_owner");
 		const text = takeLoginError();
-		expect(text).toBe("That Roblox account is not an owner of this game.");
+		expect(text).toBe("That Roblox account is not an owner or a viewer of this game.");
 		expect(window.location.search).toBe("");
 		expect(window.location.pathname).toBe("/errors");
 		expect(takeLoginError()).toBeNull();
 		render(<LoginPage options={{ roblox: true, token: true }} initialError={text} onSignedIn={() => {}} />);
-		expect(screen.getByText("That Roblox account is not an owner of this game.")).toBeTruthy();
+		expect(screen.getByText("That Roblox account is not an owner or a viewer of this game.")).toBeTruthy();
 		for (const code of ["denied", "state", "failed", "unheard-of"]) expect(loginErrorText(code)).toMatch(/\w/);
 		expect(loginErrorText(null)).toBeNull();
 	});
@@ -94,6 +94,8 @@ describe("auth helpers", () => {
 		expect(userLabel({ kind: "roblox", userId: 1, name: "OwnerName" })).toBe("OwnerName");
 		expect(userLabel({ kind: "token" }, "cookie")).toBe("admin token");
 		expect(userLabel(undefined, "bearer")).toBe("admin token (proxy)");
+		expect(userLabel({ kind: "token" }, "cookie", "web")).toBe("web token");
+		expect(userLabel({ kind: "roblox", userId: 5, name: "Viewer" }, "cookie", "web")).toBe("Viewer");
 	});
 });
 
@@ -111,6 +113,12 @@ describe("auth gate", () => {
 		render(withClient(<AuthGate>{<p>the app</p>}</AuthGate>));
 		expect(await screen.findByRole("link", { name: /sign in with roblox/i })).toBeTruthy();
 		expect(screen.queryByText("the app")).toBeNull();
+	});
+
+	it("shows the app to the read-only web role too", async () => {
+		vi.spyOn(api, "authCheck").mockResolvedValue({ ok: true, role: "web", via: "cookie", user: { kind: "token" } });
+		render(withClient(<AuthGate>{<p>the app</p>}</AuthGate>));
+		expect(await screen.findByText("the app")).toBeTruthy();
 	});
 
 	it("refuses a session that is not an admin", async () => {

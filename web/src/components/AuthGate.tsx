@@ -35,11 +35,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
 			</div>
 		);
 	}
-	// The admin role only: a game API key has no business here.
-	if (check.data.role !== "admin")
+	// The admin role and the read-only web role: a game API key has no business here.
+	if (check.data.role !== "admin" && check.data.role !== "web")
 		return (
 			<div className="mx-auto max-w-xl p-6">
-				<ErrorState error={new Error("This session is not an admin.")} title="No access" />
+				<ErrorState error={new Error("This session is not an admin or a viewer.")} title="No access" />
 			</div>
 		);
 	return <AuthProvider value={check.data}>{children}</AuthProvider>;

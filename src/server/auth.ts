@@ -1,12 +1,14 @@
 /**
- * Who is calling. Two roles:
+ * Who is calling. Three roles:
  *   game  - the API key (or the previous one while it is rotated): game servers write events, heartbeats, deploy reports,
  *           alerts and error logs. It reads nothing.
  *   admin - the admin token as a Bearer header (the CLI), or an explorer session cookie: reads and manages.
+ *   web   - read-only: the web token (TYPETORCH_WEB_TOKEN) as a Bearer or pasted into the explorer's login, or a Roblox
+ *           viewer's session (the `webViewers` setting). Sees everything the explorer shows, changes nothing.
  *
- * Explorer sessions are random 32-byte ids kept in memory (12 h idle / 7 days at most), bound to a hash of the admin
- * token they were made with, so changing the token ends them all. A session is made by pasting the admin token or by
- * signing in with Roblox as an owner. The cookie is HttpOnly, SameSite=Strict (Lax for the short OAuth state cookie only)
+ * Explorer sessions are random 32-byte ids kept in memory (12 h idle / 7 days at most), bound to a hash of the token they
+ * were made with (the admin token; the web token for a web-token session), so changing that token ends them all. A
+ * session is made by pasting a token or by signing in with Roblox as an owner (admin) or a viewer (web). The cookie is HttpOnly, SameSite=Strict (Lax for the short OAuth state cookie only)
  * and Secure over https. A request authenticated by the cookie that changes something also needs the X-TypeTorch header
  * (and a matching Origin when the browser sends one); Bearer requests need neither, a browser can't attach them by itself.
  */
@@ -21,11 +23,15 @@ export type SessionUser =
 	| { kind: "token" }
 	| { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string };
 
+/** What a session (or a Bearer) may do: `admin` reads and manages, `web` only reads. */
+export type AccessRole = "admin" | "web";
+
 export interface Session {
 	user: SessionUser;
+	role: AccessRole;
 	created: number;
 	seen: number;
-	/** Hash of the admin token this session was made with. */
+	/** Hash of the token this session was made with (the admin token, or the web token for a web-token session). */
 	tokenHash: string;
 }
 
@@ -33,6 +39,8 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 
 export interface SessionsOptions {
 	adminToken: string;
+	/** The web token, when one is set: web-token sessions are bound to it. */
+	webToken?: string;
 	idleMs: number;
 	maxMs: number;
 	/** Oldest sessions go first past this many. */
@@ -43,23 +51,30 @@ export interface SessionsOptions {
 export class Sessions {
 	private readonly byId = new Map<string, Session>();
 	private readonly tokenHash: string;
+	private readonly webTokenHash: string | undefined;
 	private readonly clock: () => number;
 
 	constructor(private readonly options: SessionsOptions) {
 		this.tokenHash = Sessions.hashToken(options.adminToken);
+		this.webTokenHash = options.webToken ? Sessions.hashToken(options.webToken) : undefined;
 		this.clock = options.clock ?? Date.now;
 	}
 
-	static hashToken(adminToken: string): string {
-		return sha256(`tt-session-v1\0${adminToken}`);
+	static hashToken(token: string): string {
+		return sha256(`tt-session-v1\0${token}`);
+	}
+
+	/** The hash a new session is bound to: the web token's for a web-token login (so changing it ends them), else the admin token's. */
+	private hashFor(user: SessionUser, role: AccessRole): string {
+		return user.kind === "token" && role === "web" && this.webTokenHash ? this.webTokenHash : this.tokenHash;
 	}
 
 	/** A new session; returns the cookie value (a random 32-byte id, base64url). */
-	create(user: SessionUser, tokenHash: string = this.tokenHash): string {
+	create(user: SessionUser, role: AccessRole = "admin", tokenHash: string = this.hashFor(user, role)): string {
 		const id = randomBytes(32).toString("base64url");
 		const now = this.clock();
 		this.sweep(now);
-		this.byId.set(sha256(id), { user, created: now, seen: now, tokenHash });
+		this.byId.set(sha256(id), { user, role, created: now, seen: now, tokenHash });
 		const max = this.options.maxSessions ?? 200;
 		while (this.byId.size > max) this.byId.delete(this.byId.keys().next().value as string);
 		return id;
@@ -72,7 +87,8 @@ export class Sessions {
 		const session = this.byId.get(key);
 		if (!session) return undefined;
 		const now = this.clock();
-		if (session.tokenHash !== this.tokenHash || now - session.seen > this.options.idleMs || now - session.created > this.options.maxMs) {
+		const bound = session.tokenHash === this.tokenHash || (this.webTokenHash !== undefined && session.tokenHash === this.webTokenHash);
+		if (!bound || now - session.seen > this.options.idleMs || now - session.created > this.options.maxMs) {
 			this.byId.delete(key);
 			return undefined;
 		}
@@ -107,15 +123,22 @@ export class Sessions {
 
 export type Principal =
 	| { role: "game"; via: "bearer" }
-	| { role: "admin"; via: "bearer"; user: SessionUser }
-	| { role: "admin"; via: "cookie"; user: SessionUser; cookie: string };
+	| { role: AccessRole; via: "bearer"; user: SessionUser }
+	| { role: AccessRole; via: "cookie"; user: SessionUser; cookie: string };
+
+/** A signed-in caller: the admin or the web role (never the game key). */
+export type SignedIn = Principal & { role: AccessRole };
 
 export interface AuthOptions {
 	adminToken: string;
+	/** The web token (the read-only role), when one is set. */
+	webToken?: string;
 	apiKeys: readonly string[];
 	sessions: Sessions;
-	/** Whether a Roblox user is (still) an owner; a Roblox session ends when this turns false. */
+	/** Whether a Roblox user is (still) an owner; an owner's (admin) session ends when this turns false. */
 	isOwner(userId: number): boolean;
+	/** Whether a Roblox user is (still) a viewer; a viewer's (web) session ends when this turns false. */
+	isViewer(userId: number): boolean;
 }
 
 export class Auth {
@@ -130,20 +153,47 @@ export class Auth {
 		return tokenIn(bearer(req), [this.o.adminToken]);
 	}
 
+	/** The request carries the web token (the read-only role) as a Bearer header. */
+	hasWebBearer(req: Request): boolean {
+		return this.o.webToken !== undefined && tokenIn(bearer(req), [this.o.webToken]);
+	}
+
 	hasGameKey(req: Request): boolean {
 		return tokenIn(bearer(req), this.o.apiKeys);
 	}
 
-	/** The explorer session behind the request's cookie, if it is live (and its Roblox user is still an owner). */
+	/** The role a pasted token gives (the explorer's login), or undefined when it is neither token. */
+	roleOfToken(token: string): AccessRole | undefined {
+		if (tokenIn(token, [this.o.adminToken])) return "admin";
+		if (this.o.webToken !== undefined && tokenIn(token, [this.o.webToken])) return "web";
+		return undefined;
+	}
+
+	/** The role a Roblox user signs in with: owners are admins, viewers get the web role, anyone else stays out. */
+	roleOfRobloxUser(userId: number): AccessRole | undefined {
+		if (this.o.isOwner(userId)) return "admin";
+		if (this.o.isViewer(userId)) return "web";
+		return undefined;
+	}
+
+	/**
+	 * The explorer session behind the request's cookie, if it is live (and its Roblox user still holds the role it signed
+	 * in with: an owner for admin, a viewer for web; a promotion or demotion takes a new sign-in).
+	 */
 	cookieSession(req: Request): { session: Session; cookie: string } | undefined {
 		const cookie = readCookie(req, SESSION_COOKIE);
 		const session = this.o.sessions.get(cookie);
 		if (!session || !cookie) return undefined;
-		if (session.user.kind === "roblox" && !this.o.isOwner(session.user.userId)) {
+		if (session.user.kind === "roblox" && !this.robloxStillHolds(session.user.userId, session.role)) {
 			this.o.sessions.destroy(cookie);
 			return undefined;
 		}
 		return { session, cookie };
+	}
+
+	/** Whether a Roblox user still holds the role of their session. */
+	robloxStillHolds(userId: number, role: AccessRole): boolean {
+		return role === "admin" ? this.o.isOwner(userId) : this.o.isViewer(userId);
 	}
 
 	/**
@@ -153,11 +203,12 @@ export class Auth {
 	principal(req: Request): Principal | undefined {
 		if (bearer(req) !== undefined) {
 			if (this.hasAdminBearer(req)) return { role: "admin", via: "bearer", user: { kind: "token" } };
+			if (this.hasWebBearer(req)) return { role: "web", via: "bearer", user: { kind: "token" } };
 			if (this.hasGameKey(req)) return { role: "game", via: "bearer" };
 			return undefined;
 		}
 		const found = this.cookieSession(req);
-		return found ? { role: "admin", via: "cookie", user: found.session.user, cookie: found.cookie } : undefined;
+		return found ? { role: found.session.role, via: "cookie", user: found.session.user, cookie: found.cookie } : undefined;
 	}
 }
 

@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
-import { userLabel, useAuth } from "@/lib/auth";
+import { isReadOnly, userLabel, useAuth } from "@/lib/auth";
 import { FILTER_KEYS } from "@/lib/filters";
 import { fmtInt } from "@/lib/format";
 import { findNavItem } from "@/lib/nav";
@@ -69,7 +69,8 @@ function UserMenu() {
 	const client = useQueryClient();
 	if (!auth) return null;
 	const user = auth.user;
-	const label = userLabel(user, auth.via);
+	const label = userLabel(user, auth.via, auth.role);
+	const readOnly = isReadOnly(auth);
 	const out = async () => {
 		try {
 			await api.logout();
@@ -87,7 +88,10 @@ function UserMenu() {
 					{label.slice(0, 1)}
 				</span>
 			)}
-			<span className="min-w-0 flex-1 truncate">{label}</span>
+			<span className="min-w-0 flex-1 truncate">
+				{label}
+				{readOnly ? <span className="ml-1.5 text-xs text-muted-foreground">read-only</span> : null}
+			</span>
 			{auth.via === "cookie" ? (
 				<Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label="Sign out" title="Sign out" onClick={() => void out()}>
 					<LogOut />
