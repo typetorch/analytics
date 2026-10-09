@@ -9,9 +9,11 @@
  *                  experiment filters apply to server rows (they have no player);
  *   perf-compare — the same numbers for a few builds side by side, or before vs after a moment (a deploy) over two equal
  *                  windows.
- * Percentiles are on the bad side: for fps and tps (higher is better) "p90" is the value 90% of samples reach or beat
- * (the 10th percentile) and "p99" the 1st; for mem and ping (lower is better) they are the 90th and 99th. p50 is the
- * median either way. Values outside a sane range (a client can send anything) are left out.
+ * Percentiles: p90 and p99 are on the bad side: for fps and tps (higher is better) "p90" is the value 90% of samples reach or
+ * beat (the 10th percentile) and "p99" the 1st; for mem and ping (lower is better) they are the 90th and 99th. p50 is the
+ * median either way. p10 is the plain 10th percentile for every metric (the low end: 10% of samples are at or below it), so
+ * for fps and tps it is the same value as p90, and for mem and ping the best case; the worst case of every metric is p99.
+ * Values outside a sane range (a client can send anything) are left out.
  * The time step follows the window like every explorer chart (windowBucketMs: 1 h -> 1 min, 6 h -> 5 min, a day ->
  * hourly, longer -> daily) unless the caller picks one (bucketMinutes) or a bucket count (buckets).
  * Bounded so a query stays small on DuckDB and Basin: 92 days, 400 buckets, 20 groups, 6 builds, 7-day windows.
@@ -61,8 +63,9 @@ export const SERVER_METRICS: readonly MetricSpec[] = [
 	{ key: "mem", col: "mem", prop: "mem", higher: false, max: 1_000_000 },
 ];
 
-/** One metric over a group of samples. Percentiles on the bad side (module note). */
+/** One metric over a group of samples. p10 is the plain 10th percentile; p90 / p99 are on the bad side (module note). */
 export interface PerfStat {
+	p10: number | null;
 	p50: number | null;
 	p90: number | null;
 	p99: number | null;
@@ -115,13 +118,14 @@ function cleanSql(spec: Pick<MetricSpec, "col" | "max">): string {
 	return `CASE WHEN ${v} >= 0 AND ${v} <= ${int(spec.max)} THEN ${v} END AS ${spec.col}`;
 }
 
-/** p50, p90, p99 (bad side), avg and n of each metric, on columns of `x`. */
+/** p10, p50, p90, p99 (p90 / p99 on the bad side), avg and n of each metric, on columns of `x`. */
 function statColumns(ctx: QueryContext, specs: readonly MetricSpec[], alias = ""): string {
 	const p = ctx.dialect.percentile;
 	return specs
 		.flatMap((s) => {
 			const c = `${alias}${s.col}`;
 			return [
+				`${p(c, 0.1)} AS ${s.col}_p10`,
 				`${p(c, 0.5)} AS ${s.col}_p50`,
 				`${p(c, badSide(s, 0.9))} AS ${s.col}_p90`,
 				`${p(c, badSide(s, 0.99))} AS ${s.col}_p99`,
@@ -137,7 +141,7 @@ function statOf(r: Row, spec: MetricSpec): PerfStat {
 		const n = numOrNull(r[`${spec.col}_${key}`]);
 		return n === null ? null : round(n, 2);
 	};
-	return { p50: v("p50"), p90: v("p90"), p99: v("p99"), avg: v("avg"), n: num(r[`${spec.col}_n`]) };
+	return { p10: v("p10"), p50: v("p50"), p90: v("p90"), p99: v("p99"), avg: v("avg"), n: num(r[`${spec.col}_n`]) };
 }
 
 function stats(r: Row, specs: readonly MetricSpec[]): Record<string, PerfStat> {
@@ -324,7 +328,7 @@ function seriesShape(side: "client" | "server", specs: readonly MetricSpec[]) {
 
 export const perfClient = defineQuery<PerfSeriesOptions, PerfSeriesResult>({
 	name: "perf-client",
-	summary: "client fps, memory and ping over time (p50/p90/p99, bad side) by device class, input, screen size, branch or build",
+	summary: "client fps, memory and ping over time (p10/p50/p90/p99, p90/p99 on the bad side) by device class, input, screen size, branch or build",
 	defaultDays: 7,
 	options: seriesOptions(CLIENT_GROUPS),
 	statements(ctx, f, o) {
@@ -347,7 +351,7 @@ export const perfClient = defineQuery<PerfSeriesOptions, PerfSeriesResult>({
 
 export const perfServer = defineQuery<PerfSeriesOptions, PerfSeriesResult>({
 	name: "perf-server",
-	summary: "server TPS (Heartbeat rate), physics FPS, memory and players over time (p50/p90/p99, bad side) by branch or build",
+	summary: "server TPS (Heartbeat rate), physics FPS, memory and players over time (p10/p50/p90/p99, p90/p99 on the bad side) by branch or build",
 	defaultDays: 7,
 	options: seriesOptions(SERVER_GROUPS),
 	statements(ctx, f, o) {
@@ -419,7 +423,7 @@ const DEFAULT_COMPARE_BUILDS = 4;
 
 export const perfCompare = defineQuery<PerfCompareOptions, PerfCompareResult>({
 	name: "perf-compare",
-	summary: "client and server performance (p50/p90/p99) for builds side by side, or before vs after a moment (a deploy) over equal windows",
+	summary: "client and server performance (p10/p50/p90/p99) for builds side by side, or before vs after a moment (a deploy) over equal windows",
 	defaultDays: 7,
 	options: (input = {}) => {
 		const mode = input.mode ?? "builds";

@@ -108,12 +108,12 @@ const clientRows = (from: number, to: number, pick: (e: EventRow) => boolean = (
 const serverRows = (from: number, to: number, pick: (e: EventRow) => boolean = () => true) => ROWS.filter((e) => e.kind === "tech" && e.name === "server" && e.t >= from && e.t < to && pick(e));
 const values = (rows: EventRow[], key: string, max: number) => rows.map((e) => valid(props(e)[key], max)).filter((v): v is number => v !== undefined);
 
-/** p50, the bad-side p90 / p99 and n of one metric. */
+/** The plain p10 (every metric), p50, the bad-side p90 / p99 and n of one metric. */
 function ref(rows: EventRow[], key: string, max: number, higher: boolean) {
 	const v = values(rows, key, max);
-	return { p50: quantile(v, 0.5), p90: quantile(v, higher ? 0.1 : 0.9), p99: quantile(v, higher ? 0.01 : 0.99), n: v.length };
+	return { p10: quantile(v, 0.1), p50: quantile(v, 0.5), p90: quantile(v, higher ? 0.1 : 0.9), p99: quantile(v, higher ? 0.01 : 0.99), n: v.length };
 }
-const pick = (s: { p50: number | null; p90: number | null; p99: number | null; n: number }) => ({ p50: s.p50, p90: s.p90, p99: s.p99, n: s.n });
+const pick = (s: { p10: number | null; p50: number | null; p90: number | null; p99: number | null; n: number }) => ({ p10: s.p10, p50: s.p50, p90: s.p90, p99: s.p99, n: s.n });
 
 const DAY_RANGE = { from: NOW - 24 * HOUR, to: NOW };
 
@@ -138,6 +138,27 @@ describe("perf-client", () => {
 			{ key: "mem", higherIsBetter: false },
 			{ key: "ping", higherIsBetter: false },
 		]);
+	});
+
+	test("p10 is the plain 10th percentile of every metric: the low end, below the median", async () => {
+		const r = await store.query("perf-client", DAY_RANGE, {});
+		const rows = clientRows(DAY_RANGE.from, DAY_RANGE.to);
+		for (const [key, prop, max] of [["fps", "fps", 1000], ["mem", "mem", 100_000], ["ping", "ping", 60_000]] as const) {
+			const m = r.overall.metrics[key];
+			expect(m.p10).toBe(quantile(values(rows, prop, max), 0.1));
+			expect(m.p10 as number).toBeLessThan(m.p50 as number);
+		}
+		// fps: the bad side's p90 is also the 10th percentile, and p99 (the 1st) is the worst case, below p10. Memory and ping: p10 is the best case.
+		expect(r.overall.metrics.fps.p10).toBe(r.overall.metrics.fps.p90);
+		expect(r.overall.metrics.fps.p99 as number).toBeLessThan(r.overall.metrics.fps.p10 as number);
+		expect(r.overall.metrics.mem.p10 as number).toBeLessThan(r.overall.metrics.mem.p99 as number);
+		// A bucket of a series and a group carry it too; a metric without samples has none.
+		const series = await store.query("perf-client", DAY_RANGE, { by: "dev", buckets: 120 });
+		const point = series.series.find((p) => p.key === "phone" && p.samples >= 10) as (typeof series.series)[number];
+		expect(point.metrics.fps.p10).toBe(ref(clientRows(point.t, point.t + series.bucketMs, (e) => e.dev === "phone"), "fps", 1000, true).p10);
+		expect(series.groups.every((g) => typeof g.metrics.ping.p10 === "number")).toBe(true);
+		const empty = await store.query("perf-client", { from: NOW - 48 * HOUR, to: NOW - 40 * HOUR }, {});
+		expect(empty.overall.metrics.fps.p10).toBeNull();
 	});
 
 	test("by device class: one group per class, busiest first, each matching the reference", async () => {
@@ -273,10 +294,12 @@ describe("perf-compare", () => {
 		expect(b.client.samples).toBe(rows.length);
 		expect(pick(b.client.metrics.fps)).toEqual(ref(rows, "fps", 1000, true));
 		expect(pick(b.server.metrics.tps)).toEqual(ref(serverRows(DAY_RANGE.from, DAY_RANGE.to, (e) => e.art === ART_B), "hb", 1000, true));
+		expect(b.server.metrics.mem.p10).toBe(ref(serverRows(DAY_RANGE.from, DAY_RANGE.to, (e) => e.art === ART_B), "mem", 1_000_000, false).p10);
 		expect(b.server.servers).toBe(2);
 		// Build C ran on servers only.
 		expect(r.periods[0].client.samples).toBe(0);
 		expect(r.periods[0].client.metrics.fps.p50).toBeNull();
+		expect(r.periods[0].client.metrics.fps.p10).toBeNull();
 	});
 
 	test("builds: the ones asked for, in that order", async () => {
@@ -340,6 +363,7 @@ describe("Basin SQL gives the same answers (run on DuckDB through shims)", () =>
 		expect(JSON.parse(JSON.stringify(got))).toEqual(JSON.parse(JSON.stringify(expected)));
 		const sql = Object.values(basin().render(name, DAY_RANGE, options as never).statements).join("\n");
 		expect(sql).toContain("approx_percentile_cont(");
+		expect(sql).toMatch(/approx_percentile_cont\(\w+\.?\w*, 0\.1\) AS \w+_p10/);
 		expect(sql).not.toContain("quantile_cont(x");
 	});
 });
