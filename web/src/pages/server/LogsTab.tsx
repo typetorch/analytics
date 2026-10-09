@@ -153,10 +153,14 @@ export function LogsTab({
 	players: RemoteState<RemotePlayers> & { run: () => Promise<unknown> };
 	request?: PlayerLogRequest;
 }) {
-	const [view, setView] = useState<"server" | "player">("server");
-	useEffect(() => {
-		if (request) setView("player");
-	}, [request]);
+	const [view, setView] = useState<"server" | "player">(request ? "player" : "server");
+	// A player's "Logs" from the Players tab switches to their log in the same render (so the server log, which fetches on
+	// its first view, isn't fetched on the way).
+	const [handled, setHandled] = useState(request?.n);
+	if (request && request.n !== handled) {
+		setHandled(request.n);
+		setView("player");
+	}
 	return (
 		<Tabs value={view} onValueChange={(v) => setView(v as "server" | "player")} className="gap-3">
 			<TabsList variant="line" aria-label="Whose log">

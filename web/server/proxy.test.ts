@@ -105,6 +105,34 @@ describe("explorer proxy guard", () => {
 		}
 	});
 
+	it("forwards the server page's routes (plans/25) and nothing else under them", () => {
+		const job = "0b5c7d9e-1111-4a2b-9c3d-123456789abc";
+		for (const [method, url] of [
+			["GET", `/v1/fleet/servers/${job}`],
+			["GET", `/v1/fleet/servers/${job}/metrics?since=1760000000000`],
+			["POST", `/v1/fleet/servers/${job}/watch`],
+			["POST", `/v1/fleet/servers/${job}/commands`],
+			["GET", `/v1/fleet/servers/${job}/commands/abc123`],
+			["GET", "/v1/fleet/debug/audit?limit=100"],
+		]) {
+			expect(guardRequest({ method, url, headers: same }, true), `${method} ${url}`).toEqual({ ok: true });
+		}
+		for (const [method, url] of [
+			// The game's side of remote debug (the API key's routes) is never forwarded.
+			["GET", "/v1/fleet/commands?wait=8"],
+			["POST", "/v1/fleet/results"],
+			["DELETE", `/v1/fleet/servers/${job}`],
+			["POST", `/v1/fleet/servers/${job}`],
+			["GET", `/v1/fleet/servers/${job}/watch`],
+			["POST", `/v1/fleet/servers/${job}/commands/abc123`],
+			["POST", `/v1/fleet/servers/${job}/kick`],
+			["GET", `/v1/fleet/servers/${job}/../../access`],
+			["POST", "/v1/fleet/debug/audit"],
+		]) {
+			expect(guardRequest({ method, url, headers: same }, true), `${method} ${url}`).toMatchObject({ ok: false, status: 403 });
+		}
+	});
+
 	it("refuses other sites and non-JSON posts, and explains a missing token", () => {
 		expect(guardRequest({ method: "POST", url: "/v1/query/overview", headers: { ...same, "sec-fetch-site": "cross-site" } }, true)).toMatchObject({
 			status: 403,
