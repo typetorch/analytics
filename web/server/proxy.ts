@@ -102,6 +102,8 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	{ method: "GET", path: /^\/v1\/queries$/ },
 	{ method: "GET", path: /^\/v1\/storage$/ },
 	{ method: "GET", path: /^\/v1\/identity$/ },
+	// The player detail's profile card: the pid's UserId and its Roblox name and avatar (the backend asks Roblox).
+	{ method: "GET", path: /^\/v1\/identity\/[A-Za-z0-9_-]{1,64}\/profile$/ },
 	// Fills pid <-> UserId from the game's DataStore links (the server's own Open Cloud key); writes nothing else.
 	{ method: "POST", path: /^\/v1\/identity\/backfill$/ },
 	{ method: "POST", path: /^\/v1\/query\/[A-Za-z-]{1,64}$/ },

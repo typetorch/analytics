@@ -66,6 +66,9 @@ describe("explorer proxy guard", () => {
 		expect(guardRequest({ method: "POST", url: "/v1/sql", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/storage", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/identity?uid=1", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/identity/pid-abc_123/profile", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "POST", url: "/v1/identity/pid-abc_123/profile", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
+		expect(guardRequest({ method: "GET", url: "/v1/identity/a.b/profile", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
 		expect(guardRequest({ method: "POST", url: "/v1/identity/backfill", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/auth/check", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/errors?window=24h&realm=server", headers: same }, true)).toEqual({ ok: true });

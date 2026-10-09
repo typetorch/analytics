@@ -16,6 +16,7 @@
  *   GET  /v1/storage                bytes and files per part of the data folder
  *   GET  /v1/settings               live dials from data/settings.json
  *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
+ *   GET  /v1/identity/<pid>/profile  the pid's UserId and its Roblox name, display name and avatar (server-side, cached)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
  *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
@@ -62,6 +63,7 @@ import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
+import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
 import { StaticSite } from "./static.ts";
@@ -74,7 +76,7 @@ export interface AppOptions {
 	log?: (line: string) => void;
 	/** Don't start the loader / nightly / sweep timers (tests drive them). */
 	manualJobs?: boolean;
-	/** The fetch for outgoing calls: Open Cloud, the alert webhook, Roblox sign-in. */
+	/** The fetch for outgoing calls: Open Cloud, the alert webhook, Roblox sign-in, Roblox profiles. */
 	fetch?: typeof fetch;
 	backend?: "bun" | "node";
 }
@@ -117,6 +119,8 @@ const ERROR_SENDERS_MAX = 50_000;
 const GAME_KEY_MAX_FAILURES = 30;
 /** Test alerts from the Settings page per minute (they reach a third-party webhook). */
 const TEST_ALERTS_PER_MINUTE = 3;
+/** GET /v1/identity/<pid>/profile per address per minute (the Roblox lookups behind it have their own global cap). */
+const PROFILE_PER_MINUTE = 120;
 
 export async function startApp(config: ServerConfig, options: AppOptions = {}): Promise<App> {
 	const clock = options.clock ?? Date.now;
@@ -219,6 +223,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const fleetLimiters = Object.fromEntries(Object.entries(FLEET_LIMITS).map(([k, n]) => [k, new RateLimiter(n, clock)])) as Record<keyof typeof FLEET_LIMITS, RateLimiter>;
 	const newFleetJobs = new NewJobLimiter(() => runtime.get("fleetNewJobsPerMinute"), clock);
 	const testAlertLimiter = new RateLimiter(TEST_ALERTS_PER_MINUTE, clock);
+	const profileLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	// Roblox names and avatars for the player detail: fixed Roblox hosts, cached in memory, capped (server/roblox-profiles.ts).
+	const robloxProfiles = new RobloxProfiles({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	const keepOpen = new WeakMap<Request, () => void>();
 
 	let settingsCache: { mtime: number; value: Record<string, unknown> } | undefined;
@@ -378,6 +385,20 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(200, { identities: await identities.byUid(uid) });
 		}
 		return json(200, { count: await identities.count(), backfill: Boolean(config.openCloudKey && config.universeId) });
+	}
+
+	/**
+	 * GET /v1/identity/<pid>/profile (admin): the pid's UserId and its Roblox username, display name and avatar headshot,
+	 * looked up by the server (RobloxProfiles: fixed hosts, timeouts, cached). `linked: false` when no UserId is known;
+	 * `roblox` says how the lookup went, and the UserId is there even when Roblox didn't answer.
+	 */
+	async function playerProfile(pid: string, ip: string): Promise<Response> {
+		if (!PID_PATTERN.test(pid)) return json(400, { error: "bad pid" });
+		if (!profileLimiter.take(ip)) return tooMany(profileLimiter.retryAfter(ip));
+		const found = await identities.byPid(pid);
+		if (!found) return json(200, { pid, linked: false });
+		const { profile, status, cached } = await robloxProfiles.get(found.uid);
+		return json(200, { pid, linked: true, uid: found.uid, roblox: status, cached, name: profile.name, displayName: profile.displayName, avatar: profile.avatar });
 	}
 
 	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
@@ -971,6 +992,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (path === "/v1/storage" && method === "GET") return json(200, await storage());
 			if (path === "/v1/identity" && method === "GET") return getIdentity(url);
 			if (path === "/v1/identity/backfill") return method === "POST" ? backfill(req) : json(405, { error: "POST only" });
+			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
+			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays") });
 			if (path === "/v1/admin/settings") {
 				if (method === "GET") return json(200, settingsView(ip, gate.principal));
