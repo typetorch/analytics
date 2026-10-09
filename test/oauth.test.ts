@@ -355,6 +355,38 @@ describe("Sign in with Roblox", () => {
 		expect((await tokenLogin()).status).toBe(200);
 	});
 
+	test("a viewer (the webViewers setting) signs in with the read-only web role; off the list, the session ends; an owner outranks the list", async () => {
+		const VIEWER = 4004;
+		const patch = (body: unknown) => h.call("/v1/admin/settings", { method: "PATCH", ...json(body), headers: { "content-type": "application/json", ...bearer(ADMIN) } });
+		expect((await patch({ webViewers: [VIEWER] })).status).toBe(200);
+		const res = await signIn((c) => ({ ...c, sub: String(VIEWER), preferred_username: "ViewerName" }));
+		expect(res.headers.get("location")).toBe("/");
+		const cookie = (sessionOf(res) as string).split(";")[0] as string;
+		expect(await asJson(await h.call("/v1/auth/check", { headers: { cookie } }))).toMatchObject({ ok: true, role: "web", via: "cookie", user: { kind: "roblox", userId: VIEWER, name: "ViewerName" } });
+		expect((await h.call("/v1/queries", { headers: { cookie } })).status).toBe(200);
+		// Reads yes, changes no: the owner list and the settings are for owners.
+		expect((await h.call("/v1/access", { headers: { cookie } })).status).toBe(403);
+		expect((await h.call("/v1/admin/settings", { headers: { cookie } })).status).toBe(403);
+		const current = await asJson(await h.call("/v1/access", { headers: bearer(ADMIN) }));
+		expect((await putAccess(current.seq, current.owners, { cookie, "x-typetorch": "1" })).status).toBe(403);
+		// The owner list being sent again (the sessions of owners who are gone end) does not touch a viewer's session.
+		expect((await putAccess(current.seq, current.owners)).status).toBe(200);
+		expect((await h.call("/v1/queries", { headers: { cookie } })).status).toBe(200);
+		// Off the viewer list: the session ends on the next request, and a new sign-in is refused.
+		const removed = await patch({ webViewers: [] });
+		expect(removed.status).toBe(200);
+		expect((await asJson(removed)).sessionsEnded).toBeGreaterThanOrEqual(1);
+		expect((await h.call("/v1/queries", { headers: { cookie } })).status).toBe(401);
+		expect((await signIn((c) => ({ ...c, sub: String(VIEWER) }))).headers.get("location")).toBe("/?login_error=not_owner");
+		// An owner who is also listed as a viewer is an admin.
+		expect((await patch({ webViewers: [OWNER] })).status).toBe(200);
+		const owner = (sessionOf(await signIn()) as string).split(";")[0] as string;
+		expect(await asJson(await h.call("/v1/auth/check", { headers: { cookie: owner } }))).toMatchObject({ role: "admin" });
+		expect((await patch({ webViewers: null })).status).toBe(200);
+		// The owner's session is untouched by the viewer list changing.
+		expect((await h.call("/v1/queries", { headers: { cookie: owner } })).status).toBe(200);
+	});
+
 	test("an owner removed from the list loses a live session at once; one never listed gets none", async () => {
 		expect((await putAccess(5, [OWNER, 3003])).status).toBe(200);
 		const res = await signIn();

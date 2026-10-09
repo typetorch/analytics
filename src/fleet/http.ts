@@ -94,7 +94,7 @@ export interface FleetHttpOptions {
 	service: FleetService;
 	/** The request carries the API key (game role). */
 	isIngest(req: Request): boolean;
-	/** The request is admin (token or session). The host refuses unauthorized mutating requests before this is asked. */
+	/** The request is signed in (the admin role; the web role for GETs). The host refuses unauthorized mutating requests before this is asked. */
 	isAdmin(req: Request): boolean;
 	/** Where validated heartbeat / closing (topic heartbeat) and report / deploy-start (topic deploy) messages go. Default: straight into the service; the backend passes its bus. */
 	accept?(topic: "heartbeat" | "deploy", message: HeartbeatMessage | DeployMessage): Promise<void>;

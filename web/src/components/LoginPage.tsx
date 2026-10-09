@@ -1,4 +1,4 @@
-/** The login page: Sign in with Roblox (owners only) first, the admin token second (hidden when the backend turns it off). */
+/** The login page: Sign in with Roblox (owners, and read-only viewers) first, the admin token second (hidden when the backend turns it off). */
 import { KeyRound, LogIn } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";

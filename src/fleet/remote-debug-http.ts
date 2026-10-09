@@ -7,7 +7,7 @@
  *   GET  /v1/fleet/commands?wait=0-8                  -> { watch, commands: [{ id, op, args, by, exp }] }
  *   POST /v1/fleet/results  { j, results: [...] }     -> 202 { accepted, ignored }
  *
- *   admin (the admin token or an explorer session)
+ *   admin (the admin token or an explorer session; the GETs also for the read-only web role)
  *   GET  /v1/fleet/servers/<job>                      -> { server, state, debug }
  *   POST /v1/fleet/servers/<job>/watch                -> { job, ...debug, wake }   (wake: a wake message went out lately
  *                                                        for this job: "Waking server..."; remote-debug-wake.ts)
@@ -54,8 +54,11 @@ export interface RemoteDebugHttpOptions {
 	isGame(req: Request): boolean;
 	/** The answer for a game route without the API key (401, counted per address). */
 	badGameKey(req: Request): Response;
-	/** The admin gate: the caller, or the answer to send (401/403/404/429). */
-	admin(req: Request): { caller: Caller } | { response: Response };
+	/**
+	 * The signed-in gate: the caller, or the answer to send (401/403/404/429). `read` (the GETs: a server's view, a
+	 * command's answer, the audit) lets the read-only web role in; `manage` (a watch, a command) is for admins.
+	 */
+	admin(req: Request, need: "read" | "manage"): { caller: Caller } | { response: Response };
 	limiters: RemoteDebugLimiters;
 	/** Plans/25 "Instant wake": publishes a wake when a watch starts on a job that isn't polling (none: heartbeats only). */
 	waker?: Pick<RemoteDebugWaker, "wake" | "waking">;
@@ -123,7 +126,7 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 		}
 
 		// Admin routes ------------------------------------------------------------------------------------------------------
-		const gate = o.admin(req);
+		const gate = o.admin(req, method === "GET" ? "read" : "manage");
 		if ("response" in gate) return gate.response;
 		const caller = gate.caller;
 		const who = caller.kind === "roblox" ? `roblox:${caller.userId}` : "token";

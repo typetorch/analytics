@@ -18,7 +18,7 @@
  */
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { isHttpsUrl, type ServerConfig } from "./config.ts";
+import { isHttpsUrl, parseUserIds, type ServerConfig } from "./config.ts";
 import { ipAllowed, parseIpRules, type IpRule } from "./ipfilter.ts";
 
 export const RUNTIME_SETTINGS_FILE = "runtime-settings.json";
@@ -26,6 +26,8 @@ export const RUNTIME_SETTINGS_FILE = "runtime-settings.json";
 export const AUDIT_MAX = 50;
 /** Addresses and ranges in the admin allow list. */
 export const ALLOW_LIST_MAX = 64;
+/** Roblox UserIds in the viewer list (the read-only `web` role). */
+export const VIEWERS_MAX = 200;
 /** PATCH bodies are small. */
 export const SETTINGS_BODY_MAX = 16 * 1024;
 
@@ -44,6 +46,8 @@ export interface RuntimeValues {
 	/** [] = any address may reach the admin side. */
 	adminAllowIps: string[];
 	tokenLogin: boolean;
+	/** Roblox UserIds who sign in as read-only viewers (the `web` role); owners (the access list) are admins regardless. */
+	webViewers: number[];
 	ipPerMinute: number;
 	jobPerMinute: number;
 	errorsIpPerMinute: number;
@@ -72,6 +76,7 @@ export type SettingDef =
 	| (BaseDef & { kind: "choice"; options: readonly string[] })
 	| (BaseDef & { kind: "levels"; options: readonly string[] })
 	| (BaseDef & { kind: "ips"; maxEntries: number })
+	| (BaseDef & { kind: "users"; maxEntries: number })
 	| (BaseDef & { kind: "switch" })
 	| (BaseDef & { kind: "number"; min: number; max: number; unit: string; zero?: string });
 
@@ -82,6 +87,7 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "alertWebhookLevels", env: "TYPETORCH_ALERT_WEBHOOK_LEVELS", group: "alerts", kind: "levels", options: ALERT_LEVELS, label: "Alert levels sent", help: "Which alert levels go to the webhook." },
 	{ key: "adminAllowIps", env: "TYPETORCH_ADMIN_ALLOW_IPS", group: "access", kind: "ips", maxEntries: ALLOW_LIST_MAX, label: "Admin allow list", help: "Addresses and CIDR ranges that may reach the explorer and admin routes; empty = any address. Game routes stay open." },
 	{ key: "tokenLogin", env: "TYPETORCH_TOKEN_LOGIN", group: "access", kind: "switch", label: "Admin token login", help: "The explorer's paste-the-token login. The CLI's Bearer token works either way." },
+	{ key: "webViewers", env: "TYPETORCH_WEB_VIEWERS", group: "access", kind: "users", maxEntries: VIEWERS_MAX, label: "Viewers (read-only)", help: "Roblox UserIds who may sign in with Roblox and see everything but change nothing (the web role). Owners from the access list are admins either way." },
 	{ key: "ipPerMinute", env: "TYPETORCH_IP_PER_MINUTE", group: "limits", kind: "number", min: 100, max: 1_000_000, unit: "requests / min", label: "Ingest per address", help: "Game requests per address per minute (servers share egress addresses)." },
 	{ key: "jobPerMinute", env: "TYPETORCH_JOB_PER_MINUTE", group: "limits", kind: "number", min: 10, max: 100_000, unit: "requests / min", label: "Ingest per server", help: "Ingest batches per game server (JobId) per minute." },
 	{ key: "errorsIpPerMinute", env: "TYPETORCH_ERRORS_IP_PER_MINUTE", group: "limits", kind: "number", min: 60, max: 1_000_000, unit: "requests / min", label: "Error logs per address", help: "POST /v1/errors per address per minute." },
@@ -228,6 +234,16 @@ export function checkSetting(def: SettingDef, raw: unknown): RuntimeValues[Runti
 		}
 		case "ips":
 			return parseAllowList(def, raw);
+		case "users": {
+			if (typeof raw === "string" ? raw.length > 8192 : !Array.isArray(raw)) {
+				throw new SettingsError(`${def.key} is a list of Roblox UserIds (an array of numbers, or one string separated by commas), [] for none`, 400, def.key);
+			}
+			try {
+				return parseUserIds(raw as string | unknown[], def.maxEntries);
+			} catch (error) {
+				throw new SettingsError(`${def.key}: ${(error as Error).message}`, 400, def.key);
+			}
+		}
 		case "switch":
 			if (typeof raw !== "boolean") throw new SettingsError(`${def.key} is true or false`, 400, def.key);
 			return raw;
@@ -249,6 +265,7 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		alertWebhookLevels: ALERT_LEVELS.filter((l) => config.alertWebhookLevels.has(l)),
 		adminAllowIps: config.adminAllowIps?.map((r) => r.text) ?? [],
 		tokenLogin: config.tokenLogin,
+		webViewers: [...config.webViewers],
 		ipPerMinute: config.ipPerMinute,
 		jobPerMinute: config.jobPerMinute,
 		errorsIpPerMinute: config.errorsIpPerMinute,
@@ -332,6 +349,11 @@ export class RuntimeSettings {
 		return this.allowRules;
 	}
 
+	/** Whether this Roblox user is on the viewer list (the read-only web role). */
+	isViewer(userId: number): boolean {
+		return this.get("webViewers").includes(userId);
+	}
+
 	/** Keys saved from the dashboard (names only: for the startup line). */
 	overridden(): RuntimeKey[] {
 		return SETTINGS.map((d) => d.key).filter((k) => Object.hasOwn(this.stored, k));
@@ -354,7 +376,7 @@ export class RuntimeSettings {
 				source: this.source(def.key),
 				...(def.kind === "choice" || def.kind === "levels" ? { options: [...def.options] } : {}),
 				...(def.kind === "number" ? { min: def.min, max: def.max, unit: def.unit, ...(def.zero ? { zero: def.zero } : {}) } : {}),
-				...(def.kind === "ips" ? { maxEntries: def.maxEntries } : {}),
+				...(def.kind === "ips" || def.kind === "users" ? { maxEntries: def.maxEntries } : {}),
 			};
 			if (def.kind === "secret") return { ...meta, set: this.get(def.key) !== "", fallbackSet: this.fallback[def.key] !== "" };
 			const copy = (v: unknown) => (Array.isArray(v) ? [...v] : v);

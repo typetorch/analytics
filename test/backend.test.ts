@@ -214,7 +214,7 @@ describe("sessions", () => {
 		expect(alive).toBeGreaterThan(7 * 86_400_000);
 		expect(alive).toBeLessThanOrEqual(7 * 86_400_000 + 11 * 3_600_000);
 		// A session made under another admin token is dead under this one.
-		const foreign = s.create({ kind: "token" }, Sessions.hashToken("another-admin-token-0123456789abcdef"));
+		const foreign = s.create({ kind: "token" }, "admin", Sessions.hashToken("another-admin-token-0123456789abcdef"));
 		expect(s.get(foreign)).toBeUndefined();
 		// Logout.
 		const mine = s.create({ kind: "token" });

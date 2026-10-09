@@ -4,6 +4,7 @@
  *
  * Required: TYPETORCH_API_KEY (game servers write with it) and TYPETORCH_ADMIN_TOKEN (the CLI and the explorer read and
  * manage with it), 32+ characters each and different. Everything else is optional; the tuning knobs keep their defaults.
+ * TYPETORCH_WEB_VIEWERS lists Roblox UserIds who get the read-only `web` role when they sign in with Roblox.
  * The names from before the rename (TT_ANALYTICS_*, TT_FLEET_*, TT_SERVER_PARTS, TYPETORCH_FLEET_*) are still read for
  * one release, each with a one-line warning that names the new one (`config.warnings`).
  */
@@ -58,6 +59,8 @@ export interface ServerConfig {
 	apiKeys: string[];
 	/** The admin token: reads and manages (the CLI, the explorer's token login). */
 	adminToken: string;
+	/** Roblox UserIds who may sign in with Roblox as read-only viewers (TYPETORCH_WEB_VIEWERS; the Settings page can add more). */
+	webViewers: number[];
 	/** Only these addresses may reach admin routes and the login (everything else gets 404). Undefined = any. */
 	adminAllowIps?: IpRule[];
 	/** Explorer login with the admin token (TYPETORCH_TOKEN_LOGIN=off hides and refuses it). */
@@ -190,6 +193,20 @@ function secret(env: Record<string, string | undefined>, name: string, required:
 	return raw;
 }
 
+/** Roblox UserIds the way lists of them arrive: a comma / whitespace separated string, or an array of numbers or digit strings. Sorted, no duplicates. */
+export function parseUserIds(raw: string | readonly unknown[], max = 200): number[] {
+	const parts = typeof raw === "string" ? raw.split(/[\s,]+/) : raw;
+	const out: number[] = [];
+	for (const part of parts) {
+		if (typeof part === "string" && part.trim() === "") continue;
+		const n = typeof part === "string" && /^\d{1,16}$/.test(part.trim()) ? Number(part.trim()) : part;
+		if (typeof n !== "number" || !Number.isSafeInteger(n) || n <= 0) throw new Error("entries are Roblox UserIds (positive whole numbers)");
+		if (!out.includes(n)) out.push(n);
+	}
+	if (out.length > max) throw new Error(`at most ${max} UserIds`);
+	return out.sort((a, b) => a - b);
+}
+
 /** An https URL that parses (the alert webhook; the value is never put in an error). */
 export function isHttpsUrl(value: string): boolean {
 	if (value.length > 2048 || /[\s\x00-\x1f\x7f]/.test(value)) return false;
@@ -238,6 +255,12 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	for (const key of apiKeys) {
 		if (key.length < MIN_SECRET_LENGTH) throw new Error(`each TT_ANALYTICS_INGEST_TOKENS entry must be at least ${MIN_SECRET_LENGTH} characters`);
 		if (key === adminToken) throw new Error("an API key equals TYPETORCH_ADMIN_TOKEN; they must be different values");
+	}
+	let webViewers: number[];
+	try {
+		webViewers = parseUserIds(env.TYPETORCH_WEB_VIEWERS ?? "");
+	} catch (error) {
+		throw new Error(`TYPETORCH_WEB_VIEWERS: ${(error as Error).message}`);
 	}
 
 	const dataDir = resolve(env.TYPETORCH_DATA_DIR ?? "data");
@@ -336,6 +359,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		parts,
 		apiKeys,
 		adminToken,
+		webViewers,
 		tokenLogin: flag(env, "TYPETORCH_TOKEN_LOGIN", true),
 		trustProxy,
 		sessionIdleMs: num(env, "TYPETORCH_SESSION_IDLE_HOURS", 12, 0.01, 24 * 30) * 3_600_000,
@@ -409,6 +433,7 @@ export function describeConfig(config: ServerConfig): string {
 		`api keys=${config.apiKeys.length}`,
 		`explorer=${config.webDir ? "served at /" : "not served"}`,
 		`token login=${config.tokenLogin ? "on" : "off"}`,
+		`web viewers=${config.webViewers.length}`,
 		`roblox sign-in=${config.robloxOAuth ? "on" : "off"}`,
 		`admin allow list=${config.adminAllowIps ? `${config.adminAllowIps.length} rule(s)` : "off"}`,
 		`trust proxy=${config.trustProxy || "off"}${config.trustedProxies ? ` (from ${config.trustedProxies.length} proxy rule(s))` : ""}`,

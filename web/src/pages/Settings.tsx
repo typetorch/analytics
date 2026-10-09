@@ -76,7 +76,7 @@ export function buildChanges(settings: RuntimeSetting[], draft: Draft, newSecret
 			const problem = numberProblem(setting, String(value));
 			if (problem) problems[key] = problem;
 			else changes[key] = Number(String(value).trim());
-		} else if (setting.kind === "ips") changes[key] = splitList(String(value));
+		} else if (setting.kind === "ips" || setting.kind === "users") changes[key] = splitList(String(value));
 		else changes[key] = value;
 	}
 	const secret = newSecret.trim();
@@ -339,14 +339,15 @@ function SettingsForm({ data }: { data: SettingsView }) {
 						onChange={(e) => set(setting.key, e.target.value)}
 					/>
 				);
-			case "ips": {
-				const text = Array.isArray(shown) ? (shown as string[]).join("\n") : String(shown ?? "");
+			case "ips":
+			case "users": {
+				const text = Array.isArray(shown) ? (shown as (string | number)[]).join("\n") : String(shown ?? "");
 				return (
 					<Textarea
 						id={id}
 						className="max-w-md font-mono text-xs"
 						rows={3}
-						placeholder="Empty: any address"
+						placeholder={setting.kind === "users" ? "One Roblox UserId per line (empty: no viewers)" : "Empty: any address"}
 						spellCheck={false}
 						value={text}
 						disabled={disabled}

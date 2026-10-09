@@ -104,6 +104,7 @@ describe("ownerOnly", () => {
 	it("shows an owner-only item to an admin session only", () => {
 		const secret = groups[1].items[0];
 		expect(canSee(secret, { role: "admin" })).toBe(true);
+		expect(canSee(secret, { role: "web" })).toBe(false);
 		expect(canSee(secret, { role: "game" })).toBe(false);
 		expect(canSee(secret, null)).toBe(false);
 		expect(canSee(groups[0].items[0], null)).toBe(true);
