@@ -502,7 +502,7 @@ Hub's published-change lines: a vertical mark per deploy, rollback, promote, re-
 (`GET /v1/fleet/marks`); hover for the branch, seq, build, place version and results, click to filter the page to that build.
 **Compare**: builds side by side over the range, or before vs after a mark over two windows of the same length (1 h to 7 d).
 **Live servers**: each server's latest TPS and memory from its heartbeat, and its own history
-(`GET /v1/fleet/servers/<jobId>/metrics`, from the heartbeat metrics update: the page says so when the backend doesn't have
+(`GET /v1/fleet/servers/<jobId>/metrics`, kernel 0.4.2 heartbeats; the page says so when a server or the backend doesn't have
 it). A **Step** picker overrides the window's step (1 min to 1 day, 2 to 400 steps).
 
 Working on it: `bun run web:dev` (or `cd web && bun run dev -- --game <game repo>`) starts Vite with a proxy: `/api` goes to the

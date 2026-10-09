@@ -346,7 +346,7 @@ function ServerHistory({ job, since, ...marks }: { job: string; since: number } 
 	if (q.isPending) return <LoadingBlock rows={3} />;
 	if (q.isError) {
 		return q.error instanceof ApiError && q.error.notFound ? (
-			<EmptyState>This backend keeps no per-server history yet (it comes with the heartbeat metrics update).</EmptyState>
+			<EmptyState>This backend keeps no per-server history yet (update it: the history came with kernel 0.4.2's heartbeat metrics).</EmptyState>
 		) : (
 			<ErrorState error={q.error} />
 		);
@@ -429,7 +429,7 @@ function LiveServers({ branch, since, ...marks }: { branch: string | undefined; 
 					const hasMetrics = d.servers.some((s) => typeof s.tps === "number" || typeof s.memMb === "number");
 					return (
 						<>
-							{!hasMetrics ? <p className="text-xs text-muted-foreground">These heartbeats carry no TPS or memory yet (they come with the heartbeat metrics update).</p> : null}
+							{!hasMetrics ? <p className="text-xs text-muted-foreground">These heartbeats carry no TPS or memory yet (kernel 0.4.2 sends them).</p> : null}
 							<DataTable
 								id="perf-live-servers"
 								label="Live servers"

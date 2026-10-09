@@ -107,8 +107,8 @@ export interface ServerMetricPoint {
 	players: number | null;
 }
 
-/** A live server with the heartbeat-metrics fields (missing on backends before it). */
-export type PerfServer = FleetServer & { tps?: number | null; tpsMin?: number | null; physFps?: number | null; memMb?: number | null; luaMb?: number | null };
+/** A live server; the heartbeat-metrics fields (tps, tpsMin, physFps, memMb, luaMb) are on FleetServer, missing before kernel 0.4.2. */
+export type PerfServer = FleetServer;
 
 // Metrics -----------------------------------------------------------------------------------------------------------------
 
