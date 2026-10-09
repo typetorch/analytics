@@ -119,6 +119,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_QUERY_TIMEOUT`, `TYPETORCH_QUERY_CONCURRENCY` | `60`, `2` | Query timeout (s) and queries at once. |
 | `TYPETORCH_SQL`, `TYPETORCH_SQL_MEMORY` | `1`, `256MB` | Ad-hoc SQL on/off and its sandbox's memory. |
 | `TYPETORCH_FSYNC_MS` | `1000` | fdatasync interval of the raw files (0 = every write). |
+| `TYPETORCH_HANDOVER_SECONDS` | `600` | Rolling deploys: how long a new server waits for the old one to let go of DuckDB before it gives up and exits 1 (see [Deploys on Coolify](#deploys-on-coolify-rolling-updates)). |
 | `TYPETORCH_MAX_BODY`, `TYPETORCH_MAX_INFLATE` | 2 MB, 16 MB | Ingest body caps (gzip, inflated). |
 | `TYPETORCH_IP_PER_MINUTE`, `TYPETORCH_JOB_PER_MINUTE` | `6000`, `60` | Ingest rate limits per address and per JobId. |
 | `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds per minute the fleet API lets in, and (counted on their own) the error logs. |
@@ -277,9 +278,9 @@ https (with `includeSubDomains`: give the backend its own hostname such as `back
 force https on every subdomain for a year). There is **no CORS**: a preflight is refused and no `Access-Control-*` header is
 ever sent.
 
-**What is public.** `GET /healthz` answers only `{ ok: true }` without the admin role (memory, loader lag and the bus
-counters need it). The explorer's files are public (they hold no data); its data needs the admin role. `GET /v1/auth/check`
-and the login routes only say yes or no.
+**What is public.** `GET /healthz` answers only `{ ok: true }` without the admin role (the server's state, memory, loader lag
+and the bus counters need it), also while a deploy hands over. The explorer's files are public (they hold no data); its data
+needs the admin role. `GET /v1/auth/check` and the login routes only say yes or no.
 
 ### Sign in with Roblox
 
@@ -348,7 +349,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
-| `GET /healthz` | open | `{ ok }`; with the admin role: memory, loader lag, row counts, the bus |
+| `GET /healthz` | open | `{ ok }`; with the admin role: `state` (`ready`, `handover`, `failed`, `stopping`), memory, loader lag, row counts, the bus |
 | `GET /` and the explorer's files | open | the built explorer (404 when it isn't built) |
 
 The explorer calls `/api/<route>` (its dev proxy's prefix); the backend takes `/api` off, so both reach the same routes.
@@ -383,12 +384,42 @@ here): the files are checked by tests that read them, so expect to fix a typo on
 7. Roblox "Right to erasure" webhook: `https://backend.example.com/v1/erasure` with `ROBLOX_WEBHOOK_SECRET`.
 
 Things to know: the container runs as the non-root `bun` user (uid 1000), so a **bind-mounted** `/data` must be writable by
-it (`chown 1000:1000`; a named volume just works). The server loads the last raw files and checkpoints DuckDB on `SIGTERM`
-(60 s grace). Give the container at least 1 GB; DuckDB takes `TYPETORCH_MEMORY_LIMIT` (400 MB) of it. Back up the volume
+it (`chown 1000:1000`; a named volume just works). On `SIGTERM` the server closes DuckDB and SQLite and exits within
+seconds (below). Give the container at least 1 GB; DuckDB takes `TYPETORCH_MEMORY_LIMIT` (400 MB) of it. Back up the volume
 (`events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `access.json`, `runtime-settings.json`: it holds the alert webhook URL,
 so keep the backup as secret as the env). Rotating the API key: put the new one in
 `TYPETORCH_API_KEY`, the old in `TYPETORCH_API_KEY_PREVIOUS`, update the games (`typetorch backend setup`), then remove the
 old one. Locally, `docker compose -f compose.yaml -f compose.local.yaml up --build` publishes 127.0.0.1:8787.
+
+### Deploys on Coolify (rolling updates)
+
+Rolling updates are fine: deploy as usual. The old workaround (Stop the app in Coolify, then Deploy) is no longer needed.
+
+Coolify starts the new container while the old one still runs, both on the same `/data` volume, and stops the old one once
+the new one is healthy. DuckDB lets one process open a database file, so the two hand over:
+
+1. **The new container starts in handover** when another process holds the data folder (the server keeps
+   `data/lock.duckdb` and `data/live.duckdb` attached for its whole run). One log line says so (`handover:
+   /data/lock.duckdb is held by another process ...`). `/healthz` answers `200 { ok: true }` (the admin view adds
+   `"state": "handover"`), so the rolling update goes on. The fleet API, error logs, sign-in and the explorer work (both
+   containers share the SQLite file in WAL mode). What needs DuckDB answers `503` with `Retry-After: 5` and a short reason:
+   `POST /v1/ingest`, `POST /v1/identity`, `POST /v1/erasure`, `/v1/query/*`, `/v1/sql`, `/v1/rollups/*`, `/v1/storage`.
+   It tries DuckDB again every second, logs a warning every minute while it waits, and gives up after
+   `TYPETORCH_HANDOVER_SECONDS` (600) with an error and exit 1 (Docker then restarts it).
+2. **The old container stops within seconds** on `SIGTERM`: new requests get `503` + `Retry-After`, the running ones finish
+   (5 s at most), the raw files are synced (the new server loads them: nothing accepted is lost), a running DuckDB job is
+   interrupted after 3 s (the next start redoes or finishes it, as after a crash), DuckDB is checkpointed and closed, then
+   SQLite. It exits within 20 s whatever happens; `compose.yaml` gives it 30 s (`stop_grace_period`), and `init: true`
+   (or bun as PID 1 with the Dockerfile app) makes sure the signal reaches it.
+3. **The new container takes over** within a second of that: it opens DuckDB, starts the loader and the nightly jobs, and
+   logs `handover: DuckDB is open after N s; analytics is on`.
+
+The game's senders ride over the gap. The framework's analytics engine keeps a batch that got `503` and sends it again
+with a backoff of about 5, 10, 20 s (up to 5 min); the kernel's fleet sender keeps working against the new container, and
+retries a `5xx` from the old one after 1, 3 and 9 s.
+
+Only one server may use a data folder. A second backend on the same folder waits like the new container above; a local
+read-only store (`openDuckDbStore`) on it is refused: query the running server over HTTP, or open a copy of the folder.
 
 ## The event bus
 
@@ -547,7 +578,7 @@ import { createStore, writeSettings, createFleetClient } from "@typetorch/analyt
 // Basin (Cloudflare's SQL API), an analytics server, or a local copy of a server's data folder:
 const store = await createStore({ backend: "basin", accountId, bucket: "typetorch-analytics", token });
 // const store = await createStore({ backend: "duckdb", url: "https://backend.example.com", token: adminToken });
-// const store = await createStore({ backend: "duckdb", dataDir: "./backup/data" });
+// const store = await createStore({ backend: "duckdb", dataDir: "./backup/data" });   // refused while a server runs on it
 
 const numbers = await store.query("roblox", { from: "2026-09-01", to: "2026-09-30", dev: "phone" });
 const graph = await store.query("flow", { players: "new" }, { facet: "zone" });
@@ -758,7 +789,7 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), free disk space; measured at most every 30 s |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
-| `GET /healthz` | open / admin | `{ ok }`; with the admin role: memory, loader lag, row counts, fleet counts, the bus, error log counts |
+| `GET /healthz` | open / admin | `{ ok }`; with the admin role: `state`, memory, loader lag, row counts, fleet counts, the bus, error log counts |
 | `POST /v1/identity` | game | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
 | `GET /v1/identity?pid=` / `?uid=` | admin | pid <-> UserId (`{ identities: [{ pid, uid, firstSeen, lastSeen }] }`); no parameter: `{ count, backfill }` |
 | `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `OPENCLOUD_API_KEY` with `universe-datastores.objects:list` and `:read`) |
@@ -777,6 +808,10 @@ How it works:
 - **Queries** read today's file plus only the day files in the range.
 - **Limits:** body 2 MB gzip / 16 MB inflated, 6,000 requests a minute per IP, 60 per JobId, a query timeout of
   60 s, 2 queries at once. DuckDB: `memory_limit` 400MB, 2 threads, spill folder `data/tmp`.
+- **One process per data folder.** The server keeps `data/lock.duckdb` (empty) and `live.duckdb` attached while it runs;
+  the nightly jobs and the loader use that same DuckDB instance, ad-hoc SQL its own read-only one on
+  `data/sql/sandbox.duckdb` (never `live.duckdb`). Another server on the folder waits for it (a deploy's handover,
+  [Deploys on Coolify](#deploys-on-coolify-rolling-updates)); the scripts (`report`, `loadtest`) go through HTTP.
 
 **Right to Erasure.** In Creator Hub > Webhooks, add `https://<your host>/v1/erasure` for "Right to erasure request"
 with a secret (`ROBLOX_WEBHOOK_SECRET`). The server checks `roblox-signature` (`t=<unix s>,v1=<base64
