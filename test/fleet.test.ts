@@ -7,7 +7,7 @@ import { createFleetClient, FleetApiError } from "../src/fleet/client.ts";
 import { openSqlite } from "../src/fleet/db.ts";
 import { FLEET_NEW_JOBS_PER_MINUTE, handleFleet, NewJobLimiter } from "../src/fleet/http.ts";
 import { alertText, createNotifier, detectFormat, webhookBody } from "../src/fleet/notify.ts";
-import { FleetService, KEEP_METRICS_MS, METRIC_MEMORY_MAX, METRIC_RATE_MAX, METRICS_MAX_POINTS, parseBudget, parseHeartbeat, parseMetrics, type FleetEvent } from "../src/fleet/service.ts";
+import { FleetService, KEEP_METRICS_MS, METRIC_MEMORY_MAX, METRIC_RATE_MAX, METRICS_MAX_POINTS, METRICS_MAX_ROWS, parseBudget, parseHeartbeat, parseMetrics, type FleetEvent } from "../src/fleet/service.ts";
 import { startApp, type App } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 
@@ -506,6 +506,26 @@ describe("metrics (kernel 0.4.2 heartbeat pf, bu.mem)", () => {
 		expect(points.length).toBe(11);
 		const stored = await (service as unknown as { db: { first<T>(sql: string): Promise<T> } }).db.first<{ n: number }>("SELECT COUNT(*) AS n FROM server_metrics");
 		expect(stored.n).toBe(12); // job-cap's 11 and job-other's one (10 s inside the window)
+		await service.close();
+	});
+
+	test("the whole history has a cap too (many JobIds): the sweep keeps the newest metricsMaxRows points", async () => {
+		expect(METRICS_MAX_ROWS).toBeGreaterThanOrEqual(1250 * METRICS_MAX_POINTS); // a 1,250-server fleet fits
+		let clock = T2;
+		const service = await FleetService.open({ db: await openSqlite(":memory:"), clock: () => clock, metricsMaxRows: 50 });
+		for (let i = 0; i < 80; i++) {
+			clock = T2 + i * 100;
+			await service.heartbeat(beat(`job-flood-${i % 40}`, { n: i }));
+		}
+		await service.sweep();
+		const db = (service as unknown as { db: { first<T>(sql: string): Promise<T> } }).db;
+		expect((await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM server_metrics")).n).toBe(50);
+		// The oldest went: job-flood-0's first point (players 0) is gone, its second (40) stays.
+		expect((await service.metrics("job-flood-0")).points.map((p) => p.players)).toEqual([40]);
+		expect((await service.metrics("job-flood-39")).points.map((p) => p.players)).toEqual([39, 79]);
+		// Under the cap the sweep deletes nothing.
+		await service.sweep();
+		expect((await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM server_metrics")).n).toBe(50);
 		await service.close();
 	});
 });

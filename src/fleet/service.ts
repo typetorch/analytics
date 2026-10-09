@@ -24,6 +24,11 @@ export const KEEP_GONE_SERVERS_MS = 86_400_000;
 export const KEEP_METRICS_MS = 2 * 3_600_000;
 /** And at most this many points per server (heartbeats come every 30 s, sooner on changes; the oldest go first). */
 export const METRICS_MAX_POINTS = 720;
+/**
+ * And at most this many points in all (the sweep drops the oldest past it): a 1,250-server fleet at 720 points each
+ * fits, while made-up JobIds (up to TYPETORCH_NEW_JOBS_PER_MINUTE of them a minute) can't grow the table without end.
+ */
+export const METRICS_MAX_ROWS = 1_000_000;
 
 /** The kernel sends critical and warning; the CLI may also post info. */
 export type AlertLevel = "critical" | "warning" | "info";
@@ -569,6 +574,8 @@ export interface FleetServiceOptions {
 	/** Called with each stored alert (the backend publishes it on the bus' `alert` topic). */
 	publishAlert?: (alert: Alert) => Promise<void> | void;
 	log?: (line: string) => void;
+	/** The metrics history's total cap (default METRICS_MAX_ROWS; tests use a small one). */
+	metricsMaxRows?: number;
 }
 
 export class FleetService {
@@ -955,6 +962,10 @@ export class FleetService {
 		}
 		// Kernel 0.4.2: metrics history older than KEEP_METRICS_MS (every sweep: the index on t keeps it cheap).
 		await this.db.run("DELETE FROM server_metrics WHERE t <= ?", [now - KEEP_METRICS_MS]);
+		// And the total cap: ids only grow, so the rows at or below MAX(id) - cap are the oldest (both lookups use the key).
+		const cap = this.options.metricsMaxRows ?? METRICS_MAX_ROWS;
+		const top = await this.db.first<{ id: number | null }>("SELECT MAX(id) AS id FROM server_metrics");
+		if (top?.id && top.id > cap) await this.db.run("DELETE FROM server_metrics WHERE id <= ?", [top.id - cap]);
 		if (now - this.lastRetention > 3_600_000) {
 			this.lastRetention = now;
 			await this.db.run("DELETE FROM reports WHERE received < ?", [now - KEEP_REPORTS_MS]);
