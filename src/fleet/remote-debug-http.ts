@@ -98,9 +98,10 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 			if (path === "/v1/fleet/commands") {
 				if (method !== "GET") return json(405, { error: "GET only" });
 				if (!job) return json(400, { error: "the JobId is required (X-TT-Job or ?j=), at most 64 characters" });
-				if (!o.limiters.poll.take(job)) return tooMany(o.limiters.poll.retryAfter(job));
-				// Only servers the fleet knows (a heartbeat came) can have commands; others get nothing and leave no trace.
+				// Only servers the fleet knows (a heartbeat came) can have commands; others get nothing and leave no trace (not
+				// even a limiter bucket: made-up JobIds can't grow the per-JobId limiter, like the fleet's new-JobId gate).
 				if (!(await o.fleet.knows(job))) return json(200, { watch: false, commands: [] });
+				if (!o.limiters.poll.take(job)) return tooMany(o.limiters.poll.retryAfter(job));
 				const wait = Number(url.searchParams.get("wait") ?? "0");
 				o.keepOpen?.(req);
 				return json(200, await o.hub.poll(job, Number.isFinite(wait) ? wait : 0, req.signal));
@@ -111,6 +112,8 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 			const b = (typeof body === "object" && body !== null ? body : {}) as { j?: unknown; results?: unknown };
 			const bodyJob = typeof b.j === "string" && JOB_PATTERN.test(b.j) ? b.j : job;
 			if (!bodyJob) return json(400, { error: "j (the JobId) is required" });
+			// A JobId with no command out answers nothing useful: ignored before the per-JobId limiter (no bucket for it).
+			if (!o.hub.awaiting(bodyJob)) return json(202, { accepted: 0, ignored: Array.isArray(b.results) ? Math.min(b.results.length, 32) : 0 });
 			if (!o.limiters.results.take(bodyJob)) return tooMany(o.limiters.results.retryAfter(bodyJob));
 			return json(202, o.hub.complete(bodyJob, b.results));
 		}

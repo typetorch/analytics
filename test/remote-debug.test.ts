@@ -258,6 +258,23 @@ describe("limits", () => {
 		expect((await command("status", undefined, job)).status).toBe(202);
 	});
 
+	test("a known JobId's polls are limited (90 a minute); made-up JobIds never reach the per-JobId limiters", async () => {
+		h.setNow(T0 + 7_200_000);
+		const job = "poll-rate-1";
+		await heartbeat(job);
+		let refused = 0;
+		for (let i = 0; i < 95; i++) if ((await poll(job)).status === 429) refused++;
+		expect(refused).toBeGreaterThanOrEqual(1);
+		// More polls and result posts than either limit from a JobId without a heartbeat: answered, nothing kept, never 429.
+		for (let i = 0; i < 125; i++) {
+			expect((await poll("ghost-rate-1")).status).toBe(200);
+			const res = await results("ghost-rate-1", [{ id: "x", ok: true, json: "{}" }]);
+			expect(res.status).toBe(202);
+			expect(await asJson(res)).toEqual({ accepted: 0, ignored: 1 });
+		}
+		h.setNow(T0);
+	});
+
 	test("30 commands a minute per explorer user, 30 watches a minute", async () => {
 		h.setNow(T0 + 3_600_000);
 		const job = "rate-1";

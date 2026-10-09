@@ -398,6 +398,11 @@ export class RemoteDebugHub {
 		return { watch: this.isWatched(job), commands };
 	}
 
+	/** Whether `job` has a command out (sent, no answer yet): only then can its result post change anything. */
+	awaiting(job: string): boolean {
+		return this.pending(job).some((c) => c.state === "sent");
+	}
+
 	/**
 	 * The kernel's answers. Only for commands sent to this job and still waiting; the rest is ignored (counted).
 	 * `json` is the result as JSON text (at most RESULT_MAX); `error` a short reason.
