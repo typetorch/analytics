@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api as defaultApi, ApiError, type Api } from "./api";
-import type { DebugStatus, RemoteCommand, RemoteOp } from "./types";
+import type { RemoteCommand, RemoteOp, WatchReply } from "./types";
 
 /** How long a click waits for the server's answer. */
 export const COMMAND_TIMEOUT_MS = 15_000;
@@ -226,7 +226,7 @@ export function useRemote<T>(call: Runner, op: RemoteOp) {
  * closed, lost or unknown server) sends nothing.
  */
 export function useServerWatch(job: string, enabled: boolean, client: Pick<Api, "watchServer"> = defaultApi) {
-	const [reply, setReply] = useState<DebugStatus | undefined>();
+	const [reply, setReply] = useState<WatchReply | undefined>();
 	const [error, setError] = useState<string | undefined>();
 	useEffect(() => {
 		if (!enabled) return;

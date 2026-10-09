@@ -505,6 +505,16 @@ export interface DebugStatus {
 	lastPollAt?: number;
 }
 
+/** POST /v1/fleet/servers/<job>/watch. */
+export interface WatchReply extends DebugStatus {
+	job: string;
+	/**
+	 * Plans/25 "Instant wake": a wake message went out to this server lately (the backend has an Open Cloud messaging key),
+	 * so it should poll within seconds. Absent (backends before it) or false: it polls at its next heartbeat.
+	 */
+	wake?: boolean;
+}
+
 /** GET /v1/fleet/servers/<job>: its servers row of any age (rows go a day after a server is gone), its state, the debug session. */
 export interface FleetServerDetail {
 	server: (FleetServer & { closedAt?: string | null; lostAt?: string | null }) | null;

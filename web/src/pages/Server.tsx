@@ -2,7 +2,8 @@
  * /servers/<JobId> (plans/25): one fleet server, and READ-ONLY remote debug of it while it runs.
  *
  * A Roblox server can't be called into, so it pulls: this page tells the backend it watches the job (every 20 s while
- * the tab is visible), the server's next heartbeat reply says so (up to 30 s), and the server long-polls for commands.
+ * the tab is visible), the server's next heartbeat reply says so (up to 30 s; at once when the backend can publish a
+ * wake message: "Waking server..."), and the server long-polls for commands.
  * Each fetch on a tab is one audited, allow-listed, read-only command; its answer stays in this page's memory (gone on
  * reload). A closed, lost or unknown server shows what the fleet knows and sends no watch.
  */
@@ -43,6 +44,8 @@ export const SERVER_TABS = [
 type TabId = (typeof SERVER_TABS)[number]["id"];
 
 export const CONNECTING_TEXT = "Connecting: the server picks this up at its next heartbeat, up to 30 s.";
+/** Plans/25 "Instant wake": the backend sent the server a wake message (the watch reply's `wake`). */
+export const WAKING_TEXT = "Waking server...";
 
 /** How the session looks from here: the backend's view, the last watch reply, and whether an answer came lately. */
 export function sessionState(
@@ -56,10 +59,13 @@ export function sessionState(
 	return { connected: Boolean(debug?.connected || watch?.connected || recent), ...(lastPollAt ? { lastPollAt } : {}) };
 }
 
-/** How often the page re-reads the server: quickly while it waits for the first poll, slowly after. */
-export function detailRefetch(data: FleetServerDetail | undefined): number | false {
+/**
+ * How often the page re-reads the server: quickly while it waits for the first poll (every second while a wake is on
+ * its way: the server polls within seconds), slowly after.
+ */
+export function detailRefetch(data: FleetServerDetail | undefined, waking = false): number | false {
 	if (!data) return false;
-	if (data.state === "live") return data.debug.connected ? 15_000 : 5_000;
+	if (data.state === "live") return data.debug.connected ? 15_000 : waking ? 1_000 : 5_000;
 	return data.state === "lost" ? 30_000 : false;
 }
 
@@ -107,7 +113,7 @@ function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServ
 	);
 }
 
-function Connection({ live, connected, lastPollAt, watchError, watching }: { live: boolean; connected: boolean; lastPollAt?: number; watchError?: string; watching: boolean }) {
+function Connection({ live, connected, lastPollAt, watchError, watching, waking }: { live: boolean; connected: boolean; lastPollAt?: number; watchError?: string; watching: boolean; waking: boolean }) {
 	if (!live) return null;
 	if (watchError) return <Tone tone="bg-[var(--status-critical)]">Watch refused: {watchError}</Tone>;
 	if (connected)
@@ -116,7 +122,7 @@ function Connection({ live, connected, lastPollAt, watchError, watching }: { liv
 				Connected{lastPollAt ? `, last poll ${fmtTime(lastPollAt).slice(11)} UTC` : ""}
 			</Tone>
 		);
-	return <Tone tone="bg-[var(--status-warning)]">{watching ? CONNECTING_TEXT : "Opening a session"}</Tone>;
+	return <Tone tone="bg-[var(--status-warning)]">{waking ? WAKING_TEXT : watching ? CONNECTING_TEXT : "Opening a session"}</Tone>;
 }
 
 function Gone({ detail }: { detail: FleetServerDetail }) {
@@ -141,10 +147,12 @@ function Gone({ detail }: { detail: FleetServerDetail }) {
 }
 
 function ServerView({ job }: { job: string }) {
+	// A wake is on its way (set below from the watch reply; state, so the refetch interval changes at once).
+	const [waking, setWaking] = useState(false);
 	const detail = useQuery({
 		queryKey: ["fleet", "server", job],
 		queryFn: ({ signal }) => api.fleetServer(job, signal),
-		refetchInterval: (query) => detailRefetch(query.state.data),
+		refetchInterval: (query) => detailRefetch(query.state.data, waking),
 	});
 	const d = detail.data;
 	const live = d?.state === "live";
@@ -154,6 +162,8 @@ function ServerView({ job }: { job: string }) {
 	const call = useRemoteRunner(job, onAnswer);
 	const session = sessionState(d?.debug, watch.reply, answeredAt);
 	const ready = live && session.connected;
+	const wakingNow = live && !session.connected && watch.reply?.wake === true;
+	if (wakingNow !== waking) setWaking(wakingNow);
 
 	const [tabParam, setTab] = useParam("tab", "status");
 	// (the remote ops below are declared before any early return: hooks run in the same order every render)
@@ -170,7 +180,7 @@ function ServerView({ job }: { job: string }) {
 		},
 		[setTab],
 	);
-	const context = useMemo<DebugContextValue>(() => ({ job, call, ready, waitReason: live ? CONNECTING_TEXT : "This server isn't running." }), [job, call, ready, live]);
+	const context = useMemo<DebugContextValue>(() => ({ job, call, ready, waitReason: live ? (wakingNow ? WAKING_TEXT : CONNECTING_TEXT) : "This server isn't running." }), [job, call, ready, live, wakingNow]);
 
 	if (detail.isPending)
 		return (
@@ -202,7 +212,7 @@ function ServerView({ job }: { job: string }) {
 			) : (
 				<>
 					<div className="flex flex-wrap items-center justify-between gap-2">
-						<Connection live={live} connected={session.connected} lastPollAt={session.lastPollAt} watchError={watch.error} watching={watch.reply !== undefined} />
+						<Connection live={live} connected={session.connected} lastPollAt={session.lastPollAt} watchError={watch.error} watching={watch.reply !== undefined} waking={wakingNow} />
 						<span className="text-xs text-muted-foreground">Read only. Every fetch is one audited command; answers stay in this page (gone on reload).</span>
 					</div>
 					<Tabs value={tab} onValueChange={setTab} className="gap-4">
