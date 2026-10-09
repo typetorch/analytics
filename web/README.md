@@ -85,7 +85,7 @@ const COLUMNS: DataColumn<Server>[] = [
 	// Shown as "47 / 60", sorted and filtered by 47:
 	{ id: "players", header: "Players", accessor: (s) => s.players, cell: (s) => `${s.players} / ${s.max}` },
 	// Memory in MB with a unit hint; null sorts last:
-	{ id: "memory", header: "Memory", hint: "MB", accessor: (s) => s.memoryMb, cell: (s) => `${s.memoryMb} MB` },
+	{ id: "memory", header: "Memory", hint: "MB", accessor: (s) => s.memMb, cell: (s) => `${s.memMb} MB` },
 	{ id: "health", header: "Health", type: "enum", order: ["ok", "degraded", "failing"], accessor: (s) => s.health },
 	{ id: "seen", header: "Seen", type: "date", accessor: (s) => s.lastSeen, cell: (s) => fmtAgo(s.lastSeen) },
 	{ id: "channel", header: "Channel", type: "enum", accessor: (s) => s.channel, defaultHidden: true },

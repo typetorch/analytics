@@ -338,7 +338,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 | `GET /v1/identity`, `POST /v1/identity/backfill` | admin | pid <-> UserId lookups and backfill |
 | `GET /v1/errors`, `GET /v1/errors/<fp>` | admin | error kinds with counts; one kind |
 | `GET /v1/live` | admin | Server-Sent Events of the event bus |
-| `GET /v1/fleet/servers`, `reports`, `alerts`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads and alert acknowledgement |
+| `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `stream`; `POST /v1/fleet/alerts/<id>/ack` | admin | fleet reads (a server's TPS / memory history too) and alert acknowledgement |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
@@ -486,7 +486,8 @@ web:build` build it into `web/dist`, and the backend serves it at `/` (the Docke
 Roblox, Retention, Funnels, Players, Flow, Experiments, First session, Events, Fleet, **Errors**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)). The header shows who is signed in (Roblox name and avatar, or
-"admin token") and a Sign out button.
+"admin token") and a Sign out button. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
+with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker.
 
 Working on it: `bun run web:dev` (or `cd web && bun run dev -- --game <game repo>`) starts Vite with a proxy: `/api` goes to the
 backend with the admin token **from the game repo's `.env`** (`TYPETORCH_ADMIN_TOKEN`, or `TYPETORCH_ENV_FILE`), at the URL in the
@@ -820,20 +821,29 @@ Kernels post to it directly (`kernel/src/server/Fleet.luau`, settings in the sig
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `POST /v1/fleet/heartbeat` | ingest | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, x?, v, q, g, h, e?, sv }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `k` is ignored: never stored or returned |
+| `POST /v1/fleet/heartbeat` | ingest | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned |
 | `POST /v1/fleet/report` | ingest | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
 | `POST /v1/fleet/alert` | ingest | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`) |
 | `POST /v1/fleet/closing` | ingest | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
 | `POST /v1/fleet/deploy` | ingest | `{ s, b, a, ch, t }` from the CLI when a deploy starts (stuck detection's start time) |
 | `GET /v1/fleet/servers?branch=&maxAge=` | admin | `{ servers: [...], players, byArtifact, byHealth }` (live: seen in the last 90 s, not closed) |
+| `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }` |
 | `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
 | `GET /v1/fleet/alerts?since=<ms>&level=&unacked=1&limit=` | admin | `{ alerts: [...] }` (each with `at` in ms and `acked`) |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | `{ by? }` |
 | `GET /v1/fleet/stream?branch=&types=server,alert` | admin | Server-Sent Events (below) |
 
 Rows use long names (`job`, `serverType`, `branch`, `artifact`, `players`, `maxPlayers`, `startedAt`, `lastWrite`,
-`appliedSeq`, `generation`, `health`, `lastError`, `kernel`, `experiment`, `serverVersion`; reports `seq`, `job`,
-`result`, `error`, `seconds`, `at`...). Times are ISO strings, except `at` (unix ms).
+`appliedSeq`, `generation`, `health`, `lastError`, `kernel`, `experiment`, `serverVersion`, `budget`, and the latest
+`tps`, `tpsMin`, `physFps`, `memMb`, `luaMb`; reports `seq`, `job`, `result`, `error`, `seconds`, `at`...). Times are
+ISO strings, except `at` (unix ms).
+
+**TPS and memory** (kernel 0.4.2): each heartbeat's `pf` and `bu.mem` give the server row its latest `tps`, `tpsMin`,
+`physFps`, `memMb` and `luaMb` (numbers; `null` when unknown, e.g. an older kernel). Each value is checked on its own: a
+missing, non-numeric, negative or out-of-range one (rates over 1,000, memory over 1,000,000 MB) is `null`, and never a
+reason to refuse the heartbeat. Every heartbeat also adds one point to the server's history (`server_metrics`): at most
+720 points per server and 2 hours (older points are dropped by the sweep and never returned), and at most 1,000,000
+points in all (the sweep drops the oldest), which fits a 1,250-server fleet.
 
 **SSE format:** `event: <type>` and `data: <JSON>` per message, a `: ping` comment every 15 s. Types:
 
