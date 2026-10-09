@@ -819,7 +819,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	function actorOf(principal: Principal & { role: "admin" }): SettingsActor {
 		if (principal.via === "bearer") return { who: "admin token", via: "bearer" };
 		if (principal.user.kind === "roblox") {
-			const name = principal.user.name.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 32);
+			// The username (Roblox allows letters, digits and _); the "Roblox user <id>" stand-in adds nothing.
+			const raw = principal.user.name;
+			const name = /^Roblox user \d+$/.test(raw) ? "" : raw.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 32);
 			return { who: `roblox user ${principal.user.userId}${name ? ` (${name})` : ""}`, via: "session" };
 		}
 		return { who: "admin token", via: "session" };

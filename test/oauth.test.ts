@@ -324,6 +324,37 @@ describe("Sign in with Roblox", () => {
 		expect((await h.call("/v1/auth/roblox/start", { ip: "198.51.100.201" })).status).toBe(302);
 	});
 
+	test("runtime settings: the token login goes off only from a Roblox session, and browser token sessions end with it", async () => {
+		const XT = { "x-typetorch": "1" };
+		const patch = (body: unknown, headers: Record<string, string>) => h.call("/v1/admin/settings", { method: "PATCH", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
+		const tokenLogin = () => h.call("/v1/auth/login", { method: "POST", ...json({ token: ADMIN }), headers: { "content-type": "application/json", ...XT } });
+		const tokenCookie = (((await tokenLogin()).headers.getSetCookie().find((c) => c.startsWith("tt_session=")) as string).split(";")[0]) as string;
+		// Not with the admin token, not from a token session, even though Roblox sign-in is configured here.
+		for (const headers of [bearer(ADMIN), { cookie: tokenCookie, ...XT }]) {
+			const refused = await patch({ tokenLogin: false }, headers);
+			expect(refused.status).toBe(409);
+			expect(await asJson(refused)).toMatchObject({ key: "tokenLogin", guard: "token-login" });
+		}
+		const robloxCookie = (sessionOf(await signIn()) as string).split(";")[0] as string;
+		const view = await asJson(await h.call("/v1/admin/settings", { headers: { cookie: robloxCookie } }));
+		expect(view).toMatchObject({ you: { roblox: true }, robloxSignIn: true });
+		const off = await patch({ tokenLogin: false }, { cookie: robloxCookie, ...XT });
+		expect(off.status).toBe(200);
+		const offBody = await asJson(off);
+		expect(offBody.sessionsEnded).toBeGreaterThanOrEqual(1);
+		expect(offBody.audit[0]).toMatchObject({ who: `roblox user ${OWNER}`, via: "session", action: "change", set: ["tokenLogin"] });
+		// Applied at once: the token session is gone and the login is hidden and refused; Roblox and the CLI's Bearer still work.
+		expect((await h.call("/v1/queries", { headers: { cookie: tokenCookie } })).status).toBe(401);
+		expect((await asJson(await h.call("/v1/auth/check"))).login).toEqual({ token: false, roblox: true });
+		expect((await tokenLogin()).status).toBe(404);
+		expect((await h.call("/v1/queries", { headers: { cookie: robloxCookie } })).status).toBe(200);
+		expect((await h.call("/v1/queries", { headers: bearer(ADMIN) })).status).toBe(200);
+		// Turning it back on needs no guard (here from the CLI's token).
+		expect((await patch({ tokenLogin: null }, bearer(ADMIN))).status).toBe(200);
+		expect((await asJson(await h.call("/v1/auth/check"))).login).toEqual({ token: true, roblox: true });
+		expect((await tokenLogin()).status).toBe(200);
+	});
+
 	test("an owner removed from the list loses a live session at once; one never listed gets none", async () => {
 		expect((await putAccess(5, [OWNER, 3003])).status).toBe(200);
 		const res = await signIn();
