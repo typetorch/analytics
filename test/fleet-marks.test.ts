@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { openSqlite } from "../src/fleet/db.ts";
-import { FleetService, markTime, parseDeploy, parseMark, type FleetEvent } from "../src/fleet/service.ts";
+import { FleetService, MARKS_MAX_ROWS, markTime, parseDeploy, parseMark, type FleetEvent } from "../src/fleet/service.ts";
 import { ADMIN, API, asJson, bearer, harness, post, T0, type Harness } from "./harness.ts";
 
 const MIN = 60_000;
@@ -116,6 +116,20 @@ describe("the service", () => {
 		expect(await fleet.marks({ since: T0 - DAY, until: T0 + DAY })).toEqual([]);
 		await fleet.close();
 	});
+
+	test("the marks table keeps at most MARKS_MAX_ROWS, the newest", async () => {
+		let now = T0;
+		const db = await openSqlite(":memory:");
+		const fleet = await FleetService.open({ db, clock: () => now });
+		for (let i = 0; i < MARKS_MAX_ROWS + 3; i++) await fleet.mark({ k: "backup", s: i, t: T0 });
+		now = T0 + 2 * HOUR;
+		await fleet.sweep();
+		expect(await db.first<{ n: number; lo: number; hi: number }>("SELECT COUNT(*) AS n, MIN(seq) AS lo, MAX(seq) AS hi FROM marks")).toEqual({ n: MARKS_MAX_ROWS, lo: 3, hi: MARKS_MAX_ROWS + 2 });
+		// Same time: the newest by id (numeric order, not text) are the ones a limit keeps.
+		const kept = await fleet.marks({ since: T0 - DAY, until: T0 + DAY, limit: 2 });
+		expect(kept.map((m) => m.seq)).toEqual([MARKS_MAX_ROWS + 1, MARKS_MAX_ROWS + 2]);
+		await fleet.close();
+	});
 });
 
 describe("over HTTP", () => {
@@ -132,6 +146,9 @@ describe("over HTTP", () => {
 		expect((await h.call("/v1/fleet/mark", post(API, { j: "cli", k: "kernel", v: "0.4.0", pv: 23, t: T0 }))).status).toBe(202);
 		expect((await h.call("/v1/fleet/mark", post(API, { j: "cli", k: "nope" }))).status).toBe(400);
 		expect((await h.call("/v1/fleet/mark", post(ADMIN, { j: "cli", k: "kernel" }))).status).toBe(401);
+		// Only the CLI sends marks: a game server (any other j, or none) is refused before the limiter keeps a key.
+		expect((await h.call("/v1/fleet/mark", post(API, { j: "job-1", k: "kernel" }))).status).toBe(400);
+		expect((await h.call("/v1/fleet/mark", post(API, { k: "kernel" }))).status).toBe(400);
 		const res = await h.call(`/v1/fleet/marks?since=${T0 - HOUR}&until=${T0 + MIN}`, { headers: bearer(ADMIN) });
 		expect(res.status).toBe(200);
 		const body = await asJson(res);

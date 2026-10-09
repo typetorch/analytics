@@ -33,6 +33,8 @@ export const METRICS_MAX_ROWS = 1_000_000;
 export const KEEP_MARKS_MS = 365 * 86_400_000;
 /** GET marks reads at most this long a window. */
 export const MARKS_MAX_WINDOW_MS = 366 * 86_400_000;
+/** The marks table keeps at most this many (the newest), checked hourly with the other retention. */
+export const MARKS_MAX_ROWS = 5000;
 
 /** What a release did to a branch (the CLI's `k` on POST /v1/fleet/deploy; deploys known only from reports have none). */
 export const DEPLOY_KINDS = ["deploy", "rollback", "promote", "resign"] as const;
@@ -918,7 +920,7 @@ export class FleetService {
 				});
 			}
 		}
-		out.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+		out.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id, "en", { numeric: true }));
 		return out.length > limit ? out.slice(out.length - limit) : out;
 	}
 
@@ -1198,6 +1200,9 @@ export class FleetService {
 			await this.db.run("DELETE FROM alerts WHERE created < ?", [now - KEEP_ALERTS_MS]);
 			await this.db.run("DELETE FROM deploys WHERE received < ?", [now - KEEP_ALERTS_MS]);
 			await this.db.run("DELETE FROM marks WHERE received < ?", [now - KEEP_MARKS_MS]);
+			// And at most MARKS_MAX_ROWS (the newest): marks come from the CLI at 30 a minute at most, so a leaked game key
+			// can add a few thousand an hour, never an unbounded table.
+			await this.db.run("DELETE FROM marks WHERE id <= (SELECT MAX(id) FROM marks) - ?", [MARKS_MAX_ROWS]);
 			await this.db.run("DELETE FROM servers WHERE (closed_at IS NOT NULL AND closed_at < ?) OR (lost_at IS NOT NULL AND lost_at < ?)", [now - KEEP_GONE_SERVERS_MS, now - KEEP_GONE_SERVERS_MS]);
 		}
 		return { lost: lostRows.length, stuck };

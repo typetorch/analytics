@@ -152,6 +152,8 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 			const job = typeof (body as { j?: unknown })?.j === "string" ? (body as { j: string }).j : (req.headers.get("x-tt-job") ?? "");
 			// Checked here, before any limiter keeps the key (the service checks the same per route).
 			if (job.length > JOB_ID_MAX || job.includes("\0")) throw new FleetInputError(`j must be a string of at most ${JOB_ID_MAX} characters`);
+			// Marks come from the CLI only: one limiter key ("cli") bounds them all (a game server never sends one).
+			if (kind === "mark" && job !== "cli") throw new FleetInputError('marks come from the CLI: j must be "cli"');
 			const key = job || `ip:${ip}`;
 			if (job && job !== "cli" && !(await o.service.knows(job))) {
 				const verdict = o.newJobs.take(job);
