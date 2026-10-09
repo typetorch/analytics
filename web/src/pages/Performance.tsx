@@ -473,9 +473,21 @@ interface CompareRow {
 	change: ReturnType<typeof delta>;
 }
 
+/**
+ * Which of two periods the change is measured from and to: before -> after, and the older build -> the newer one (lower seq
+ * first; the backend lists builds newest first, so without seqs the second column is the base). Null unless there are two.
+ */
+export function changeOrder(result: PerfCompareResult): [base: number, value: number] | null {
+	const [a, b] = result.periods;
+	if (!a || !b || result.periods.length !== 2) return null;
+	if (result.mode === "around") return a.key === "after" ? [1, 0] : [0, 1];
+	if (typeof a.seq === "number" && typeof b.seq === "number" && a.seq !== b.seq) return a.seq < b.seq ? [0, 1] : [1, 0];
+	return [1, 0];
+}
+
 export function compareRows(result: PerfCompareResult): { pinned: CompareRow[]; rows: CompareRow[] } {
 	const periods = result.periods;
-	const pair = periods.length === 2;
+	const order = changeOrder(result);
 	const info = (side: "client" | "server", key: string) => (side === "client" ? result.clientMetrics : result.serverMetrics).find((m) => m.key === key);
 	const pinned: CompareRow[] = [
 		{ id: "client-samples", label: "Client samples", key: "samples", values: periods.map((p) => p.client.samples), change: null },
@@ -489,7 +501,7 @@ export function compareRows(result: PerfCompareResult): { pinned: CompareRow[]; 
 				label: `${side === "server" && key === "mem" ? "Server memory" : (METRICS[key]?.label ?? key)} ${pct}`,
 				key,
 				values,
-				change: pair ? delta(values[0], values[1], info(side, key)?.higherIsBetter ?? true) : null,
+				change: order ? delta(values[order[0]], values[order[1]], info(side, key)?.higherIsBetter ?? true) : null,
 			};
 		}),
 	);
@@ -514,12 +526,15 @@ function compareColumns(result: PerfCompareResult): DataColumn<CompareRow>[] {
 			}),
 		),
 	];
-	if (result.periods.length === 2) {
+	const order = changeOrder(result);
+	if (order) {
+		const [base, value] = order.map((i) => result.periods[i] as ComparePeriod);
 		columns.push({
 			id: "change",
 			header: "Change",
 			type: "number",
-			title: "From the first column to the second; green is better, red is worse",
+			hint: result.mode === "around" ? "after vs before" : "newer vs older",
+			title: `${periodLabel(result, value as ComparePeriod)} against ${periodLabel(result, base as ComparePeriod)}; green is better, red is worse`,
 			accessor: (r) => (r.change ? Math.round(r.change.pct * 10) / 10 : null),
 			cell: (r) =>
 				r.key === "samples" ? (
@@ -571,6 +586,9 @@ function CompareSection({ filters, marks, seqOf }: { filters: Filters; marks: De
 		mode === "around" ? { mode: "around", at: around?.at, hours } : { mode: "builds", ...(arts.length ? { arts } : {}) },
 		{ filters: mode === "around" ? aroundFilters : filters, enabled: mode !== "around" || around !== undefined },
 	);
+	// A build's seq for its button: from the marks in range, else from the comparison (a build deployed before the range).
+	const seqs = new Map(seqOf);
+	if (q.data?.mode === "builds") for (const p of q.data.periods) if (typeof p.seq === "number" && !seqs.has(p.key)) seqs.set(p.key, p.seq);
 	const toggle = (art: string) => {
 		const next = arts.includes(art) ? arts.filter((a) => a !== art) : [...arts, art].slice(-6);
 		setPicked(next.join(","));
@@ -622,7 +640,7 @@ function CompareSection({ filters, marks, seqOf }: { filters: Filters; marks: De
 				<div className="flex flex-wrap gap-1.5" role="group" aria-label="Builds to compare">
 					{(values.data?.art ?? []).slice(0, 16).map((a) => (
 						<Button key={a.value} size="sm" variant={arts.includes(a.value) ? "secondary" : "outline"} className="h-7 font-mono text-xs" aria-pressed={arts.includes(a.value)} onClick={() => toggle(a.value)}>
-							{groupLabel("art", a.value, seqOf.get(a.value))}
+							{groupLabel("art", a.value, seqs.get(a.value))}
 						</Button>
 					))}
 					{arts.length ? (

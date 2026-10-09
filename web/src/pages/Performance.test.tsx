@@ -4,9 +4,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
-import type { DeployMark, PerfCompareResult, PerfSeriesResult, PerfServer, PerfStat } from "@/lib/perf";
+import type { ComparePeriod, DeployMark, PerfCompareResult, PerfSeriesResult, PerfServer, PerfStat } from "@/lib/perf";
 import type { Filters } from "@/lib/types";
-import Performance, { historyRows, stepChoices } from "./Performance";
+import Performance, { changeOrder, compareRows, historyRows, stepChoices } from "./Performance";
 
 beforeAll(() => {
 	// recharts measures its container: give it a size, so the charts (and their marks) render in jsdom.
@@ -248,6 +248,22 @@ describe("Performance page", () => {
 		mount("/performance?range=6h&step=15");
 		await waitFor(() => expect(picked.calls.find((c) => c.name === "perf-server")?.options.bucketMinutes).toBe(15));
 		expect(picked.calls.find((c) => c.name === "perf-client")?.options.bucketMinutes).toBe(15);
+	});
+
+	it("the change goes from the older build to the newer one (the backend lists newest first), and from before to after", () => {
+		const [older, newer] = compare.periods as [ComparePeriod, ComparePeriod];
+		const newestFirst: PerfCompareResult = { ...compare, periods: [newer, older] };
+		expect(changeOrder(compare)).toEqual([0, 1]);
+		expect(changeOrder(newestFirst)).toEqual([1, 0]);
+		// Same numbers either way: the newer build's fps is 16.7% worse.
+		for (const r of [compare, newestFirst]) {
+			const fps = compareRows(r).rows.find((row) => row.id === "client-fps-p50");
+			expect(fps?.change).toMatchObject({ better: false });
+			expect(Math.round((fps?.change?.pct ?? 0) * 10) / 10).toBe(-16.7);
+		}
+		expect(changeOrder({ ...compare, periods: [{ ...newer, seq: null }, { ...older, seq: null }] })).toEqual([1, 0]);
+		expect(changeOrder({ ...compare, mode: "around", periods: [{ ...older, key: "before" }, { ...newer, key: "after" }] })).toEqual([0, 1]);
+		expect(changeOrder({ ...compare, periods: [older] })).toBeNull();
 	});
 
 	it("step choices: 2 to 400 steps in the window", () => {
