@@ -13,6 +13,7 @@ import {
 	Monitor,
 	Moon,
 	Server,
+	Settings,
 	Sun,
 	Terminal,
 	Users,
@@ -54,6 +55,7 @@ export const NAV: NavItem[] = [
 	{ path: "/fleet", label: "Fleet", icon: Server, noFilters: true },
 	{ path: "/errors", label: "Errors", icon: Bug, noFilters: true },
 	{ path: "/query", label: "Query", icon: Terminal },
+	{ path: "/settings", label: "Settings", icon: Settings, noFilters: true },
 ];
 
 /** Links keep the filter parameters (and drop page-only ones like pid). */

@@ -18,8 +18,10 @@ import type {
 	QueryInfo,
 	QueryName,
 	QueryResults,
+	SettingsView,
 	SqlResult,
 	StorageReport,
+	TestAlertResult,
 } from "./types";
 
 /** The header the backend wants on cookie-authenticated requests that change something. */
@@ -161,6 +163,13 @@ export function createApi(options: ApiOptions = {}) {
 				`/v1/fleet/reports${params.seq || params.artifact ? qs(params) : `?latest${params.branch ? `&branch=${encodeURIComponent(params.branch)}` : ""}`}`,
 				signal,
 			),
+		/** Runtime settings: values, sources, bounds and the audit list (the webhook only as set / not set). */
+		settings: (signal?: AbortSignal) => get<SettingsView>("/v1/admin/settings", signal),
+		/** Saves a partial change: { key: value }, or { key: null } to go back to the environment. Answers the new view. */
+		saveSettings: (changes: Record<string, unknown>, signal?: AbortSignal) =>
+			request<SettingsView>("/v1/admin/settings", { method: "PATCH", body: JSON.stringify(changes), ...(signal ? { signal } : {}) }),
+		/** One test alert through the saved webhook (the backend allows 3 a minute). */
+		testAlert: (signal?: AbortSignal) => post<TestAlertResult>("/v1/admin/settings/test-alert", {}, signal),
 		/** The SSE stream's URL (EventSource can't set headers; the proxy adds the token). */
 		streamUrl: (params: { branch?: string; types?: string } = {}) => `${base}/v1/fleet/stream${qs(params)}`,
 	};

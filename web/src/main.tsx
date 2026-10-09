@@ -56,6 +56,7 @@ const router = createBrowserRouter([
 			{ path: "fleet", lazy: page(() => import("@/pages/Fleet")) },
 			{ path: "errors", lazy: page(() => import("@/pages/Errors")) },
 			{ path: "query", lazy: page(() => import("@/pages/Query")) },
+			{ path: "settings", lazy: page(() => import("@/pages/Settings")) },
 			{ path: "*", lazy: page(() => import("@/pages/NotFound")) },
 		],
 	},

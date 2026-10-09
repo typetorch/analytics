@@ -72,6 +72,10 @@ describe("explorer proxy guard", () => {
 		expect(guardRequest({ method: "GET", url: "/v1/errors/fp-abc123", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/live?topics=error", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/identity", headers: same }, true)).toMatchObject({ ok: false, status: 403 }); // the game's ingest route
+		// Runtime settings: read only through the proxy; saving and the test alert stay on the backend's own explorer.
+		expect(guardRequest({ method: "GET", url: "/v1/admin/settings", headers: same }, true)).toEqual({ ok: true });
+		for (const method of ["PATCH", "POST", "PUT"]) expect(guardRequest({ method, url: "/v1/admin/settings", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
+		expect(guardRequest({ method: "POST", url: "/v1/admin/settings/test-alert", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
 		expect(guardRequest({ method: "GET", url: "/healthz", headers: { host: "localhost:5173", "sec-fetch-site": "none" } }, true)).toEqual({ ok: true });
 		for (const [method, url] of [
 			["POST", "/v1/erasure"],

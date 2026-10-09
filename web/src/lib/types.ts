@@ -553,3 +553,76 @@ export interface ErrorDetail {
 	byBranch: { branch: string; n: number }[];
 	byRealm: { realm: string; n: number }[];
 }
+
+// Runtime settings (GET / PATCH /v1/admin/settings) --------------------------------------------------------------------
+
+/** "dashboard" = saved on the Settings page; "env" = the environment; "default" = neither (the built-in default). */
+export type SettingSource = "env" | "dashboard" | "default";
+export type SettingKind = "secret" | "choice" | "levels" | "ips" | "switch" | "number";
+
+interface SettingBase {
+	key: string;
+	/** The environment variable that gives the default. */
+	env: string;
+	group: "alerts" | "access" | "limits" | "retention";
+	label: string;
+	help: string;
+	kind: SettingKind;
+	source: SettingSource;
+	options?: string[];
+	min?: number;
+	max?: number;
+	/** What 0 means, when 0 is allowed outside min..max ("forever"). */
+	zero?: string;
+	unit?: string;
+	maxEntries?: number;
+}
+
+/** A secret (the alert webhook): only whether it is set, never the value. */
+export interface SecretSetting extends SettingBase {
+	kind: "secret";
+	set: boolean;
+	/** Whether the environment has one (what "Reset to env" brings back). */
+	fallbackSet: boolean;
+}
+
+export interface ValueSetting extends SettingBase {
+	kind: Exclude<SettingKind, "secret">;
+	value: unknown;
+	/** The environment's value (or the default): what "Reset to env" brings back. */
+	fallback: unknown;
+	fallbackSource: "env" | "default";
+}
+
+export type RuntimeSetting = SecretSetting | ValueSetting;
+
+export interface SettingsAuditEntry {
+	at: string;
+	who: string;
+	via: "bearer" | "session";
+	action: "change" | "test-alert";
+	set?: string[];
+	reset?: string[];
+	result?: string;
+}
+
+export interface SettingsView {
+	/** False when TYPETORCH_RUNTIME_SETTINGS=off: the environment applies and changes are refused. */
+	enabled: boolean;
+	settings: RuntimeSetting[];
+	/** Environment variables that can't change here (change them on Coolify and redeploy). */
+	envOnly: string[];
+	audit: SettingsAuditEntry[];
+	/** The caller's address as the server sees it, and whether this is a Roblox session. */
+	you: { ip: string; roblox: boolean };
+	robloxSignIn: boolean;
+	/** On a save: the keys that changed, and browser token sessions ended (token login turned off). */
+	changed?: string[];
+	sessionsEnded?: number;
+}
+
+export interface TestAlertResult {
+	ok: boolean;
+	status?: number;
+	error?: string;
+}
