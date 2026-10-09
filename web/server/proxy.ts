@@ -108,6 +108,9 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	{ method: "POST", path: /^\/v1\/sql$/ },
 	{ method: "GET", path: /^\/v1\/rollups\/(daily|players|player_days|edges)$/ },
 	{ method: "GET", path: /^\/v1\/fleet\/(servers|reports|alerts|stream)$/ },
+	// The Performance page: chart marks, and one server's TPS / memory history (the heartbeat metrics update).
+	{ method: "GET", path: /^\/v1\/fleet\/marks$/ },
+	{ method: "GET", path: /^\/v1\/fleet\/servers\/[A-Za-z0-9_.:{}%-]{1,200}\/metrics$/ },
 	// The Settings page can read through the proxy (the webhook URL is never in the answer). Saving and the test alert are
 	// not forwarded: change settings on the backend's own explorer, signed in.
 	{ method: "GET", path: /^\/v1\/admin\/settings$/ },
