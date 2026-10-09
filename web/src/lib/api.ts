@@ -23,6 +23,7 @@ import type {
 	StorageReport,
 	TestAlertResult,
 } from "./types";
+import type { DeployMark, PerfServer, ServerMetricPoint } from "./perf";
 
 /** The header the backend wants on cookie-authenticated requests that change something. */
 export const CSRF_HEADER = "x-typetorch";
@@ -170,6 +171,14 @@ export function createApi(options: ApiOptions = {}) {
 			request<SettingsView>("/v1/admin/settings", { method: "PATCH", body: JSON.stringify(changes), ...(signal ? { signal } : {}) }),
 		/** One test alert through the saved webhook (the backend allows 3 a minute). */
 		testAlert: (signal?: AbortSignal) => post<TestAlertResult>("/v1/admin/settings/test-alert", {}, signal),
+		/** Chart marks: releases, kernel publishes and backup refreshes in a window, oldest first (GET /v1/fleet/marks). */
+		fleetMarks: (params: { since?: number; until?: number; branch?: string; kinds?: string; limit?: number } = {}, signal?: AbortSignal) =>
+			get<{ marks: DeployMark[] }>(`/v1/fleet/marks${qs(params)}`, signal).then((r) => r.marks),
+		/** Live servers with the heartbeat-metrics fields when the backend has them (tps, memMb...). */
+		perfServers: (branch?: string, signal?: AbortSignal) => get<{ servers: PerfServer[]; players: number }>(`/v1/fleet/servers${qs({ branch })}`, signal),
+		/** One server's TPS / memory history (the heartbeat-metrics contract; 404 on backends before it). */
+		serverMetrics: (job: string, since?: number, signal?: AbortSignal) =>
+			get<{ points: ServerMetricPoint[] }>(`/v1/fleet/servers/${encodeURIComponent(job)}/metrics${qs({ since })}`, signal).then((r) => r.points),
 		/** The SSE stream's URL (EventSource can't set headers; the proxy adds the token). */
 		streamUrl: (params: { branch?: string; types?: string } = {}) => `${base}/v1/fleet/stream${qs(params)}`,
 	};

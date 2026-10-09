@@ -1,3 +1,5 @@
+import type { PerfCompareResult, PerfSeriesResult } from "./perf";
+
 /**
  * The analytics server's answers, as the explorer reads them. They mirror `analytics/src/queries/*.ts` and
  * `analytics/src/fleet/*` (a separate repo: copied, not imported). Keep them in step when a query changes.
@@ -348,6 +350,9 @@ export interface QueryResults {
 	benchmarks: BenchmarksResult;
 	realtime: RealtimeResult;
 	trends: TrendsResult;
+	"perf-client": PerfSeriesResult;
+	"perf-server": PerfSeriesResult;
+	"perf-compare": PerfCompareResult;
 }
 
 export type QueryName = keyof QueryResults;
