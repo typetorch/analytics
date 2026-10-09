@@ -60,6 +60,8 @@ export interface DataColumn<T> {
 	headerClassName?: string;
 	/** Tooltip for the header. */
 	title?: string;
+	/** A small muted word after the header label (a unit, or a SQL type). */
+	hint?: string;
 	/** The value in the CSV and in "Copy cell" (default: the accessor value; dates as ISO). */
 	exportValue?: (row: T) => unknown;
 }

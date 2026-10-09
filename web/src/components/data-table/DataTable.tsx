@@ -593,6 +593,7 @@ function HeaderCell<T>({
 						onClick={column.getToggleSortingHandler()}
 					>
 						{col.header}
+						{col.spec.hint ? <span className="text-[10px] font-normal text-muted-foreground">{col.spec.hint}</span> : null}
 						<Icon className={cn("size-3.5 shrink-0", sorted ? "opacity-100" : "opacity-40")} aria-hidden />
 						{sorted && multi ? <span className="text-[10px] text-muted-foreground tabular-nums">{column.getSortIndex() + 1}</span> : null}
 					</button>

@@ -1,15 +1,15 @@
 /** Error logs from game servers and clients: kinds with counts, a trend line, players affected, and a sample stack. */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { cn } from "cn";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
+import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { Sparkline } from "@/components/Sparkline";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, type ErrorParams } from "@/lib/api";
 import { fmtAgo, fmtInt, fmtTime, plural } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
@@ -75,53 +75,64 @@ function TextFilter({ value, onCommit, placeholder, label, className }: { value:
 	);
 }
 
+/** The error kinds' columns; the trend's label names the bucket size of the window being shown. */
+function kindColumns(bucketSeconds: number): DataColumn<ErrorKind>[] {
+	return [
+		{
+			id: "error",
+			header: "Error",
+			accessor: (k) => k.template,
+			searchText: (k) => k.topFrame ?? "",
+			cell: (k) => (
+				<>
+					<div className="break-words font-mono text-xs">{k.template}</div>
+					{k.topFrame ? <div className="mt-0.5 break-words font-mono text-[11px] text-muted-foreground">{k.topFrame}</div> : null}
+				</>
+			),
+			className: "max-w-[28rem] whitespace-normal",
+		},
+		{
+			id: "realm",
+			header: "Where",
+			type: "enum",
+			options: ["server", "client"],
+			accessor: (k) => k.realm,
+			cell: (k) => <Badge variant={k.realm === "server" ? "secondary" : "outline"}>{k.realm}</Badge>,
+		},
+		{ id: "count", header: "Count", accessor: (k) => k.count, cell: (k) => fmtInt(k.count) },
+		{ id: "players", header: "Players", accessor: (k) => k.players, cell: (k) => fmtInt(k.players) },
+		{
+			id: "trend",
+			header: "Trend",
+			title: "Sorts by the errors in the newest step",
+			accessor: (k) => k.spark.at(-1) ?? 0,
+			cell: (k) => <Sparkline values={k.spark} label={`errors per ${bucketLabel(bucketSeconds)}`} />,
+			exportValue: (k) => k.spark.join(" "),
+			filter: false,
+			searchable: false,
+		},
+		{ id: "firstAt", header: "First seen", type: "date", accessor: (k) => k.firstAt, cell: (k) => <span title={fmtTime(k.firstAt)}>{fmtAgo(k.firstAt)}</span>, format: (_v, k) => fmtAgo(k.firstAt), className: "text-xs" },
+		{ id: "lastAt", header: "Last seen", type: "date", accessor: (k) => k.lastAt, cell: (k) => <span title={fmtTime(k.lastAt)}>{fmtAgo(k.lastAt)}</span>, format: (_v, k) => fmtAgo(k.lastAt), className: "text-xs" },
+		{ id: "total", header: "All time", title: "Every report of this kind, not only this window", accessor: (k) => k.total, cell: (k) => fmtInt(k.total), defaultHidden: true },
+		{ id: "fp", header: "Fingerprint", accessor: (k) => k.fp, defaultHidden: true, className: "font-mono text-xs" },
+	];
+}
+
 function Kinds({ data, selected, onSelect }: { data: ErrorList; selected: string; onSelect(fp: string): void }) {
+	const columns = useMemo(() => kindColumns(data.window.bucketSeconds), [data.window.bucketSeconds]);
 	if (!data.kinds.length) return <EmptyState>No errors in this window. (Game servers send them as they happen; a new kind shows up within a minute.)</EmptyState>;
 	return (
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>Error</TableHead>
-					<TableHead>Where</TableHead>
-					<TableHead className="text-right">Count</TableHead>
-					<TableHead className="text-right">Players</TableHead>
-					<TableHead>Trend</TableHead>
-					<TableHead>First seen</TableHead>
-					<TableHead>Last seen</TableHead>
-				</TableRow>
-			</TableHeader>
-			<TableBody>
-				{data.kinds.map((k) => (
-					<TableRow
-						key={k.fp}
-						data-state={selected === k.fp ? "selected" : undefined}
-						className="cursor-pointer"
-						tabIndex={0}
-						onClick={() => onSelect(selected === k.fp ? "" : k.fp)}
-						onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onSelect(selected === k.fp ? "" : k.fp)}
-					>
-						<TableCell className="max-w-[28rem] whitespace-normal">
-							<div className="break-words font-mono text-xs">{k.template}</div>
-							{k.topFrame ? <div className="mt-0.5 break-words font-mono text-[11px] text-muted-foreground">{k.topFrame}</div> : null}
-						</TableCell>
-						<TableCell>
-							<Badge variant={k.realm === "server" ? "secondary" : "outline"}>{k.realm}</Badge>
-						</TableCell>
-						<TableCell className="text-right tabular-nums">{fmtInt(k.count)}</TableCell>
-						<TableCell className="text-right tabular-nums">{fmtInt(k.players)}</TableCell>
-						<TableCell>
-							<Sparkline values={k.spark} label={`errors per ${bucketLabel(data.window.bucketSeconds)}`} />
-						</TableCell>
-						<TableCell className="text-xs" title={fmtTime(k.firstAt)}>
-							{fmtAgo(k.firstAt)}
-						</TableCell>
-						<TableCell className="text-xs" title={fmtTime(k.lastAt)}>
-							{fmtAgo(k.lastAt)}
-						</TableCell>
-					</TableRow>
-				))}
-			</TableBody>
-		</Table>
+		<DataTable
+			id="errors-kinds"
+			label="Error kinds"
+			columns={columns}
+			data={data.kinds}
+			rowId={(k) => k.fp}
+			// The server already sends the most frequent first; clearing the sort brings that order back.
+			defaultSort={[{ id: "count", desc: true }]}
+			onRowClick={(k) => onSelect(selected === k.fp ? "" : k.fp)}
+			isRowSelected={(k) => selected === k.fp}
+		/>
 	);
 }
 

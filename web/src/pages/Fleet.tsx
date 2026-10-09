@@ -2,13 +2,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { cn } from "cn";
 import { EmptyState, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
+import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { fmtAgo, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
-import type { FleetAlert, FleetReports, FleetServers, ServerBudget } from "@/lib/types";
+import type { FleetAlert, FleetReportResult, FleetReports, FleetServer, FleetServers, ServerBudget } from "@/lib/types";
 
 type StreamState = "connecting" | "live" | "retrying";
 
@@ -102,56 +102,138 @@ export function budgetTitle(b: ServerBudget | null | undefined): string | undefi
 	return lines.join(" | ");
 }
 
+/**
+ * How much of its tightest per-minute limit a server uses (0 to 1+): DataStore reads or HTTP requests against their
+ * limits. The Budget column sorts by this; the cell shows the text.
+ */
+export function budgetPressure(b: ServerBudget | null | undefined): number | null {
+	if (!b) return null;
+	const shares = [b.ds?.lr ? (b.ds.r ?? 0) / b.ds.lr : null, b.h?.l ? (b.h.r ?? 0) / b.h.l : null].filter((v): v is number => v !== null);
+	return shares.length ? Math.max(...shares) : null;
+}
+
+/** Last heartbeat as epoch ms: the timestamp, else now minus the age the server reported. */
+const seenAt = (s: FleetServer) => s.lastSeen ?? (s.ageSeconds !== undefined ? Date.now() - s.ageSeconds * 1000 : null);
+
+const seenText = (s: FleetServer) => (s.ageSeconds !== undefined ? `${s.ageSeconds}s ago` : fmtAgo(s.lastSeen));
+
+/**
+ * The live servers table. A column sorts, filters and exports by its accessor and shows its cell, so formatted cells
+ * ("47 / 60", "812 MB", "5 min ago") still sort by the number or the timestamp. New columns (TPS, memory, ...) go in
+ * this list, e.g. { id: "memory", header: "Memory", hint: "MB", accessor: (s) => s.memoryMb, cell: (s) => fmtNum(s.memoryMb, 0) + " MB" }.
+ */
+export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
+	{
+		id: "job",
+		header: "Job",
+		accessor: (s) => s.job,
+		cell: (s) => <span title={s.job}>{shortId(s.job, 6)}</span>,
+		className: "font-mono text-xs",
+	},
+	{ id: "type", header: "Type", type: "enum", accessor: (s) => s.serverType },
+	{ id: "branch", header: "Branch", type: "enum", accessor: (s) => s.branch },
+	{ id: "channel", header: "Channel", type: "enum", accessor: (s) => s.channel ?? null, defaultHidden: true },
+	{
+		id: "artifact",
+		header: "Artifact",
+		type: "enum",
+		accessor: (s) => s.artifact,
+		cell: (s) => (
+			<>
+				{s.artifact ?? "–"} {s.experiment ? <Badge variant="secondary">A/B pin</Badge> : null}
+			</>
+		),
+		className: "font-mono text-xs",
+	},
+	{ id: "seq", header: "Seq", accessor: (s) => s.appliedSeq },
+	{ id: "players", header: "Players", accessor: (s) => s.players, cell: (s) => `${fmtInt(s.players)} / ${fmtInt(s.maxPlayers)}` },
+	{ id: "maxPlayers", header: "Max players", accessor: (s) => s.maxPlayers, defaultHidden: true },
+	{
+		id: "health",
+		header: "Health",
+		type: "enum",
+		order: ["ok", "degraded", "failing"],
+		options: ["ok", "degraded", "failing"],
+		firstSort: "desc",
+		accessor: (s) => s.health ?? "unknown",
+		cell: (s) => (
+			<span title={s.lastError ?? undefined}>
+				<Status tone={HEALTH_TONE[s.health ?? ""]}>{s.health ?? "unknown"}</Status>
+			</span>
+		),
+	},
+	{ id: "kernel", header: "Kernel", type: "enum", accessor: (s) => s.kernel, className: "text-xs" },
+	{
+		id: "budget",
+		header: "Budget",
+		title: "Sorts by the share of the tightest per-minute limit in use",
+		accessor: (s) => budgetPressure(s.budget),
+		cell: (s) => <span title={budgetTitle(s.budget)}>{budgetText(s.budget)}</span>,
+		format: (_v, s) => budgetText(s.budget),
+		exportValue: (s) => budgetText(s.budget),
+		filter: false,
+		className: "font-mono text-xs",
+	},
+	{ id: "startedAt", header: "Up since", type: "date", accessor: (s) => s.startedAt, cell: (s) => fmtAgo(s.startedAt), format: (_v, s) => fmtAgo(s.startedAt), className: "text-xs" },
+	{ id: "seen", header: "Seen", type: "date", accessor: seenAt, cell: seenText, format: (_v, s) => seenText(s), className: "text-xs" },
+	{ id: "placeId", header: "Place", type: "text", accessor: (s) => (s.placeId == null ? null : String(s.placeId)), defaultHidden: true },
+	{ id: "generation", header: "Generation", accessor: (s) => s.generation, defaultHidden: true },
+	{ id: "experiment", header: "A/B pin", type: "boolean", accessor: (s) => s.experiment ?? false, defaultHidden: true },
+	{ id: "lastError", header: "Last error", accessor: (s) => s.lastError, defaultHidden: true, className: "max-w-80 truncate text-xs" },
+];
+
 function Servers({ data }: { data: FleetServers }) {
-	if (!data.servers.length)
-		return <EmptyState>No live servers (a server shows up within 30 s of its first heartbeat, and leaves 90 s after its last).</EmptyState>;
 	return (
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>Job</TableHead>
-					<TableHead>Type</TableHead>
-					<TableHead>Branch</TableHead>
-					<TableHead>Artifact</TableHead>
-					<TableHead className="text-right">Seq</TableHead>
-					<TableHead className="text-right">Players</TableHead>
-					<TableHead>Health</TableHead>
-					<TableHead>Kernel</TableHead>
-					<TableHead>Budget</TableHead>
-					<TableHead>Up since</TableHead>
-					<TableHead>Seen</TableHead>
-				</TableRow>
-			</TableHeader>
-			<TableBody>
-				{data.servers.map((s) => (
-					<TableRow key={s.job}>
-						<TableCell className="font-mono text-xs" title={s.job}>
-							{shortId(s.job, 6)}
-						</TableCell>
-						<TableCell>{s.serverType ?? "–"}</TableCell>
-						<TableCell>{s.branch ?? "–"}</TableCell>
-						<TableCell className="font-mono text-xs">
-							{s.artifact ?? "–"} {s.experiment ? <Badge variant="secondary">A/B pin</Badge> : null}
-						</TableCell>
-						<TableCell className="text-right tabular-nums">{s.appliedSeq ?? "–"}</TableCell>
-						<TableCell className="text-right tabular-nums">
-							{fmtInt(s.players)} / {fmtInt(s.maxPlayers)}
-						</TableCell>
-						<TableCell title={s.lastError ?? undefined}>
-							<Status tone={HEALTH_TONE[s.health ?? ""]}>{s.health ?? "unknown"}</Status>
-						</TableCell>
-						<TableCell className="text-xs">{s.kernel ?? "–"}</TableCell>
-						<TableCell className="font-mono text-xs" title={budgetTitle(s.budget)}>
-							{budgetText(s.budget)}
-						</TableCell>
-						<TableCell className="text-xs">{fmtAgo(s.startedAt)}</TableCell>
-						<TableCell className="text-xs">{s.ageSeconds !== undefined ? `${s.ageSeconds}s ago` : fmtAgo(s.lastSeen)}</TableCell>
-					</TableRow>
-				))}
-			</TableBody>
-		</Table>
+		<DataTable
+			id="fleet-servers"
+			label="Live servers"
+			columns={SERVER_COLUMNS}
+			data={data.servers}
+			rowId={(s) => s.job}
+			empty={<EmptyState>No live servers (a server shows up within 30 s of its first heartbeat, and leaves 90 s after its last).</EmptyState>}
+		/>
 	);
 }
+
+const FAILED = new Set(["failed", "rolled_back"]);
+
+const RESULT_COLUMNS: DataColumn<FleetReportResult>[] = [
+	{
+		id: "result",
+		header: "Result",
+		type: "enum",
+		accessor: (r) => r.result,
+		cell: (r) => <Badge variant={FAILED.has(r.result) ? "destructive" : "secondary"}>{r.result}</Badge>,
+	},
+	{ id: "servers", header: "Servers", accessor: (r) => r.servers },
+	{ id: "players", header: "Players", accessor: (r) => r.players },
+	{ id: "median", header: "Median", hint: "s", accessor: (r) => r.medianSeconds, cell: (r) => (r.medianSeconds === null ? "–" : fmtNum(r.medianSeconds, 1)) },
+	{ id: "max", header: "Slowest", hint: "s", accessor: (r) => r.maxSeconds, cell: (r) => (r.maxSeconds === null ? "–" : fmtNum(r.maxSeconds, 1)) },
+];
+
+const DEPLOY_ERROR_COLUMNS: DataColumn<FleetReports["errors"][number]>[] = [
+	{ id: "error", header: "Error", accessor: (e) => e.error, className: "max-w-96 whitespace-normal text-[var(--status-critical)]" },
+	{ id: "servers", header: "Servers", accessor: (e) => e.servers },
+	{ id: "example", header: "Example", accessor: (e) => e.exampleJob, cell: (e) => <span title={e.exampleJob}>{shortId(e.exampleJob, 6)}</span>, className: "font-mono text-xs" },
+];
+
+type ServerReport = NonNullable<FleetReports["reports"]>[number];
+
+const REPORT_COLUMNS: DataColumn<ServerReport>[] = [
+	{ id: "at", header: "When (UTC)", type: "date", accessor: (r) => r.at, cell: (r) => fmtTime(r.at), className: "font-mono text-xs tabular-nums" },
+	{ id: "job", header: "Job", accessor: (r) => r.job, cell: (r) => <span title={r.job}>{shortId(r.job, 6)}</span>, className: "font-mono text-xs" },
+	{
+		id: "result",
+		header: "Result",
+		type: "enum",
+		accessor: (r) => r.result,
+		cell: (r) => <Badge variant={FAILED.has(r.result) ? "destructive" : "secondary"}>{r.result}</Badge>,
+	},
+	{ id: "seconds", header: "Took", hint: "s", accessor: (r) => r.seconds, cell: (r) => (r.seconds === null ? "–" : fmtNum(r.seconds, 1)) },
+	{ id: "kernel", header: "Kernel", type: "enum", accessor: (r) => r.kernel ?? null, className: "text-xs" },
+	{ id: "error", header: "Error", accessor: (r) => r.error, className: "max-w-80 whitespace-normal text-xs" },
+	{ id: "seq", header: "Deploy", accessor: (r) => r.seq, defaultHidden: true },
+];
 
 function Report({ data }: { data: FleetReports }) {
 	if (data.seq === null) return <EmptyState>No deploy reported yet.</EmptyState>;
@@ -164,21 +246,10 @@ function Report({ data }: { data: FleetReports }) {
 				<KeyValue label="started">{fmtTime(data.startedAt)}</KeyValue>
 				<KeyValue label="servers reported">{fmtInt(data.reported)}</KeyValue>
 			</div>
-			<div className="flex flex-wrap gap-2">
-				{data.results.map((r) => (
-					<Badge key={r.result} variant={r.result === "failed" || r.result === "rolled_back" ? "destructive" : "secondary"}>
-						{r.result}: {plural(r.servers, "server")}, {plural(r.players, "player")}, median {fmtNum(r.medianSeconds, 1)} s
-					</Badge>
-				))}
-			</div>
-			{data.errors.length ? (
-				<ul className="space-y-1 text-sm">
-					{data.errors.map((e) => (
-						<li key={e.error} className="text-[var(--status-critical)]">
-							{e.error} ({e.servers} server{e.servers === 1 ? "" : "s"}, e.g. {shortId(e.exampleJob, 6)})
-						</li>
-					))}
-				</ul>
+			{data.results.length ? <DataTable id="fleet-results" label="Deploy results" columns={RESULT_COLUMNS} data={data.results} rowId={(r) => r.result} maxHeight="20rem" /> : null}
+			{data.errors.length ? <DataTable id="fleet-deploy-errors" label="Deploy errors" columns={DEPLOY_ERROR_COLUMNS} data={data.errors} rowId={(e) => e.error} maxHeight="20rem" /> : null}
+			{data.reports?.length ? (
+				<DataTable id="fleet-reports" label="Server reports" columns={REPORT_COLUMNS} data={data.reports} rowId={(r) => `${r.seq}-${r.job}-${r.at}`} defaultSort={[{ id: "at", desc: true }]} maxHeight="24rem" />
 			) : null}
 			<p className="text-xs text-muted-foreground">
 				{data.behind.length ? `${data.behind.length} live server(s) still below #${data.seq}.` : "Every live server on the branch has it."}
@@ -188,37 +259,41 @@ function Report({ data }: { data: FleetReports }) {
 	);
 }
 
+const ALERT_COLUMNS: DataColumn<FleetAlert>[] = [
+	{ id: "at", header: "When (UTC)", type: "date", accessor: (a) => a.at, cell: (a) => fmtTime(a.at), className: "font-mono text-xs tabular-nums" },
+	{
+		id: "level",
+		header: "Level",
+		type: "enum",
+		order: ["critical", "warning", "info"],
+		options: ["critical", "warning", "info"],
+		accessor: (a) => a.level,
+		cell: (a) => <Status tone={LEVEL_TONE[a.level]}>{a.level}</Status>,
+	},
+	{ id: "code", header: "Code", type: "enum", accessor: (a) => a.code, className: "font-mono text-xs" },
+	{ id: "message", header: "Message", accessor: (a) => a.message, className: "max-w-96 whitespace-normal" },
+	{
+		id: "where",
+		header: "Where",
+		accessor: (a) => [a.branch, a.artifact, a.seq ? `#${a.seq}` : null].filter(Boolean).join(" · "),
+		className: "text-xs text-muted-foreground",
+	},
+	{ id: "branch", header: "Branch", type: "enum", accessor: (a) => a.branch ?? null, defaultHidden: true },
+	{ id: "source", header: "Source", type: "enum", accessor: (a) => a.source ?? null, defaultHidden: true },
+	{ id: "acked", header: "Acked", type: "boolean", accessor: (a) => a.acked, className: "text-xs" },
+];
+
 function Alerts({ alerts }: { alerts: FleetAlert[] }) {
-	if (!alerts.length) return <EmptyState>No alerts.</EmptyState>;
 	return (
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>When (UTC)</TableHead>
-					<TableHead>Level</TableHead>
-					<TableHead>Code</TableHead>
-					<TableHead>Message</TableHead>
-					<TableHead>Where</TableHead>
-					<TableHead>Acked</TableHead>
-				</TableRow>
-			</TableHeader>
-			<TableBody>
-				{[...alerts]
-					.sort((a, b) => b.at - a.at)
-					.map((a) => (
-						<TableRow key={a.id}>
-							<TableCell className="font-mono text-xs tabular-nums">{fmtTime(a.at)}</TableCell>
-							<TableCell>
-								<Status tone={LEVEL_TONE[a.level]}>{a.level}</Status>
-							</TableCell>
-							<TableCell className="font-mono text-xs">{a.code}</TableCell>
-							<TableCell className="max-w-96 whitespace-normal">{a.message}</TableCell>
-							<TableCell className="text-xs text-muted-foreground">{[a.branch, a.artifact, a.seq ? `#${a.seq}` : null].filter(Boolean).join(" · ")}</TableCell>
-							<TableCell className="text-xs">{a.acked ? "yes" : "no"}</TableCell>
-						</TableRow>
-					))}
-			</TableBody>
-		</Table>
+		<DataTable
+			id="fleet-alerts"
+			label="Alerts"
+			columns={ALERT_COLUMNS}
+			data={alerts}
+			rowId={(a) => String(a.id)}
+			defaultSort={[{ id: "at", desc: true }]}
+			empty={<EmptyState>No alerts.</EmptyState>}
+		/>
 	);
 }
 
