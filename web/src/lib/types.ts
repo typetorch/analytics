@@ -493,6 +493,57 @@ export interface ServerBudget {
 	mem?: { t?: number; h?: number };
 }
 
+/** Plans/25: what the server page knows about one JobId (any age). */
+export type ServerState = "live" | "closed" | "lost" | "unknown";
+
+/** Plans/25: the remote debug session of one server, as the backend sees it. */
+export interface DebugStatus {
+	watched: boolean;
+	watchedUntil?: number;
+	/** The server polled in the last 15 s. */
+	connected: boolean;
+	lastPollAt?: number;
+}
+
+/** GET /v1/fleet/servers/<job>. TPS and memory come from the heartbeat-metrics work (plain numbers, null when unknown). */
+export interface FleetServerDetail {
+	server:
+		| (FleetServer & { closedAt?: string | null; lostAt?: string | null; tps?: number | null; tpsMin?: number | null; memMb?: number | null; luaMb?: number | null })
+		| null;
+	state: ServerState;
+	debug: DebugStatus;
+}
+
+/** GET /v1/fleet/servers/<job>/metrics: one point per heartbeat, oldest first (at most ~2 h). */
+export interface ServerMetricPoint {
+	t: number;
+	tps: number | null;
+	tpsMin: number | null;
+	physFps: number | null;
+	memMb: number | null;
+	luaMb: number | null;
+	players: number | null;
+}
+
+/** The read-only remote debug ops (v1). */
+export type RemoteOp = "status" | "builds" | "budget" | "logs" | "players" | "player.logs" | "errors" | "modules" | "state" | "assets" | "network" | "dex.children" | "dex.props";
+
+/** A queued command and, once answered, its result (kept 3 minutes on the backend, in memory only). */
+export interface RemoteCommand {
+	id: string;
+	op: string;
+	state: "queued" | "sent" | "done" | "failed" | "expired";
+	createdAt: number;
+	expiresAt: number;
+	sentAt?: number;
+	doneAt?: number;
+	ms?: number;
+	result?: unknown;
+	error?: string;
+	/** Secrets the kernel replaced with <redacted> in the answer. */
+	redacted?: number;
+}
+
 export interface FleetServers {
 	servers: FleetServer[];
 	players: number;

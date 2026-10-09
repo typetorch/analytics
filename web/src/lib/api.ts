@@ -12,7 +12,12 @@ import type {
 	Filters,
 	FleetAlert,
 	FleetReports,
+	FleetServerDetail,
 	FleetServers,
+	DebugStatus,
+	RemoteCommand,
+	RemoteOp,
+	ServerMetricPoint,
 	Health,
 	Identity,
 	PlayerProfile,
@@ -182,6 +187,17 @@ export function createApi(options: ApiOptions = {}) {
 		/** One server's TPS / memory history (the heartbeat-metrics contract; 404 on backends before it). */
 		serverMetrics: (job: string, since?: number, signal?: AbortSignal) =>
 			get<{ points: ServerMetricPoint[] }>(`/v1/fleet/servers/${encodeURIComponent(job)}/metrics${qs({ since })}`, signal).then((r) => r.points),
+		/** Plans/25: one server by JobId (any age), its state and its remote debug session. */
+		fleetServer: (job: string, signal?: AbortSignal) => get<FleetServerDetail>(`/v1/fleet/servers/${encodeURIComponent(job)}`, signal),
+		/** TPS, memory and players over time (the heartbeat-metrics route), oldest first. */
+		fleetServerMetrics: (job: string, since?: number, signal?: AbortSignal) =>
+			get<{ points: ServerMetricPoint[] }>(`/v1/fleet/servers/${encodeURIComponent(job)}/metrics${qs({ since })}`, signal).then((r) => r.points),
+		/** The server page is open: the server polls for commands from its next heartbeat on (lapses after 60 s). */
+		watchServer: (job: string, signal?: AbortSignal) => post<DebugStatus & { job: string }>(`/v1/fleet/servers/${encodeURIComponent(job)}/watch`, {}, signal),
+		/** Queues one read-only op; the answer comes back through remoteResult. */
+		remoteCommand: (job: string, op: RemoteOp, args?: Record<string, unknown>, signal?: AbortSignal) =>
+			post<RemoteCommand>(`/v1/fleet/servers/${encodeURIComponent(job)}/commands`, { op, ...(args ? { args } : {}) }, signal),
+		remoteResult: (job: string, id: string, signal?: AbortSignal) => get<RemoteCommand>(`/v1/fleet/servers/${encodeURIComponent(job)}/commands/${encodeURIComponent(id)}`, signal),
 		/** The SSE stream's URL (EventSource can't set headers; the proxy adds the token). */
 		streamUrl: (params: { branch?: string; types?: string } = {}) => `${base}/v1/fleet/stream${qs(params)}`,
 	};

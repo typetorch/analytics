@@ -113,6 +113,12 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	// The Performance page: chart marks, and one server's TPS / memory history (the heartbeat metrics update).
 	{ method: "GET", path: /^\/v1\/fleet\/marks$/ },
 	{ method: "GET", path: /^\/v1\/fleet\/servers\/[A-Za-z0-9_.:{}%-]{1,200}\/metrics$/ },
+	// Plans/25, the server page: one server (its metrics: the rule above), remote debug. The POSTs only ask for read-only
+	// answers (v1 has no op that changes the game server); the backend audits each command.
+	{ method: "GET", path: /^\/v1\/fleet\/servers\/[A-Za-z0-9_.:{}%-]{1,200}$/ },
+	{ method: "POST", path: /^\/v1\/fleet\/servers\/[A-Za-z0-9_.:{}%-]{1,200}\/(watch|commands)$/ },
+	{ method: "GET", path: /^\/v1\/fleet\/servers\/[A-Za-z0-9_.:{}%-]{1,200}\/commands\/[A-Za-z0-9_-]{1,64}$/ },
+	{ method: "GET", path: /^\/v1\/fleet\/debug\/audit$/ },
 	// The Settings page can read through the proxy (the webhook URL is never in the answer). Saving and the test alert are
 	// not forwarded: change settings on the backend's own explorer, signed in.
 	{ method: "GET", path: /^\/v1\/admin\/settings$/ },
