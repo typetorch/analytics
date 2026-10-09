@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
 import type { ComparePeriod, DeployMark, PerfCompareResult, PerfSeriesResult, PerfServer, PerfStat } from "@/lib/perf";
 import type { Filters } from "@/lib/types";
-import Performance, { changeOrder, compareRows, historyRows, stepChoices } from "./Performance";
+import Performance, { changeOrder, CompareTable, compareRows, historyRows, stepChoices } from "./Performance";
 
 beforeAll(() => {
 	// recharts measures its container: give it a size, so the charts (and their marks) render in jsdom.
@@ -126,7 +126,7 @@ const liveServers: PerfServer[] = [
 
 type QueryCall = { name: string; filters: Filters; options: Record<string, unknown> };
 
-function mockApi(overrides: { serverMetrics?: () => Promise<never> | Promise<unknown> } = {}) {
+function mockApi(overrides: { serverMetrics?: () => Promise<never> | Promise<unknown>; servers?: PerfServer[] } = {}) {
 	const calls: QueryCall[] = [];
 	vi.spyOn(api, "query").mockImplementation((async (name: string, filters: Filters = {}, options: Record<string, unknown> = {}) => {
 		calls.push({ name, filters, options });
@@ -137,7 +137,7 @@ function mockApi(overrides: { serverMetrics?: () => Promise<never> | Promise<unk
 		throw new Error(`unexpected query ${name}`);
 	}) as typeof api.query);
 	const marksSpy = vi.spyOn(api, "fleetMarks").mockResolvedValue(marks);
-	vi.spyOn(api, "perfServers").mockResolvedValue({ servers: liveServers, players: 9 });
+	vi.spyOn(api, "perfServers").mockResolvedValue({ servers: overrides.servers ?? liveServers, players: 9 });
 	const history = vi.spyOn(api, "serverMetrics").mockImplementation(
 		(overrides.serverMetrics as typeof api.serverMetrics) ??
 			(async () => [
@@ -159,7 +159,8 @@ function mount(path = "/performance?by=dev") {
 	);
 }
 
-describe("Performance page", () => {
+// Each test renders the whole page with recharts: seconds on a loaded machine (the suite runs a worker per file).
+describe("Performance page", { timeout: 20_000 }, () => {
 	it("shows client groups with p50/p90/p99, server numbers, and the marks in range", async () => {
 		const { calls, marksSpy } = mockApi();
 		mount();
@@ -214,8 +215,13 @@ describe("Performance page", () => {
 		expect(screen.getAllByText("Frame rate, p50").length).toBe(1);
 		const toggle = screen.getByRole("radiogroup", { name: "Percentile" });
 		expect(within(toggle).getAllByRole("radio").map((r) => r.textContent)).toEqual(["p10", "p50", "p90", "p99"]);
+		expect(within(toggle).getByRole("radio", { name: "p50" }).getAttribute("data-state")).toBe("on");
 		fireEvent.click(within(toggle).getByRole("radio", { name: "p10" }));
 		expect(await screen.findByText("Frame rate, p10")).toBeTruthy();
+		// The picked percentile is filled with the primary colour (the item's data-state selectors), the one left is off.
+		expect(within(toggle).getByRole("radio", { name: "p10" }).getAttribute("data-state")).toBe("on");
+		expect(within(toggle).getByRole("radio", { name: "p10" }).className).toContain("data-[state=on]:bg-primary");
+		expect(within(toggle).getByRole("radio", { name: "p50" }).getAttribute("data-state")).toBe("off");
 		expect(screen.getAllByText("Memory, p10").length).toBe(2); // players' devices and servers
 		expect(screen.getByText("Server TPS, p10")).toBeTruthy();
 		expect(screen.queryByText(/\(worst\)/, { selector: "div.text-sm" })).toBeNull();
@@ -326,6 +332,138 @@ describe("Performance page", () => {
 		expect(p10?.change).toMatchObject({ better: false });
 		expect(rows.find((r) => r.id === "client-mem-p99")?.label).toBe("Memory p99 (worst)");
 		expect(rows).toHaveLength(6 * 4);
+	});
+
+	it("flags possible problems in the group tables: orange and red cells, each with its reason", async () => {
+		mockApi();
+		mount();
+		const phone = (await screen.findByText("Phone", { selector: "td" })).closest("tr") as HTMLElement;
+		const desktop = screen.getByText("Desktop", { selector: "td" }).closest("tr") as HTMLElement;
+		const flag = (row: HTMLElement, text: string) => within(row).getByText(text).getAttribute("data-flag");
+		// Frame rate is judged at p10 (under 30 orange, under 20 red): the phone's 17 is red, the desktop's 34 is fine.
+		expect(flag(phone, "17 fps")).toBe("critical");
+		expect(within(phone).getByText("17 fps").getAttribute("title")).toBe("Frame rate p10 is 17 fps: under the 20 fps critical line");
+		expect(within(phone).getByText("17 fps").textContent).toContain("(critical)"); // not by colour alone
+		expect(flag(desktop, "34 fps")).toBeNull();
+		// Not judged at the other percentiles: the phone's p50 31 and its p90 19 stay plain.
+		expect(flag(phone, "31 fps")).toBeNull();
+		expect(flag(phone, "19 fps")).toBeNull();
+		// Ping and memory at p90 (orange) and p99 (red).
+		expect(flag(phone, "190 ms")).toBe("warning");
+		expect(flag(phone, "420 ms")).toBe("critical");
+		expect(flag(phone, "2,600 MB")).toBe("warning");
+		expect(flag(phone, "3,100 MB")).toBe("critical");
+		expect(within(phone).getByText("2,600 MB").getAttribute("title")).toBe("Memory p90 is 2,600 MB: over the 2,000 MB warning line (over 3,000 MB is critical)");
+		// The median of the same metrics isn't judged.
+		expect(flag(phone, "80 ms")).toBeNull();
+		expect(flag(phone, "1,800 MB")).toBeNull();
+	});
+
+	it("Compare flags the worse build: orange over 10%, the absolute lines on each build, green for better", async () => {
+		mockApi();
+		mount();
+		const median = (await screen.findByText("Frame rate p50", { selector: "td" })).closest("tr") as HTMLElement;
+		// 60 -> 50 fps: 16.7% worse, over 10%: orange, with the reason as its tooltip.
+		const change = within(median).getByText("-16.7%");
+		expect(change.getAttribute("data-flag")).toBe("warning");
+		expect(change.getAttribute("title")).toBe("16.7% worse (over 10% is a warning, over 25% is critical)");
+		// fps p10: the older build's 33 is fine, the newer build's 28 is under 30.
+		const p10 = screen.getByText("Frame rate p10", { selector: "td" }).closest("tr") as HTMLElement;
+		expect(within(p10).getByText("33 fps").hasAttribute("data-flag")).toBe(false);
+		expect(within(p10).getByText("28 fps").getAttribute("data-flag")).toBe("warning");
+		// Server TPS p10: 33 -> 29, both under 40 (red); 12.1% worse is orange.
+		const tps = screen.getByText("Server TPS p10", { selector: "td" }).closest("tr") as HTMLElement;
+		expect(within(tps).getByText("33/s").getAttribute("data-flag")).toBe("critical");
+		expect(within(tps).getByText("29/s").getAttribute("data-flag")).toBe("critical");
+		expect(within(tps).getByText("-12.1%").getAttribute("data-flag")).toBe("warning");
+		// Memory p50 went down: better, green, not flagged.
+		const mem = screen.getByText("Memory p50", { selector: "td" }).closest("tr") as HTMLElement;
+		const better = within(mem).getByText("-5.6%");
+		expect(better.hasAttribute("data-flag")).toBe(false);
+		expect(better.className).toContain("status-good");
+		// A worse change under 10% is plain: server memory p50 +6.7%.
+		const smem = screen.getByText("Server memory p50", { selector: "td" }).closest("tr") as HTMLElement;
+		expect(within(smem).getByText("+6.7%").hasAttribute("data-flag")).toBe(false);
+	});
+
+	it("Compare says 'few samples' instead of flagging a change (or a number) from under 20 samples", () => {
+		const few = (stat: PerfStat): PerfStat => ({ ...stat, n: 5 });
+		const [older, newer] = compare.periods as [ComparePeriod, ComparePeriod];
+		const result: PerfCompareResult = {
+			...compare,
+			periods: [older, { ...newer, client: { ...newer.client, metrics: { ...newer.client.metrics, fps: few(newer.client.metrics.fps as PerfStat) } } }],
+		};
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		render(
+			<QueryClientProvider client={client}>
+				<MemoryRouter>
+					<CompareTable result={result} />
+				</MemoryRouter>
+			</QueryClientProvider>,
+		);
+		const median = screen.getByText("Frame rate p50", { selector: "td" }).closest("tr") as HTMLElement;
+		expect(within(median).getByText("few samples")).toBeTruthy();
+		expect(median.querySelector("[data-flag]")).toBeNull();
+		expect(within(median).getByText("-16.7%").getAttribute("title")).toMatch(/^Fewer than 20 samples on one side \(50 and 5\)/);
+		// The 28 fps p10 of the newer build would be orange with enough samples; from 5 it isn't flagged.
+		const p10 = screen.getByText("Frame rate p10", { selector: "td" }).closest("tr") as HTMLElement;
+		expect(within(p10).getByText("28 fps").hasAttribute("data-flag")).toBe(false);
+		// Other metrics, with enough samples, are judged as before.
+		const tps = screen.getByText("Server TPS p10", { selector: "td" }).closest("tr") as HTMLElement;
+		expect(within(tps).getByText("-12.1%").getAttribute("data-flag")).toBe("warning");
+		expect(within(tps).queryByText("few samples")).toBeNull();
+	});
+
+	it("live servers: TPS, physics FPS and memory use the same lines", async () => {
+		const sick = { ...(liveServers[0] as PerfServer), tps: 35, physFps: 45, memMb: 5200 };
+		mockApi({ servers: [sick] });
+		mount();
+		const row = (await screen.findByTitle(sick.job)).closest("tr") as HTMLElement;
+		expect(within(row).getByText("35/s").getAttribute("data-flag")).toBe("critical");
+		expect(within(row).getByText("45 fps").getAttribute("data-flag")).toBe("warning");
+		expect(within(row).getByText("5,200 MB").getAttribute("data-flag")).toBe("critical");
+		expect(within(row).getByText("5,200 MB").getAttribute("title")).toBe("Server memory is 5,200 MB: over the 5,000 MB critical line");
+		cleanup();
+		mockApi();
+		mount();
+		const fine = (await screen.findByTitle(sick.job)).closest("tr") as HTMLElement;
+		expect(within(fine).getByText("59.8/s").hasAttribute("data-flag")).toBe(false);
+		expect(within(fine).getByText("712 MB").hasAttribute("data-flag")).toBe(false);
+	});
+
+	it("the Compare build chips: a picked build is pressed, filled and checked; the others are outlined", async () => {
+		mockApi();
+		mount();
+		const group = await screen.findByRole("group", { name: "Builds to compare" });
+		const chip = async (id: string) => (await within(group).findByRole("button", { name: new RegExp(`^${id}`) })) as HTMLElement;
+		const newer = await chip(ART_NEW);
+		const older = await chip(ART_OLD);
+		for (const c of [newer, older]) {
+			expect(c.getAttribute("aria-pressed")).toBe("false");
+			expect(c.className).toContain("text-muted-foreground");
+			expect(c.querySelector("svg")).toBeNull();
+		}
+		fireEvent.click(newer);
+		await waitFor(() => expect(newer.getAttribute("aria-pressed")).toBe("true"));
+		expect(newer.className).toContain("bg-primary");
+		expect(newer.className).toContain("text-primary-foreground");
+		expect(newer.querySelector("svg.lucide-check")).not.toBeNull();
+		expect(older.getAttribute("aria-pressed")).toBe("false");
+		expect(older.querySelector("svg")).toBeNull();
+		fireEvent.click(newer);
+		await waitFor(() => expect(newer.getAttribute("aria-pressed")).toBe("false"));
+		expect(newer.className).not.toContain("bg-primary");
+	});
+
+	it("a live server's History chip is pressed while its history is open", async () => {
+		mockApi();
+		mount();
+		const row = (await screen.findByTitle(liveServers[0]?.job as string)).closest("tr") as HTMLElement;
+		const history = within(row).getByRole("button", { name: "History" });
+		expect(history.getAttribute("aria-pressed")).toBe("false");
+		fireEvent.click(history);
+		await waitFor(() => expect(within(row).getByRole("button", { name: "History" }).getAttribute("aria-pressed")).toBe("true"));
+		expect(within(row).getByRole("button", { name: "History" }).querySelector("svg.lucide-check")).not.toBeNull();
 	});
 
 	it("step choices: 2 to 400 steps in the window", () => {
