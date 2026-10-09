@@ -7,6 +7,7 @@
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { existsSync } from "node:fs";
 import { dataLayout, pathLit, tableExpression } from "../duckdb/layout.ts";
+import { DataFolderLocked, isLockConflict } from "../duckdb/lock.ts";
 import type { Row, TableName } from "../queries/core.ts";
 import { duckdb } from "../sql/dialect.ts";
 import { SqlStore } from "./sql-store.ts";
@@ -65,18 +66,46 @@ export interface LocalDuckDbOptions {
 	clock?: () => number;
 }
 
-/** Opens a read-only store over a data folder (the server must not be using it: DuckDB locks live.duckdb). */
+/**
+ * Opens a read-only store over a data folder: a copy of a server's, or one no server is using. A folder a running
+ * server holds is refused with DataFolderLocked (ask that server over HTTP instead: `{ url, token }`), so a second
+ * handle never sits next to the server's; while this store is open, a server starting on the folder waits for it.
+ */
 export async function openDuckDbStore(options: LocalDuckDbOptions): Promise<DuckDbStore> {
 	const layout = dataLayout(options.dataDir);
 	const instance = await DuckDBInstance.create(":memory:", {
 		memory_limit: options.memoryLimit ?? "1GB",
 		threads: String(options.threads ?? 4),
 	});
-	const connection = await instance.connect();
+	let connection: DuckDBConnection | undefined;
 	const hasLive = existsSync(layout.live);
-	if (hasLive) await connection.run(`ATTACH ${pathLit(layout.live)} AS live (READ_ONLY)`);
-	return new DuckDbStore(connection, (name, from, to) => tableExpression(layout, name, from, to, hasLive ? "live" : null), options.clock, () => {
-		connection.closeSync();
+	try {
+		connection = await instance.connect();
+		// The owner lock first (shared): a running server holds it even while compaction has live.duckdb detached.
+		for (const [file, alias] of [
+			[layout.lock, "folder_lock"],
+			[layout.live, "live"],
+		] as const) {
+			if (!existsSync(file)) continue;
+			try {
+				await connection.run(`ATTACH ${pathLit(file)} AS ${alias} (READ_ONLY)`);
+			} catch (error) {
+				if (!isLockConflict(error)) throw error;
+				const locked = new DataFolderLocked(file, (error as Error).message);
+				locked.message = `a running backend holds ${file}: query it over HTTP ({ url, token }) or open a copy of the folder`;
+				throw locked;
+			}
+		}
+	} catch (error) {
+		try {
+			connection?.closeSync();
+		} catch {}
+		instance.closeSync();
+		throw error;
+	}
+	const open = connection;
+	return new DuckDbStore(open, (name, from, to) => tableExpression(layout, name, from, to, hasLive ? "live" : null), options.clock, () => {
+		open.closeSync();
 		instance.closeSync();
 	});
 }

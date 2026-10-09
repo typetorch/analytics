@@ -13,7 +13,8 @@ import { join } from "node:path";
 import { startApp, type App } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 import { handleShutdown } from "../src/server/lifecycle.ts";
-import { DataFolderLocked, isLockConflict } from "../src/server/warehouse.ts";
+import { DataFolderLocked, isLockConflict } from "../src/duckdb/lock.ts";
+import { openDuckDbStore } from "../src/store/duckdb.ts";
 import { ADMIN, API, bearer, post } from "./harness.ts";
 
 const root = join(import.meta.dir, "..");
@@ -361,6 +362,20 @@ describe("two servers on one data folder (a rolling deploy)", () => {
 		expect(await canHold(dir)).toBe(true);
 	}, 60_000);
 });
+
+test("a local read-only store refuses a folder a server holds (no second handle next to it), and opens it once free", async () => {
+	const dir = tempDir();
+	const holder = await hold(dir);
+	const refused = await openDuckDbStore({ dataDir: dir, memoryLimit: "128MB", threads: 1 }).then(
+		() => undefined,
+		(error: unknown) => error,
+	);
+	expect(refused).toBeInstanceOf(DataFolderLocked);
+	expect((refused as Error).message).toMatch(/^a running backend holds .*lock\.duckdb: query it over HTTP/);
+	await holder.release();
+	const store = await openDuckDbStore({ dataDir: dir, memoryLimit: "128MB", threads: 1 });
+	await store.close();
+}, 30_000);
 
 test("DataFolderLocked names the file and keeps DuckDB's words", () => {
 	const error = new DataFolderLocked("/data/live.duckdb", "IO Error: Could not set lock");

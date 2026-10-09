@@ -43,6 +43,7 @@ import { handleErrorReads } from "../errors/http.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
+import { DataFolderLocked } from "../duckdb/lock.ts";
 import { openSqlite } from "../fleet/db.ts";
 import { IdentityStore, parseIdentities, parseUid, PID_PATTERN } from "../fleet/identity.ts";
 import { FLEET_LIMITS, handleFleet, NewJobLimiter } from "../fleet/http.ts";
@@ -68,7 +69,7 @@ import { StaticSite } from "./static.ts";
 import { measureStorage, type StorageReport } from "./storage.ts";
 import type { BackendBus, BackendTopics } from "./topics.ts";
 import { RawLogClosed } from "./raw.ts";
-import { DataFolderLocked, Warehouse } from "./warehouse.ts";
+import { Warehouse } from "./warehouse.ts";
 
 export interface AppOptions {
 	clock?: () => number;

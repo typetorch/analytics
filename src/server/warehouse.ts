@@ -12,6 +12,7 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { createGunzip, createGzip } from "node:zlib";
 import { createTableSql, dataLayout, dayFiles, dayString, fieldsOf, pathLit, readJsonColumns, storedColumns, tableExpression, type DataLayout } from "../duckdb/layout.ts";
+import { DataFolderLocked, isLockConflict } from "../duckdb/lock.ts";
 import { runQuery } from "../queries/index.ts";
 import { PROP_KEYS } from "../schema.ts";
 import type { QueryContext } from "../queries/core.ts";
@@ -64,32 +65,6 @@ export class RwLock {
 			this.pump();
 		}
 	}
-}
-
-/**
- * Another process holds the data folder's DuckDB files (the previous container during a rolling deploy, or a second
- * server on the same folder). DuckDB allows one writing process per file; the caller waits and tries again.
- */
-export class DataFolderLocked extends Error {
-	override name = "DataFolderLocked";
-	constructor(
-		/** The file that could not be locked. */
-		readonly file: string,
-		/** DuckDB's message (names the other process where it can). */
-		readonly detail: string,
-	) {
-		super(`${file} is held by another process`);
-	}
-}
-
-/**
- * DuckDB's "someone else has this file" errors: "Could not set lock on file ... Conflicting lock is held in ..." (Linux,
- * macOS), "Cannot open file ...: The process cannot access the file because it is being used by another process. File is
- * already open in ..." (Windows).
- */
-export function isLockConflict(error: unknown): boolean {
-	const message = (error as Error | undefined)?.message ?? String(error);
-	return /Could not set lock on file|Conflicting lock is held|being used by another process|File is already open in/i.test(message);
 }
 
 /** Runs jobs one at a time. */
