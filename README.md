@@ -535,8 +535,14 @@ Overview's `buckets` below a day, its `days` beyond; `windowBucketMs` in `src/qu
 
 **Performance** (`/performance`): how the game runs on players' devices and on the servers. Client frame rate, memory and ping
 (tech/client) and server TPS (the Heartbeat rate), memory and players (tech/server) over time, by device class, input,
-screen-size bucket (the viewport's short side), branch or build, at p50 / p90 / p99 (on the bad side: low fps and TPS, high
-memory and ping; the line shows the picked percentile, the tables all three). Every chart carries **deploy marks**, like Creator
+screen-size bucket (the viewport's short side), branch or build, at p10 / p50 / p90 / p99 (p10 is the plain 10th percentile;
+p90 / p99 are on the bad side: low fps and TPS, high memory and ping, so p99 is the worst case of every metric and is marked
+"(worst)"; the line shows the picked percentile, the tables all four). **Possible problems are flagged** in orange and red, each
+cell with a tooltip saying why: frame rate, server TPS and physics FPS at p10 (under 30 / 20 fps, under 50 / 40), ping and
+memory at p90 / p99 (over 150 / 250 ms, client memory over 2,000 / 3,000 MB, server memory over 3,000 / 5,000 MB), and in
+Compare a change that is worse by over 10% (orange) or 25% (red); nothing is flagged from fewer than 20 samples (Compare says
+"few samples"). All the lines live in `web/src/lib/perf-thresholds.ts`. Picked chips and toggles (percentile, Compare builds,
+History) are filled with the primary colour with a check. Every chart carries **deploy marks**, like Creator
 Hub's published-change lines: a vertical mark per deploy, rollback, promote, re-sign, kernel publish and backup refresh
 (`GET /v1/fleet/marks`); hover for the branch, seq, build, place version and results, click to filter the page to that build.
 **Compare**: builds side by side over the range, or before vs after a mark over two windows of the same length (1 h to 7 d).
@@ -665,7 +671,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `benchmarks` | the last `days` (7) vs the `days` before: playtime per daily active user, D1/D7 (counted on the return day, days fully over), payer conversion, ARPPU, after-join play-through (first sessions reaching `qualifiedMinutes`) | ends at `to` |
 | `realtime` | concurrent users per hour from fleet heartbeats (per minute, summed over servers; `ccuDays` 7) and now; session time, client errors per session (tech/error from clients), client fps, server memory: the last `hours` (24) vs the hours before | 7 days |
 | `trends` | per day, `window`-day (7) moving averages of new users, DAU, playtime per DAU, Robux and D1, in total and per join source (session/join `from`; past `maxSources` folded into `other`) | 28 days |
-| `perf-client` | client fps, memory and ping (tech/client) over time and per group: `by` = `none`, `dev` (device class), `input`, `screen` (viewport short side: `<400`, `400-599`, `600-799`, `800-1079`, `1080+`), `branch`, `art`; p50 / p90 / p99 on the bad side, avg, n; the busiest `maxGroups` (8, at most 20). Step: the window's (`windowBucketMs`), or `bucketMinutes` (1-1440), or about `buckets` (10-400). At most 92 days and 400 steps | 7 days |
+| `perf-client` | client fps, memory and ping (tech/client) over time and per group: `by` = `none`, `dev` (device class), `input`, `screen` (viewport short side: `<400`, `400-599`, `600-799`, `800-1079`, `1080+`), `branch`, `art`; p10 (the plain 10th percentile), p50, p90 / p99 on the bad side, avg, n; the busiest `maxGroups` (8, at most 20). Step: the window's (`windowBucketMs`), or `bucketMinutes` (1-1440), or about `buckets` (10-400). At most 92 days and 400 steps | 7 days |
 | `perf-server` | server TPS (`hb`), physics FPS, memory (tech/server) and players (each server's average per step, summed), the same way; `by` = `none`, `branch`, `art` (server rows have no player: device, new/returning and variant filters don't apply) | 7 days |
 | `perf-compare` | the client and server numbers side by side: `mode: "builds"` (`arts`, at most 6; default the 4 busiest) or `mode: "around"` (`at`, unix ms or ISO, e.g. a mark's time: before vs after over two windows of `hours` (1-168, 24), shortened to the time since `at`) | 7 days |
 
