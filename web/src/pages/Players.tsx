@@ -153,7 +153,7 @@ export default function Players() {
 						<IdentityStatus />
 					</div>
 				</div>
-				<div ref={detailRef} className="scroll-mt-20">
+				<div ref={detailRef} className="scroll-mt-36">
 					{pid && PID.test(pid) ? <PlayerDetail pid={pid} /> : <EmptyState>Pick a player in the list.</EmptyState>}
 				</div>
 			</div>

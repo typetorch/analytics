@@ -57,19 +57,21 @@ export function PlayerDetail({ pid }: { pid: string }) {
 				<div className="border-b p-4 sm:p-6">
 					<ProfileCard pid={pid} profile={profile} stats={stats.data} statsLoading={stats.isPending} range={describeRange(state)} />
 				</div>
-				<nav aria-label="Player views" className="grid grid-cols-4 gap-1 border-b p-2 sm:p-3">
-					{VIEW_BUTTONS.map(({ id, label, icon: Icon }) => (
-						<Button
-							key={id}
-							variant={view === id ? "secondary" : "ghost"}
-							aria-pressed={view === id}
-							className="h-auto min-w-0 flex-col gap-1 px-1 py-2 text-xs sm:flex-row sm:gap-2 sm:text-sm"
-							onClick={() => patch({ view: id === "spending" ? null : id })}
-						>
-							<Icon />
-							{label}
-						</Button>
-					))}
+				<nav aria-label="Player views" className="border-b p-2 sm:p-3">
+					<div className="grid grid-cols-4 gap-1 rounded-lg bg-muted p-1">
+						{VIEW_BUTTONS.map(({ id, label, icon: Icon }) => (
+							<Button
+								key={id}
+								variant={view === id ? "outline" : "ghost"}
+								aria-pressed={view === id}
+								className={`h-auto min-w-0 flex-col gap-1 px-1 py-2 text-xs sm:flex-row sm:gap-2 sm:text-sm ${view === id ? "bg-background shadow-xs dark:bg-background" : "text-muted-foreground"}`}
+								onClick={() => patch({ view: id === "spending" ? null : id })}
+							>
+								<Icon />
+								{label}
+							</Button>
+						))}
+					</div>
 				</nav>
 				<div className="space-y-3 p-4 sm:p-6">
 					{stats.data?.window.clamped && view !== "timeline" ? <p className="text-xs text-muted-foreground">The range is longer than 400 days: these numbers cover its last 400.</p> : null}
