@@ -61,7 +61,7 @@ describe("login page", () => {
 		const input = screen.getByLabelText(/admin token/i);
 		fireEvent.change(input, { target: { value: "nope" } });
 		fireEvent.submit(input.closest("form") as HTMLFormElement);
-		expect(await screen.findByText("That is not the admin token or the web token.")).toBeTruthy();
+		expect(await screen.findByText("That is not the admin token.")).toBeTruthy();
 		login.mockRejectedValueOnce(new ApiError(429, "rate limited", "/v1/auth/login"));
 		fireEvent.change(input, { target: { value: "nope again" } });
 		fireEvent.submit(input.closest("form") as HTMLFormElement);
@@ -94,8 +94,6 @@ describe("auth helpers", () => {
 		expect(userLabel({ kind: "roblox", userId: 1, name: "OwnerName" })).toBe("OwnerName");
 		expect(userLabel({ kind: "token" }, "cookie")).toBe("admin token");
 		expect(userLabel(undefined, "bearer")).toBe("admin token (proxy)");
-		expect(userLabel({ kind: "token" }, "cookie", "web")).toBe("web token");
-		expect(userLabel({ kind: "roblox", userId: 5, name: "Viewer" }, "cookie", "web")).toBe("Viewer");
 	});
 });
 

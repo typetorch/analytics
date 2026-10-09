@@ -879,10 +879,10 @@ export interface StorageReport {
 
 // Sign-in (GET /v1/auth/check) -----------------------------------------------------------------------------------------
 
-/** Who is signed in: a token (the admin token, or the web token), or a Roblox owner or viewer. */
+/** Who is signed in: the admin token, or a Roblox owner or viewer. */
 export type AuthUser = { kind: "token" } | { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string };
 
-/** "admin" reads and manages; "web" is read-only (the web token, or a Roblox viewer); "game" is the API key (no explorer). */
+/** "admin" reads and manages; "web" is read-only (a Roblox viewer); "game" is the API key (no explorer). */
 export type AuthRole = "admin" | "web" | "game";
 
 export interface AuthInfo {

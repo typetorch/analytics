@@ -69,7 +69,7 @@ function UserMenu() {
 	const client = useQueryClient();
 	if (!auth) return null;
 	const user = auth.user;
-	const label = userLabel(user, auth.via, auth.role);
+	const label = userLabel(user, auth.via);
 	const readOnly = isReadOnly(auth);
 	const out = async () => {
 		try {

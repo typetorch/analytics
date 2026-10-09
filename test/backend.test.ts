@@ -463,7 +463,7 @@ describe("explorer login", () => {
 		// The log names the address, never what was typed.
 		const lines = h.logs.filter((l) => l.includes(ip));
 		expect(lines.length).toBeGreaterThanOrEqual(5);
-		expect(lines.some((l) => l.includes("token login failed from"))).toBe(true);
+		expect(lines.some((l) => l.includes("admin login failed from"))).toBe(true);
 		for (const g of guesses) expect(h.logs.join("\n")).not.toContain(g);
 		expect(h.logs.join("\n")).not.toContain(ADMIN);
 		// After the window the address may try again.

@@ -1,7 +1,7 @@
 /**
  * The TypeTorch backend: analytics (DuckDB), the fleet API (SQLite), error logs, the event bus, the explorer, in one
  * process. Three roles (server/auth.ts): `game` (the API key) writes; `admin` (the admin token, or an owner's explorer
- * session) reads and manages; `web` (the web token, or a viewer's explorer session) reads only.
+ * session) reads and manages; `web` (a Roblox viewer's explorer session) reads only.
  *
  *   game routes (API key)
  *   POST /v1/ingest                 gzip JSON { events, recordings, identities? } -> 202 after the raw write
@@ -68,7 +68,7 @@ import { AccessError, AccessStore } from "./access.ts";
 import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type Principal, type SignedIn } from "./auth.ts";
 import type { ServerConfig } from "./config.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
-import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie, clientIp, json, readCapped, readCookie, setCookie, tooMany, withSecurityHeaders } from "./http.ts";
+import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie, clientIp, json, readCapped, readCookie, setCookie, tokenIn, tooMany, withSecurityHeaders } from "./http.ts";
 import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
@@ -124,6 +124,8 @@ export interface App {
 	readonly waker?: RemoteDebugWaker;
 	/** Explorer sessions open right now. */
 	sessionCount(): number;
+	/** The explorer's session store (tests make sessions directly, e.g. a viewer's without Roblox in the loop). */
+	readonly sessions: Sessions;
 	handle(req: Request, ip?: string): Promise<Response>;
 	/** One loader tick. */
 	load(): Promise<{ files: number; rows: number }>;
@@ -266,10 +268,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	live.start();
 
 	// Auth -------------------------------------------------------------------------------------------------------------
-	const sessions = new Sessions({ adminToken: config.adminToken, ...(config.webToken ? { webToken: config.webToken } : {}), idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
+	const sessions = new Sessions({ adminToken: config.adminToken, idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
 	const auth = new Auth({
 		adminToken: config.adminToken,
-		...(config.webToken ? { webToken: config.webToken } : {}),
 		apiKeys: config.apiKeys,
 		sessions,
 		isOwner: (id) => access.isOwner(id),
@@ -883,14 +884,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		} catch {
 			return json(400, { error: "body is not JSON" });
 		}
-		const role = typeof token === "string" ? auth.roleOfToken(token) : undefined;
-		if (!role) {
-			failedAuth(ip, "token login");
+		if (typeof token !== "string" || !tokenIn(token, [config.adminToken])) {
+			failedAuth(ip, "admin login");
 			return json(401, { error: "wrong token" });
 		}
 		authFailures.reset(ip);
-		const id = sessions.create({ kind: "token" }, role);
-		return json(200, { ok: true, role, via: "cookie", user: { kind: "token" } }, { "set-cookie": sessionCookie(req, id) });
+		const id = sessions.create({ kind: "token" });
+		return json(200, { ok: true, role: "admin", via: "cookie", user: { kind: "token" } }, { "set-cookie": sessionCookie(req, id) });
 	}
 
 	function logout(req: Request): Response {
@@ -1014,7 +1014,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		try {
 			const result = runtime.patch(body, { ...actorOf(principal), ip, robloxSession: isRobloxSession(principal), robloxSignIn: Boolean(oauth) });
-			// The token login turned off: browser sessions made with a token end too (the caller's is a Roblox session).
+			// The token login turned off: browser sessions made with the token end too (the caller's is a Roblox session).
 			// Viewers taken off the list lose their sessions at once.
 			const sessionsEnded = (result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0) + (result.changed.includes("webViewers") ? endStaleRobloxSessions() : 0);
 			return json(200, { ...settingsView(ip, principal), changed: result.changed, ...(sessionsEnded ? { sessionsEnded } : {}) });
@@ -1409,6 +1409,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		access,
 		live,
 		sessionCount: () => sessions.size,
+		sessions,
 		handle,
 		load: () => (warehouse ? warehouse.load() : Promise.resolve({ files: 0, rows: 0 })),
 		nightly: () => (warehouse ? warehouse.nightly() : Promise.resolve({ days: [], pruned: 0, compacted: false })),

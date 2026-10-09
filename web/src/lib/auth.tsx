@@ -1,6 +1,6 @@
 /** Who is signed in, for the header and anything that needs to know. Provided by AuthGate once the backend says yes. */
 import { createContext, useContext } from "react";
-import type { AuthInfo, AuthRole, AuthUser, LoginOptions } from "./types";
+import type { AuthInfo, AuthUser, LoginOptions } from "./types";
 
 const AuthContext = createContext<AuthInfo | null>(null);
 export const AuthProvider = AuthContext.Provider;
@@ -28,12 +28,11 @@ export function loginErrorText(code: string | null | undefined): string | null {
 	return LOGIN_ERRORS[code] ?? "Sign-in did not work. Try again.";
 }
 
-/** A short label for the header: "OwnerName", "admin token", "web token". */
-export function userLabel(user: AuthUser | undefined, via?: string, role?: AuthRole): string {
+/** A short label for the header: "OwnerName", "admin token". */
+export function userLabel(user: AuthUser | undefined, via?: string): string {
 	if (user?.kind === "roblox") return user.displayName ?? user.name;
-	const token = role === "web" ? "web token" : "admin token";
-	if (via === "bearer") return `${token} (proxy)`;
-	return token;
+	if (via === "bearer") return "admin token (proxy)";
+	return "admin token";
 }
 
 /** The session can only read (the web role): the pages that change something stay out, the rest is the same. */

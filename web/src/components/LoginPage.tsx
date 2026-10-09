@@ -1,4 +1,4 @@
-/** The login page: Sign in with Roblox (owners and viewers) first, a token (the admin token, or the read-only web token) second (hidden when the backend turns it off). */
+/** The login page: Sign in with Roblox (owners, and read-only viewers) first, the admin token second (hidden when the backend turns it off). */
 import { KeyRound, LogIn } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -27,8 +27,8 @@ export function takeLoginError(): string | null {
 function tokenError(error: unknown): string {
 	if (error instanceof ApiError) {
 		if (error.status === 429) return "Too many wrong tries. Wait a few minutes and try again.";
-		if (error.status === 401) return "That is not the admin token or the web token.";
-		if (error.status === 404) return "This backend does not take a token here.";
+		if (error.status === 401) return "That is not the admin token.";
+		if (error.status === 404) return "This backend does not take the admin token here.";
 		return error.message;
 	}
 	return error instanceof Error ? error.message : String(error);
@@ -80,9 +80,9 @@ export function LoginPage({ options, initialError, onSignedIn }: { options: Logi
 					{options.token ? (
 						<form className="space-y-2" onSubmit={submit}>
 							<Label htmlFor="admin-token" className="text-xs text-muted-foreground">
-								Admin token (or the read-only web token)
+								Admin token
 							</Label>
-							<Input id="admin-token" type="password" autoComplete="off" spellCheck={false} placeholder="paste the token" value={token} onChange={(e) => setToken(e.target.value)} />
+							<Input id="admin-token" type="password" autoComplete="off" spellCheck={false} placeholder="paste the admin token" value={token} onChange={(e) => setToken(e.target.value)} />
 							<Button type="submit" variant={options.roblox ? "outline" : "default"} className="w-full" disabled={busy || !token.trim()}>
 								<KeyRound />
 								{busy ? "Checking" : "Sign in with the token"}
