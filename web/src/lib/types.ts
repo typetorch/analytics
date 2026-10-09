@@ -382,6 +382,15 @@ export interface FleetServer {
 	serverVersion?: number | null;
 	/** Kernel 0.4.0: the heartbeat's budget summary `bu` (requests per minute next to Roblox's limits; fleet API only). */
 	budget?: ServerBudget | null;
+	/**
+	 * Kernel 0.4.2 (fleet API only; null or missing when unknown, e.g. an older kernel or backend): server TPS averaged
+	 * since the previous heartbeat and its slowest second, physics FPS, total memory and the Lua heap in MB.
+	 */
+	tps?: number | null;
+	tpsMin?: number | null;
+	physFps?: number | null;
+	memMb?: number | null;
+	luaMb?: number | null;
 }
 
 /** Kernel 0.4.0 `bu`: ds DataStore (r read, w write, lr/lw limits, br/bw budget left), ms MemoryStore units, h HTTP, mg MessagingService, by per caller, mem MB. */

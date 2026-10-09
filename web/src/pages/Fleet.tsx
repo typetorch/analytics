@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { cn } from "cn";
 import { EmptyState, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
@@ -78,14 +78,59 @@ function useFleetStream(branch: string): { state: StreamState; log: LiveEvent[] 
 	return { state, log };
 }
 
-/** Kernel 0.4.0 heartbeat `bu`, one short line: TypeTorch's DataStore reads and HTTP requests a minute against the limits, memory. */
+/**
+ * Kernel 0.4.0 heartbeat `bu`, one short line: TypeTorch's DataStore reads and HTTP requests a minute against the
+ * limits. Memory has its own column (kernel 0.4.2 rows: memMb); the tooltip still lists it.
+ */
 export function budgetText(b: ServerBudget | null | undefined): string {
 	if (!b) return "–";
 	const parts: string[] = [];
 	if (b.ds) parts.push(`DS ${b.ds.r ?? 0}/${b.ds.lr ?? "?"}`);
 	if (b.h) parts.push(`HTTP ${b.h.r ?? 0}/${b.h.l ?? "?"}`);
-	if (b.mem?.t !== undefined) parts.push(`${Math.round(b.mem.t)} MB`);
 	return parts.length ? parts.join(" · ") : "–";
+}
+
+/** Below this TPS a server runs slow (a healthy one runs at 60). The dev menu's Server > Status uses the same line. */
+export const LOW_TPS = 50;
+/** Above this total memory (MB) a server is in trouble; the dev menu's "High memory" issue uses the same line. */
+export const HIGH_MEMORY_MB = 3000;
+
+const known = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** A TPS reading under LOW_TPS (unknown is not low). */
+export const tpsLow = (v: number | null | undefined) => known(v) && v < LOW_TPS;
+/** A memory reading over HIGH_MEMORY_MB (unknown is not high). */
+export const memoryHigh = (v: number | null | undefined) => known(v) && v > HIGH_MEMORY_MB;
+
+const tpsFixed = (v: number | null | undefined) => (known(v) ? v.toFixed(1) : "–");
+
+/** The TPS cell's text: "59.8 / 52.0" (average / slowest second since the previous heartbeat), "–" when unknown. */
+export function tpsText(s: FleetServer): string {
+	if (!known(s.tps)) return "–";
+	return known(s.tpsMin) ? `${tpsFixed(s.tps)} / ${tpsFixed(s.tpsMin)}` : tpsFixed(s.tps);
+}
+
+function perfTitle(s: FleetServer): string | undefined {
+	if (!known(s.tps)) return "No TPS reading (kernel 0.4.2+ sends one with every heartbeat)";
+	const parts = [`average ${tpsFixed(s.tps)}`, `slowest second ${tpsFixed(s.tpsMin)}`];
+	if (known(s.physFps)) parts.push(`physics ${fmtNum(s.physFps, 0)} FPS`);
+	return `Server TPS since the previous heartbeat: ${parts.join(", ")}${tpsLow(s.tps) ? ` (under ${LOW_TPS})` : ""}`;
+}
+
+function memoryTitle(s: FleetServer): string | undefined {
+	if (!known(s.memMb)) return undefined;
+	return `Total ${fmtNum(s.memMb, 0)} MB, Lua heap ${known(s.luaMb) ? `${fmtNum(s.luaMb, 1)} MB` : "?"}${memoryHigh(s.memMb) ? ` (over ${fmtInt(HIGH_MEMORY_MB)} MB)` : ""}`;
+}
+
+/** A number with a warning dot when it is out of range (colour never carries the meaning alone: the tooltip says why). */
+function Reading({ warn, title, children }: { warn: boolean; title?: string; children: ReactNode }) {
+	return (
+		<span className="inline-flex items-center gap-1.5 tabular-nums" title={title}>
+			{warn ? <span className="size-2 shrink-0 rounded-full bg-[var(--status-warning)]" aria-hidden /> : null}
+			<span className={cn(warn && "font-medium")}>{children}</span>
+			{warn ? <span className="sr-only">(warning)</span> : null}
+		</span>
+	);
 }
 
 const CALLERS: Record<string, string> = { k: "kernel", d: "devtools", a: "analytics", g: "game", f: "framework" };
@@ -119,8 +164,8 @@ const seenText = (s: FleetServer) => (s.ageSeconds !== undefined ? `${s.ageSecon
 
 /**
  * The live servers table. A column sorts, filters and exports by its accessor and shows its cell, so formatted cells
- * ("47 / 60", "812 MB", "5 min ago") still sort by the number or the timestamp. New columns (TPS, memory, ...) go in
- * this list, e.g. { id: "memory", header: "Memory", hint: "MB", accessor: (s) => s.memoryMb, cell: (s) => fmtNum(s.memoryMb, 0) + " MB" }.
+ * ("47 / 60", "59.8 / 52.0", "5 min ago") still sort by the number or the timestamp (rows without a value go last).
+ * New columns go in this list, like TPS and Memory (kernel 0.4.2).
  */
 export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
 	{
@@ -161,6 +206,70 @@ export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
 				<Status tone={HEALTH_TONE[s.health ?? ""]}>{s.health ?? "unknown"}</Status>
 			</span>
 		),
+	},
+	// Kernel 0.4.2: TPS (average / slowest second since the previous heartbeat; sorts by the average, slowest first) and
+	// memory; older kernels have none ("–", sorted last).
+	{
+		id: "tps",
+		header: "TPS",
+		hint: "avg / min",
+		type: "number",
+		firstSort: "asc",
+		accessor: (s) => (known(s.tps) ? s.tps : null),
+		cell: (s) => (
+			<Reading warn={tpsLow(s.tps)} title={perfTitle(s)}>
+				{tpsFixed(s.tps)}
+				{known(s.tps) && known(s.tpsMin) ? <span className="text-muted-foreground"> / {tpsFixed(s.tpsMin)}</span> : null}
+			</Reading>
+		),
+		format: (_v, s) => tpsText(s),
+	},
+	{
+		id: "tpsMin",
+		header: "TPS min",
+		hint: "slowest s",
+		type: "number",
+		firstSort: "asc",
+		defaultHidden: true,
+		accessor: (s) => (known(s.tpsMin) ? s.tpsMin : null),
+		cell: (s) => (
+			<Reading warn={tpsLow(s.tpsMin)} title={perfTitle(s)}>
+				{tpsFixed(s.tpsMin)}
+			</Reading>
+		),
+	},
+	{
+		id: "physFps",
+		header: "Physics",
+		hint: "FPS",
+		type: "number",
+		firstSort: "asc",
+		defaultHidden: true,
+		accessor: (s) => (known(s.physFps) ? s.physFps : null),
+		cell: (s) => fmtNum(s.physFps, 0),
+		className: "tabular-nums",
+	},
+	{
+		id: "memory",
+		header: "Memory",
+		hint: "MB",
+		type: "number",
+		accessor: (s) => (known(s.memMb) ? s.memMb : null),
+		cell: (s) => (
+			<Reading warn={memoryHigh(s.memMb)} title={memoryTitle(s)}>
+				{fmtNum(s.memMb, 0)}
+			</Reading>
+		),
+	},
+	{
+		id: "luaHeap",
+		header: "Lua heap",
+		hint: "MB",
+		type: "number",
+		defaultHidden: true,
+		accessor: (s) => (known(s.luaMb) ? s.luaMb : null),
+		cell: (s) => fmtNum(s.luaMb, 1),
+		className: "tabular-nums",
 	},
 	{ id: "kernel", header: "Kernel", type: "enum", accessor: (s) => s.kernel, className: "text-xs" },
 	{

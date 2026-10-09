@@ -18,7 +18,7 @@
  *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
- *   GET  /v1/fleet/servers | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
+ *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
  *   GET  /v1/access, PUT /v1/access { seq, owners } (admin token only): the owners who may sign in with Roblox
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
  *   GET  /v1/admin/settings         runtime settings (server/runtime-settings.ts): values, sources, bounds, audit; secrets as set/not set
