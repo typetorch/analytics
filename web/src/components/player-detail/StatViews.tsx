@@ -48,7 +48,7 @@ function Heading({ children, show, onShow }: { children: ReactNode; show?: Show;
 	);
 }
 
-const per = (stats: PlayerStatsResult) => (stats.window.bucket === "hour" ? "hour" : "day");
+const per = (stats: PlayerStatsResult) => stats.window.bucket;
 
 // Spending -------------------------------------------------------------------------------------------------------------
 

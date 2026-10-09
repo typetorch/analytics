@@ -243,7 +243,7 @@ export interface PlayersResult {
 	players: PlayerSummary[];
 }
 
-/** One bucket (a UTC day, or an hour for windows up to 2 days) of a player's numbers; sessions count where they start. */
+/** One bucket of a player's numbers (a UTC day; a minute, 5 minutes or an hour for windows up to a day); sessions count where they start. */
 export interface PlayerBucket {
 	start: string;
 	sessions: number;
@@ -278,7 +278,7 @@ export interface PlayerPurchase {
 export interface PlayerStatsResult {
 	pid: string;
 	uid?: number;
-	window: { from: string; to: string; bucket: "hour" | "day"; days: number; clamped: boolean };
+	window: { from: string; to: string; bucket: "minute" | "5 minutes" | "hour" | "day"; bucketMs: number; days: number; clamped: boolean };
 	totals: {
 		sessions: number;
 		events: number;

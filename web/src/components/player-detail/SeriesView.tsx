@@ -1,22 +1,22 @@
-/** A player's numbers per bucket (UTC day, or hour for short ranges): a line chart, or with "Table" the same numbers in the shared table. */
+/** A player's numbers per bucket (UTC day; minute, 5 minutes or hour for ranges up to a day): a line chart, or with "Table" the same numbers in the shared table. */
 import { useMemo, type ReactNode } from "react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { EmptyState } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import type { PlayerBucket } from "@/lib/types";
+import type { PlayerBucket, PlayerStatsResult } from "@/lib/types";
 
 export type Show = "chart" | "table";
-export type Bucket = "hour" | "day";
+export type Bucket = PlayerStatsResult["window"]["bucket"];
 export type MetricKey = "robux" | "minutes" | "sessions" | "purchases";
 
-/** "2026-10-08" for a day, "2026-10-08 14:00" for an hour (UTC). */
+/** "2026-10-08" for a day, "2026-10-08 14:05" for an hour or less (UTC). */
 export function bucketLabel(start: string, bucket: Bucket): string {
-	return bucket === "hour" ? `${start.slice(0, 10)} ${start.slice(11, 16)}` : start.slice(0, 10);
+	return bucket === "day" ? start.slice(0, 10) : `${start.slice(0, 10)} ${start.slice(11, 16)}`;
 }
 
-const tick = (start: string, bucket: Bucket) => (bucket === "hour" ? start.slice(11, 16) : start.slice(5, 10));
+const tick = (start: string, bucket: Bucket) => (bucket === "day" ? start.slice(5, 10) : start.slice(11, 16));
 
 export interface Metric {
 	key: MetricKey;
@@ -48,7 +48,7 @@ export function useBucketColumns(bucket: Bucket, metrics: readonly Metric[]): Da
 		() => [
 			{
 				id: "start",
-				header: bucket === "hour" ? "Hour (UTC)" : "Day (UTC)",
+				header: bucket === "day" ? "Day (UTC)" : "Time (UTC)",
 				type: "date",
 				accessor: (b) => b.start,
 				cell: (b) => bucketLabel(b.start, bucket),

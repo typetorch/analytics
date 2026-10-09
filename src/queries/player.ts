@@ -1,7 +1,8 @@
 /**
  * One player's numbers over a window, for the explorer's player detail (Players page): spending, playtime and sessions
- * per bucket, the totals, each session and each purchase. Buckets are UTC hours for windows up to two days (a "today"
- * range, or anything shorter) and UTC days otherwise; the series is dense (empty buckets are zeros). The window is the
+ * per bucket, the totals, each session and each purchase. Buckets follow the window like the explorer's other charts: up
+ * to an hour per minute, up to 6 hours per 5 minutes, up to a day per hour ("today", one custom date), longer per UTC day;
+ * the series is dense (empty buckets are zeros). The window is the
  * filter range, cut to the last 400 days (`window.clamped` says so).
  *
  * A session counts in the bucket where it starts, with its whole length (first to last event, like every other query).
@@ -14,9 +15,24 @@ import { checkPid, defineQuery, intOption, iso, num, round, SERVER_PURCHASE, str
 
 /** The longest window the query reads; a wider filter range is cut to its last 400 days. */
 export const PLAYER_MAX_DAYS = 400;
+const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
-/** Windows up to this long are bucketed by hour. */
-const HOURLY_UP_TO_MS = 2 * DAY_MS;
+
+export type PlayerBucketUnit = "minute" | "5 minutes" | "hour" | "day";
+
+/**
+ * The step for a window: up to an hour (65 min) per minute, up to 6 hours (6.5 h) per 5 minutes, up to a day (26 h) per
+ * hour, longer per day. The same steps as `windowBucketMs` on the performance branch (Overview and Performance charts):
+ * use that one once both are merged.
+ */
+export function playerBucketMs(spanMs: number): number {
+	if (spanMs <= 65 * MINUTE_MS) return MINUTE_MS;
+	if (spanMs <= 6.5 * HOUR_MS) return 5 * MINUTE_MS;
+	if (spanMs <= 26 * HOUR_MS) return HOUR_MS;
+	return DAY_MS;
+}
+
+const UNITS: Record<number, PlayerBucketUnit> = { [MINUTE_MS]: "minute", [5 * MINUTE_MS]: "5 minutes", [HOUR_MS]: "hour", [DAY_MS]: "day" };
 
 export interface PlayerStatsOptions {
 	pid: string;
@@ -64,7 +80,9 @@ export interface PlayerStatsResult {
 	window: {
 		from: string;
 		to: string;
-		bucket: "hour" | "day";
+		/** The step of `series`. */
+		bucket: PlayerBucketUnit;
+		bucketMs: number;
 		/** UTC days the window touches (at least 1): what "per day" divides by. */
 		days: number;
 		/** The filter range was longer than PLAYER_MAX_DAYS and was cut to its end. */
@@ -104,7 +122,7 @@ interface Window {
 function windowOf(f: NormalizedFilters): Window {
 	const clamped = f.to - f.from > PLAYER_MAX_DAYS * DAY_MS;
 	const from = clamped ? f.to - PLAYER_MAX_DAYS * DAY_MS : f.from;
-	return { from, to: f.to, bucketMs: f.to - from <= HOURLY_UP_TO_MS ? HOUR_MS : DAY_MS, clamped };
+	return { from, to: f.to, bucketMs: playerBucketMs(f.to - from), clamped };
 }
 
 /** The bucket number of an int64 ms expression. */
@@ -124,7 +142,7 @@ const shortText = (v: unknown, max = 64): string | null => (typeof v === "string
 
 export const playerStats = defineQuery<PlayerStatsOptions, PlayerStatsResult>({
 	name: "player-stats",
-	summary: "one player's spending, playtime and sessions per day (per hour up to 2 days), with each session and purchase (by pid)",
+	summary: "one player's spending, playtime and sessions per day (finer for windows up to a day), with each session and purchase (by pid)",
 	defaultDays: 30,
 	options: (input = {}) => ({
 		pid: checkPid(input.pid),
@@ -188,7 +206,7 @@ export const playerStats = defineQuery<PlayerStatsOptions, PlayerStatsResult>({
 		const playtimeMs = num(t.playtime_ms);
 		return {
 			pid: o.pid,
-			window: { from: iso(w.from), to: iso(w.to), bucket: w.bucketMs === HOUR_MS ? "hour" : "day", days, clamped: w.clamped },
+			window: { from: iso(w.from), to: iso(w.to), bucket: UNITS[w.bucketMs] ?? "day", bucketMs: w.bucketMs, days, clamped: w.clamped },
 			totals: {
 				sessions,
 				events: num(t.events),

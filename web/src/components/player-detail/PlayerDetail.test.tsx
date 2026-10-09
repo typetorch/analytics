@@ -38,7 +38,7 @@ const days = ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-0
 function statsFor(pid: string, empty = false): PlayerStatsResult {
 	return {
 		pid,
-		window: { from: "2026-10-03T00:00:00.000Z", to: "2026-10-09T12:00:00.000Z", bucket: "day", days: 7, clamped: false },
+		window: { from: "2026-10-03T00:00:00.000Z", to: "2026-10-09T12:00:00.000Z", bucket: "day", bucketMs: 86_400_000, days: 7, clamped: false },
 		totals: empty
 			? { sessions: 0, events: 0, playtimeMinutes: 0, avgSessionMinutes: 0, medianSessionMinutes: 0, playtimePerDayMinutes: 0, activeDays: 0, robux: 0, purchases: 0, firstSeen: null, lastSeen: null }
 			: {
@@ -234,9 +234,34 @@ describe("Players page: the player detail container", () => {
 	});
 });
 
+describe("short ranges (the hour presets)", () => {
+	it("say per 5 minutes in the heading, the table and the chart", async () => {
+		vi.spyOn(api, "query").mockImplementation((async (name: string, _filters: unknown, options: { pid?: string } = {}) => {
+			if (name === "players") return players;
+			if (name === "player-stats") {
+				const base = statsFor(options.pid ?? "");
+				const from = Date.parse("2026-10-09T06:00:00.000Z");
+				return {
+					...base,
+					window: { ...base.window, from: new Date(from).toISOString(), bucket: "5 minutes", bucketMs: 300_000, days: 1 },
+					series: Array.from({ length: 72 }, (_, i) => ({ start: new Date(from + i * 300_000).toISOString(), sessions: i === 3 ? 1 : 0, minutes: i === 3 ? 5 : 0, robux: i === 4 ? 99 : 0, purchases: i === 4 ? 1 : 0 })),
+				};
+			}
+			throw new Error(`unexpected query ${name}`);
+		}) as typeof api.query);
+		mount(`?pid=${ALPHA}&range=6h&show=table`);
+		const region = await detail();
+		expect(await within(region).findByRole("heading", { name: "Robux per 5 minutes" })).toBeTruthy();
+		const table = within(region).getByRole("table", { name: "Robux per 5 minutes" });
+		expect(within(table).getByText("Time (UTC)")).toBeTruthy();
+		expect(within(within(table).getByText("2026-10-09 06:20").closest("tr") as HTMLElement).getByText("99 Robux")).toBeTruthy();
+	});
+});
+
 describe("bucketLabel", () => {
 	it("days and hours in UTC", () => {
 		expect(bucketLabel("2026-10-08T00:00:00.000Z", "day")).toBe("2026-10-08");
 		expect(bucketLabel("2026-10-08T14:00:00.000Z", "hour")).toBe("2026-10-08 14:00");
+		expect(bucketLabel("2026-10-08T14:05:00.000Z", "5 minutes")).toBe("2026-10-08 14:05");
 	});
 });

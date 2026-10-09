@@ -285,7 +285,7 @@ describe("player-stats over HTTP", () => {
 	test("today's range (hourly), by pid or by UserId; the result carries the UserId", async () => {
 		const today = new Date(T0).toISOString().slice(0, 10);
 		const r = await asJson(await stats({ filters: { from: today }, options: { pid: PID } }));
-		expect(r.result).toMatchObject({ pid: PID, uid: UID, window: { bucket: "hour", days: 1 } });
+		expect(r.result).toMatchObject({ pid: PID, uid: UID, window: { bucket: "hour", bucketMs: 3_600_000, days: 1 } });
 		expect(r.result.totals).toMatchObject({ sessions: 2, playtimeMinutes: 15, avgSessionMinutes: 7.5, medianSessionMinutes: 7.5, robux: 99, purchases: 1, activeDays: 1 });
 		expect(r.result.series.length).toBe(12);
 		expect(r.result.purchases).toEqual([{ time: new Date(t + 60_000).toISOString(), t: t + 60_000, kind: "product", product: "1234", robux: 99, where: "shop", sid: "s1" }]);

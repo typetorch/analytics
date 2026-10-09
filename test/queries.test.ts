@@ -508,14 +508,25 @@ describe("player stats (the Players page's player detail)", () => {
 		expect(r.sessionsTruncated || r.purchasesTruncated).toBe(false);
 	});
 
-	test("a window up to two days is bucketed by hour", async () => {
+	test("the step follows the window: per hour up to a day, 5 minutes up to 6 hours, a minute up to an hour (the hour presets)", async () => {
 		const from = TODAY * DAY;
 		const r = await store.query("player-stats", { from, to: NOW }, { pid: payer });
-		expect(r.window).toMatchObject({ bucket: "hour", days: 1 });
+		expect(r.window).toMatchObject({ bucket: "hour", bucketMs: 3_600_000, days: 1 });
 		expect(r.series.length).toBe(12);
 		expect(r.series[1].start).toBe(new Date(from + 3_600_000).toISOString());
 		const s = sessions(range(from, NOW).filter((e) => e.pid === payer));
 		expect(r.series.reduce((a, b) => a + b.sessions, 0)).toBe(s.size);
+		// A custom single date (24 h) is per hour; two dates per day.
+		expect((await store.query("player-stats", { from: "2026-10-01", to: "2026-10-01" }, { pid: payer })).window.bucket).toBe("hour");
+		expect((await store.query("player-stats", { from: "2026-10-01", to: "2026-10-02" }, { pid: payer })).series.length).toBe(2);
+		// The explorer's "Last 6 hours" / "Last 1 hour" send an ISO instant.
+		const six = await store.query("player-stats", { from: new Date(NOW - 6 * 3_600_000).toISOString() }, { pid: payer });
+		expect(six.window).toMatchObject({ bucket: "5 minutes", bucketMs: 300_000 });
+		expect(six.series.length).toBe(72);
+		const one = await store.query("player-stats", { from: new Date(NOW - 3_600_000).toISOString() }, { pid: payer });
+		expect(one.window).toMatchObject({ bucket: "minute", days: 1 });
+		expect(one.series.length).toBe(60);
+		expect(one.series[0].start).toBe(new Date(NOW - 3_600_000).toISOString());
 	});
 
 	test("bounds: the window is cut to 400 days; list limits mark truncation; bad options are refused", async () => {

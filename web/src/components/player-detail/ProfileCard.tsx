@@ -70,7 +70,7 @@ export function ProfileCard({
 						{lookupNote(profile)}
 					</div>
 					{p?.name ? <p className="text-sm text-muted-foreground">@{p.name}</p> : null}
-					<p className="text-xs text-muted-foreground">Numbers over the {range}.</p>
+					<p className="text-xs text-muted-foreground">Date range: {range}</p>
 				</div>
 			</div>
 			<dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4 xl:grid-cols-8">
