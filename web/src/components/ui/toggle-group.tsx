@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { type VariantProps } from "class-variance-authority"
+import { Check } from "lucide-react"
 import { cn } from "cn"
 import { ToggleGroup as ToggleGroupPrimitive } from "radix-ui"
 
@@ -81,6 +82,8 @@ function ToggleGroupItem({
       )}
       {...props}
     >
+      {/* The picked one carries a check as well as the fill, so the state doesn't rest on colour alone. */}
+      <Check aria-hidden className="hidden size-3 group-data-[state=on]/toggle:inline-block" />
       {children}
     </ToggleGroupPrimitive.Item>
   )

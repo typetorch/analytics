@@ -13,6 +13,8 @@ import { useSearchParams } from "react-router";
 import { cn } from "cn";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { PerfChart } from "@/components/PerfChart";
+import { PerfFlag } from "@/components/PerfFlag";
+import { ToggleChip } from "@/components/ToggleChip";
 import { EmptyState, ErrorState, LoadingBlock, PageHeader, QueryState, Section } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -58,6 +60,7 @@ import {
 	type PerfServer,
 	type ServerMetricPoint,
 } from "@/lib/perf";
+import { absoluteFlag, REGRESSION_PCT, regression, thresholdText, type Flag, type Regression } from "@/lib/perf-thresholds";
 import type { Filters } from "@/lib/types";
 
 // URL state -------------------------------------------------------------------------------------------------------------
@@ -157,14 +160,28 @@ function countColumn<T>(id: string, header: string, value: (row: T) => number | 
 	return { id, header, type: "number", accessor: (r) => value(r) ?? null, cell: (r) => fmtInt(value(r)), format: (v) => fmtInt(v as number | null), ...extra };
 }
 
-/** A metric column ("Frame rate p90", "Frame rate p99 (worst)"): sorts by the raw value, shows it with its unit. */
-function metricColumn<T>(id: string, header: string, key: string, value: (row: T) => number | null | undefined, extra: Partial<DataColumn<T>> = {}): DataColumn<T> {
+/**
+ * A metric column ("Frame rate p90", "Frame rate p99 (worst)"): sorts by the raw value, shows it with its unit. `flag` marks a
+ * cell orange or red when it is a possible problem (lib/perf-thresholds.ts); the tooltip says why.
+ */
+function metricColumn<T>(
+	id: string,
+	header: string,
+	key: string,
+	value: (row: T) => number | null | undefined,
+	extra: Partial<DataColumn<T>> = {},
+	flag?: (row: T) => Flag | null,
+): DataColumn<T> {
 	return {
 		id,
 		header,
 		type: "number",
 		accessor: (r) => value(r) ?? null,
-		cell: (r) => fmtMetric(key, value(r)),
+		cell: (r) => {
+			const text = fmtMetric(key, value(r));
+			const f = flag?.(r);
+			return f ? <PerfFlag flag={f}>{text}</PerfFlag> : text;
+		},
 		format: (v) => fmtMetric(key, v as number | null),
 		className: "whitespace-nowrap",
 		...extra,
@@ -185,7 +202,17 @@ export function groupColumns(side: "client" | "server", by: PerfGroupBy, metricK
 		...metricKeys.flatMap((k) => {
 			const label = side === "server" && k === "mem" ? "Server memory" : (METRICS[k]?.label ?? k);
 			return [
-				...PERCENTILES.map((p) => metricColumn<GroupRow>(`${k}-${p}`, `${label} ${percentileName(p)}`, k, (g) => g.metrics[k]?.[p], { title: PERCENTILE_HELP[p] })),
+				...PERCENTILES.map((p) => {
+					const lines = thresholdText(side, k, p);
+					return metricColumn<GroupRow>(
+						`${k}-${p}`,
+						`${label} ${percentileName(p)}`,
+						k,
+						(g) => g.metrics[k]?.[p],
+						{ title: lines ? `${PERCENTILE_HELP[p]}; ${lines}` : PERCENTILE_HELP[p] },
+						(g) => absoluteFlag(side, k, p, g.metrics[k]?.[p], g.metrics[k]?.n),
+					);
+				}),
 				metricColumn<GroupRow>(`${k}-avg`, `${label} avg`, k, (g) => g.metrics[k]?.avg, { defaultHidden: true }),
 			];
 		}),
@@ -396,19 +423,19 @@ export function liveServerColumns(job: string, setJob: (job: string) => void): D
 			className: "font-mono text-xs whitespace-nowrap",
 		},
 		countColumn<PerfServer>("players", "Players", (s) => s.players),
-		metricColumn<PerfServer>("tps", "TPS", "tps", (s) => s.tps),
+		metricColumn<PerfServer>("tps", "TPS", "tps", (s) => s.tps, {}, (s) => absoluteFlag("server", "tps", null, s.tps)),
 		metricColumn<PerfServer>("tpsMin", "TPS min", "tps", (s) => s.tpsMin, { title: "The slowest step in the last heartbeat window" }),
-		metricColumn<PerfServer>("physFps", "Physics FPS", "physFps", (s) => s.physFps),
-		metricColumn<PerfServer>("memMb", "Memory", "mem", (s) => s.memMb),
+		metricColumn<PerfServer>("physFps", "Physics FPS", "physFps", (s) => s.physFps, {}, (s) => absoluteFlag("server", "physFps", null, s.physFps)),
+		metricColumn<PerfServer>("memMb", "Memory", "mem", (s) => s.memMb, {}, (s) => absoluteFlag("server", "mem", null, s.memMb)),
 		metricColumn<PerfServer>("luaMb", "Lua heap", "mem", (s) => s.luaMb),
 		{
 			id: "history",
 			header: "History",
 			accessor: () => null,
 			cell: (s) => (
-				<Button size="sm" variant={s.job === job ? "secondary" : "outline"} className="h-7" onClick={() => setJob(s.job === job ? "" : s.job)} aria-pressed={s.job === job}>
+				<ToggleChip pressed={s.job === job} onClick={() => setJob(s.job === job ? "" : s.job)}>
 					History
-				</Button>
+				</ToggleChip>
 			),
 			sortable: false,
 			filter: false,
@@ -473,6 +500,12 @@ interface CompareRow {
 	key: string;
 	values: (number | null)[];
 	change: ReturnType<typeof delta>;
+	/** Samples behind each period's number (the metric's `n`); empty for the sample-count rows. */
+	counts: number[];
+	/** Per period: an absolute problem flag (lib/perf-thresholds.ts), or null. */
+	flags: (Flag | null)[];
+	/** What the change says (too few samples, worse, better), or null. */
+	regression: Regression | null;
 }
 
 /**
@@ -492,18 +525,23 @@ export function compareRows(result: PerfCompareResult): { pinned: CompareRow[]; 
 	const order = changeOrder(result);
 	const info = (side: "client" | "server", key: string) => (side === "client" ? result.clientMetrics : result.serverMetrics).find((m) => m.key === key);
 	const pinned: CompareRow[] = [
-		{ id: "client-samples", label: "Client samples", key: "samples", values: periods.map((p) => p.client.samples), change: null },
-		{ id: "server-samples", label: "Server samples", key: "samples", values: periods.map((p) => p.server.samples), change: null },
+		{ id: "client-samples", label: "Client samples", key: "samples", values: periods.map((p) => p.client.samples), change: null, counts: [], flags: [], regression: null },
+		{ id: "server-samples", label: "Server samples", key: "samples", values: periods.map((p) => p.server.samples), change: null, counts: [], flags: [], regression: null },
 	];
 	const rows = COMPARE_ROWS.flatMap(({ side, key }) =>
 		PERCENTILES.map((pct): CompareRow => {
 			const values = periods.map((p) => p[side].metrics[key]?.[pct] ?? null);
+			const counts = periods.map((p) => p[side].metrics[key]?.n ?? 0);
+			const higher = info(side, key)?.higherIsBetter ?? true;
 			return {
 				id: `${side}-${key}-${pct}`,
 				label: `${side === "server" && key === "mem" ? "Server memory" : (METRICS[key]?.label ?? key)} ${percentileName(pct)}`,
 				key,
 				values,
-				change: order ? delta(values[order[0]], values[order[1]], info(side, key)?.higherIsBetter ?? true) : null,
+				change: order ? delta(values[order[0]], values[order[1]], higher) : null,
+				counts,
+				flags: values.map((v, i) => absoluteFlag(side, key, pct, v, counts[i])),
+				regression: order ? regression(values[order[0]], values[order[1]], higher, counts[order[0]] ?? 0, counts[order[1]] ?? 0) : null,
 			};
 		}),
 	);
@@ -520,7 +558,11 @@ function compareColumns(result: PerfCompareResult): DataColumn<CompareRow>[] {
 				header: periodLabel(result, p),
 				type: "number",
 				accessor: (r) => r.values[i] ?? null,
-				cell: (r) => fmt(r, r.values[i]),
+				cell: (r) => {
+					const text = fmt(r, r.values[i]);
+					const flag = r.flags[i];
+					return flag ? <PerfFlag flag={flag}>{text}</PerfFlag> : text;
+				},
 				format: (v, r) => fmt(r, v as number | null),
 				className: "whitespace-nowrap",
 				headerClassName: "whitespace-nowrap",
@@ -536,17 +578,36 @@ function compareColumns(result: PerfCompareResult): DataColumn<CompareRow>[] {
 			header: "Change",
 			type: "number",
 			hint: result.mode === "around" ? "after vs before" : "newer vs older",
-			title: `${periodLabel(result, value as ComparePeriod)} against ${periodLabel(result, base as ComparePeriod)}; green is better, red is worse`,
+			title: `${periodLabel(result, value as ComparePeriod)} against ${periodLabel(result, base as ComparePeriod)}; orange is worse by over ${REGRESSION_PCT.warning}%, red by over ${REGRESSION_PCT.critical}%, green is better`,
 			accessor: (r) => (r.change ? Math.round(r.change.pct * 10) / 10 : null),
-			cell: (r) =>
-				r.key === "samples" ? (
-					""
-				) : (
-					<span className={cn(r.change?.better === true && "text-[var(--status-good)]", r.change?.better === false && "text-[var(--status-critical)]")}>
-						{fmtDelta(r.change)}
-						{r.change && r.change.better !== null ? <span className="ml-1 text-xs">{r.change.better ? "better" : "worse"}</span> : null}
+			cell: (r) => {
+				if (r.key === "samples") return "";
+				const reg = r.regression;
+				const text = fmtDelta(r.change);
+				const word = r.change && r.change.better !== null ? <span className="ml-1 text-xs">{r.change.better ? "better" : "worse"}</span> : null;
+				if (reg?.kind === "few") {
+					return (
+						<span className="text-muted-foreground" title={reg.why}>
+							{text}
+							<span className="ml-1 text-xs">few samples</span>
+						</span>
+					);
+				}
+				if (reg?.kind === "worse" && reg.level) {
+					return (
+						<PerfFlag flag={{ level: reg.level, why: reg.why }}>
+							{text}
+							{word}
+						</PerfFlag>
+					);
+				}
+				return (
+					<span className={cn(reg?.kind === "better" && "text-[var(--status-good)]")} title={reg?.why}>
+						{text}
+						{word}
 					</span>
-				),
+				);
+			},
 			format: (_v, r) => fmtDelta(r.change),
 			filter: false,
 		});
@@ -641,9 +702,9 @@ function CompareSection({ filters, marks, seqOf }: { filters: Filters; marks: De
 			) : (
 				<div className="flex flex-wrap gap-1.5" role="group" aria-label="Builds to compare">
 					{(values.data?.art ?? []).slice(0, 16).map((a) => (
-						<Button key={a.value} size="sm" variant={arts.includes(a.value) ? "secondary" : "outline"} className="h-7 font-mono text-xs" aria-pressed={arts.includes(a.value)} onClick={() => toggle(a.value)}>
+						<ToggleChip key={a.value} pressed={arts.includes(a.value)} className="font-mono text-xs" onClick={() => toggle(a.value)}>
 							{groupLabel("art", a.value, seqs.get(a.value))}
-						</Button>
+						</ToggleChip>
 					))}
 					{arts.length ? (
 						<Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setPicked("")}>
