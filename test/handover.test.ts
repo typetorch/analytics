@@ -17,6 +17,8 @@ import { DataFolderLocked, isLockConflict } from "../src/duckdb/lock.ts";
 import { openDuckDbStore } from "../src/store/duckdb.ts";
 import { openSqlite } from "../src/fleet/db.ts";
 import { FleetService } from "../src/fleet/service.ts";
+import { AccessStore } from "../src/server/access.ts";
+import { RuntimeSettings } from "../src/server/runtime-settings.ts";
 import { ADMIN, API, bearer, post } from "./harness.ts";
 
 const root = join(import.meta.dir, "..");
@@ -206,6 +208,23 @@ describe("handover (DuckDB held by another process)", () => {
 		expect((await app.load()).rows).toBe(2);
 		expect(await (await call("/healthz", { headers: bearer(ADMIN) })).json()).toMatchObject({ state: "ready", analytics: { live: { events: 2 } } });
 		expect((await call("/v1/query/overview", post(ADMIN, {}))).status).toBe(200);
+	}, 30_000);
+
+	test("at the takeover, what the previous server saved while both ran applies here too: settings and the owner list", async () => {
+		const dir = tempDir();
+		const holder = await hold(dir);
+		const { app, logs } = await start(dir);
+		expect(app.state).toBe("handover");
+		expect(app.settings.get("ipPerMinute")).toBe(6000);
+		expect(app.access.isOwner(4242)).toBe(false);
+		// The previous server takes a Settings page change and an owner list from the CLI meanwhile.
+		RuntimeSettings.fromConfig(config(dir)).patch({ ipPerMinute: 7000 }, { who: "admin token", via: "bearer", ip: "127.0.0.1", robloxSession: false, robloxSignIn: false });
+		AccessStore.at(dir).put({ seq: 2, owners: [4242] });
+		await holder.release();
+		await until(() => app.state === "ready", 5000, "the handover ends");
+		expect(app.settings.get("ipPerMinute")).toBe(7000);
+		expect(app.access.isOwner(4242)).toBe(true);
+		expect(logs.some((l) => l === "handover: picked up what the previous server saved meanwhile (settings: ipPerMinute)")).toBe(true);
 	}, 30_000);
 
 	test("waits for a server from before the owner lock too (only live.duckdb held)", async () => {

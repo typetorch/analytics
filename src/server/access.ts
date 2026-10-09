@@ -49,18 +49,33 @@ export class AccessStore {
 		private readonly file: string,
 		private readonly clock: () => number = Date.now,
 	) {
-		if (existsSync(file)) {
-			try {
-				const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<AccessRecord>;
-				if (Array.isArray(parsed.owners)) {
-					const owners = parsed.owners.filter((o): o is number => typeof o === "number" && Number.isSafeInteger(o) && o > 0);
-					this.record = { seq: typeof parsed.seq === "number" ? parsed.seq : null, owners, updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : null };
-					this.owners = new Set(owners);
-				}
-			} catch {
-				// An unreadable file means no owners until the CLI sends the list again: fail closed.
+		this.read();
+	}
+
+	private read(): void {
+		this.record = { seq: null, owners: [], updatedAt: null };
+		this.owners = new Set();
+		if (!existsSync(this.file)) return;
+		try {
+			const parsed = JSON.parse(readFileSync(this.file, "utf8")) as Partial<AccessRecord>;
+			if (Array.isArray(parsed.owners)) {
+				const owners = parsed.owners.filter((o): o is number => typeof o === "number" && Number.isSafeInteger(o) && o > 0);
+				this.record = { seq: typeof parsed.seq === "number" ? parsed.seq : null, owners, updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : null };
+				this.owners = new Set(owners);
 			}
+		} catch {
+			// An unreadable file means no owners until the CLI sends the list again: fail closed.
 		}
+	}
+
+	/**
+	 * Reads the file again (a deploy's previous server may have saved a newer list while both ran). Returns whether the
+	 * list changed; the caller ends the sessions of owners who are gone.
+	 */
+	reload(): boolean {
+		const before = `${this.record.seq}:${this.record.owners.join(",")}`;
+		this.read();
+		return `${this.record.seq}:${this.record.owners.join(",")}` !== before;
 	}
 
 	static at(dataDir: string, clock?: () => number): AccessStore {
