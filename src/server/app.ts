@@ -67,7 +67,8 @@ import { SqlInputError, SqlSandbox } from "./sql.ts";
 import { StaticSite } from "./static.ts";
 import { measureStorage, type StorageReport } from "./storage.ts";
 import type { BackendBus, BackendTopics } from "./topics.ts";
-import { Warehouse } from "./warehouse.ts";
+import { RawLogClosed } from "./raw.ts";
+import { DataFolderLocked, Warehouse } from "./warehouse.ts";
 
 export interface AppOptions {
 	clock?: () => number;
@@ -77,10 +78,24 @@ export interface AppOptions {
 	/** The fetch for outgoing calls: Open Cloud, the alert webhook, Roblox sign-in. */
 	fetch?: typeof fetch;
 	backend?: "bun" | "node";
+	/** The server can't go on (it gave up waiting for the data folder): main.ts shuts down and exits 1. */
+	onFatal?: (error: Error) => void;
+	/** How often a server in handover tries to open DuckDB again, ms (default 1000). */
+	handoverRetryMs?: number;
 }
+
+/**
+ * `ready`: everything runs. `handover`: another process (the previous container of a rolling deploy) still holds the data
+ * folder's DuckDB files: the fleet, error logs, auth and the explorer work, analytics routes answer 503 + Retry-After, and
+ * DuckDB is tried again every second. `failed`: gave up waiting (analytics stays 503; main.ts exits). `stopping`: stop()
+ * ran (every request answers 503 + Retry-After while the running ones finish).
+ */
+export type ServerState = "ready" | "handover" | "failed" | "stopping";
 
 export interface App {
 	readonly port: number;
+	readonly state: ServerState;
+	/** The analytics warehouse; undefined when the part is off, or in handover until DuckDB is open. */
 	readonly warehouse?: Warehouse;
 	readonly fleet?: FleetService;
 	/** The alert webhook sender (always there; it skips alerts while no webhook URL is set). */
@@ -117,6 +132,14 @@ const ERROR_SENDERS_MAX = 50_000;
 const GAME_KEY_MAX_FAILURES = 30;
 /** Test alerts from the Settings page per minute (they reach a third-party webhook). */
 const TEST_ALERTS_PER_MINUTE = 3;
+/** Handover: DuckDB is tried again this often, a warning is logged this often while waiting. */
+const HANDOVER_RETRY_MS = 1000;
+const HANDOVER_WARN_MS = 60_000;
+/** Retry-After (s) on the 503s of a handover or a stop: the next server is up within seconds. */
+const RETRY_AFTER_SECONDS = 5;
+/** stop(): how long requests already running may take to finish, and a DuckDB job before it is interrupted. */
+const STOP_DRAIN_MS = 5000;
+const STOP_JOB_GRACE_MS = 3000;
 
 export async function startApp(config: ServerConfig, options: AppOptions = {}): Promise<App> {
 	const clock = options.clock ?? Date.now;
@@ -128,21 +151,38 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// One bus for the whole process. Stores that answer for their data are awaited subscribers; the rest are queued.
 	const bus: BackendBus = new EventBus<BackendTopics>({ maxQueue: config.busMaxQueue, maxBytes: config.busMaxBytes, log });
 
-	const warehouse = config.parts.has("analytics")
-		? await Warehouse.open({
-				dataDir: config.dataDir,
-				memoryLimit: config.memoryLimit,
-				threads: config.threads,
-				keepDays: () => runtime.get("keepDays"),
-				rawKeepDays: () => runtime.get("rawKeepDays"),
-				compactMb: config.compactMb,
-				queryTimeoutSeconds: config.queryTimeoutSeconds,
-				queryConcurrency: config.queryConcurrency,
-				fsyncMs: config.fsyncMs,
-				clock,
-				log,
-			})
-		: undefined;
+	const openWarehouse = () =>
+		Warehouse.open({
+			dataDir: config.dataDir,
+			memoryLimit: config.memoryLimit,
+			threads: config.threads,
+			keepDays: () => runtime.get("keepDays"),
+			rawKeepDays: () => runtime.get("rawKeepDays"),
+			compactMb: config.compactMb,
+			queryTimeoutSeconds: config.queryTimeoutSeconds,
+			queryConcurrency: config.queryConcurrency,
+			fsyncMs: config.fsyncMs,
+			clock,
+			log,
+		});
+	// DuckDB first. Held by another process (a rolling deploy's previous container): start in handover instead of failing,
+	// and take it over once it lets go (see "Rolling deploys" below). Any other error stops the start as before.
+	let warehouse: Warehouse | undefined;
+	let analytics: "off" | "ready" | "handover" | "failed" = config.parts.has("analytics") ? "ready" : "off";
+	let lockedAtStart: DataFolderLocked | undefined;
+	if (config.parts.has("analytics")) {
+		try {
+			warehouse = await openWarehouse();
+		} catch (error) {
+			if (!(error instanceof DataFolderLocked)) throw error;
+			analytics = "handover";
+			lockedAtStart = error;
+		}
+	}
+	/** The handover's clock (real time, not `clock`: it paces real retries), its retry timer and the attempt running. */
+	const handover: { since: number; lastWarn: number; timer?: ReturnType<typeof setTimeout>; attempt?: Promise<void> } = { since: Date.now(), lastWarn: Date.now() };
+	let stopping = false;
+	const serverState = (): ServerState => (stopping ? "stopping" : analytics === "handover" || analytics === "failed" ? analytics : "ready");
 	// The alert webhook: URL, format and levels are read for every alert, so a saved change applies to the next one.
 	const notifier = createNotifier({
 		url: () => runtime.get("alertWebhookUrl") || undefined,
@@ -168,18 +208,22 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const access = AccessStore.at(config.dataDir, clock);
 
 	// Subscribers ------------------------------------------------------------------------------------------------------
-	// The DuckDB writer: appends the batch to the raw file before the 202 (a 202 means "on disk").
-	if (warehouse) {
+	// The DuckDB writer: appends the batch to the raw file before the 202 (a 202 means "on disk"). Subscribed once the
+	// warehouse is open: at start, or when a handover ends.
+	function attachWarehouse(w: Warehouse): void {
+		warehouse = w;
+		analytics = "ready";
 		bus.subscribe(
 			"duckdb-writer",
 			["events"],
 			async (_topic, m) => {
-				if (m.events.length) await warehouse.raw.append("events", m.events.map((r) => `${JSON.stringify({ ...r, rt: m.rt })}\n`).join(""));
-				if (m.recordings.length) await warehouse.raw.append("recordings", m.recordings.map((r) => `${JSON.stringify({ ...r, rt: m.rt })}\n`).join(""));
+				if (m.events.length) await w.raw.append("events", m.events.map((r) => `${JSON.stringify({ ...r, rt: m.rt })}\n`).join(""));
+				if (m.recordings.length) await w.raw.append("recordings", m.recordings.map((r) => `${JSON.stringify({ ...r, rt: m.rt })}\n`).join(""));
 			},
 			{ mode: "await" },
 		);
 	}
+	if (warehouse) attachWarehouse(warehouse);
 	if (fleet) bus.subscribe("fleet-store", ["heartbeat", "deploy"], (_topic, m) => fleet.apply(m), { mode: "await" });
 	bus.subscribe("error-store", ["error"], async (_topic, m) => void (await errors.record(m, { ip: m.ip ?? "" })), { mode: "await" });
 	// The webhook is slow and remote: queued, so a stuck Discord never holds a heartbeat up. Always subscribed: the
@@ -257,12 +301,31 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 	}
 
+	// Analytics availability ----------------------------------------------------------------------------------------------
+
+	const analyticsOff = () => json(404, { error: "the analytics part is off on this server" });
+	/** 503 + Retry-After while DuckDB isn't open: a handover (the previous server still holds it), or a failed start. */
+	function analyticsUnavailable(): Response {
+		if (analytics === "failed") return json(503, { error: "analytics is unavailable: the server could not open its database (see the server log)" }, { "retry-after": "60" });
+		return json(503, { error: "analytics is starting (deploy handover): try again in a few seconds" }, { "retry-after": String(RETRY_AFTER_SECONDS) });
+	}
+	/** The open warehouse, or the answer: 404 when the analytics part is off, 503 while DuckDB isn't open. */
+	function analyticsOr(): Warehouse | Response {
+		if (!config.parts.has("analytics")) return analyticsOff();
+		return warehouse ?? analyticsUnavailable();
+	}
+	/** Every request once stop() ran (the senders retry; the next server takes them). */
+	const restarting = () => json(503, { error: "the server is restarting: try again in a few seconds" }, { "retry-after": String(RETRY_AFTER_SECONDS) });
+
 	// Game routes -------------------------------------------------------------------------------------------------------
 
 	async function ingest(req: Request, ip: string): Promise<Response> {
-		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		if (!config.parts.has("analytics")) return analyticsOff();
 		if (!auth.hasGameKey(req)) return badGameKey(req, ip, "ingest");
 		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		// In a handover the batch isn't read: the sender keeps it and sends it again (analytics: backoff from 5 s).
+		const warehouse = analyticsOr();
+		if (warehouse instanceof Response) return warehouse;
 		const read = await readJsonBody(req, config.maxBodyBytes, config.maxInflateBytes);
 		if (read instanceof Response) return read;
 		const parsed = read.value;
@@ -280,7 +343,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const known = who.rows.filter((r) => !warehouse.isErased(r.pid));
 		if (known.length) await identities.upsert(known);
 		// The writer (awaited) puts the rows in the raw file; the live view and others get the same message.
-		await bus.publish("events", { events: batch.events, recordings: batch.recordings, rejected: batch.rejected, rt: clock() }, read.bytes);
+		try {
+			await bus.publish("events", { events: batch.events, recordings: batch.recordings, rejected: batch.rejected, rt: clock() }, read.bytes);
+		} catch (error) {
+			// Stopping: the raw files are closed (the next server owns them); the sender sends the batch again.
+			if (error instanceof RawLogClosed) return restarting();
+			throw error;
+		}
 		return json(202, {
 			accepted: batch.events.length + batch.recordings.length,
 			rejected: batch.rejected,
@@ -346,6 +415,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	async function postIdentity(req: Request, ip: string): Promise<Response> {
 		if (!auth.hasGameKey(req)) return badGameKey(req, ip, "identity");
 		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		// The erased list lives in DuckDB: without it an erased player's link could come back, so this waits for a handover.
+		if (config.parts.has("analytics") && !warehouse) return analyticsUnavailable();
 		const raw = await readCapped(req, 256 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: unknown;
@@ -409,7 +480,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	}
 
 	async function query(req: Request, name: string): Promise<Response> {
-		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		const warehouse = analyticsOr();
+		if (warehouse instanceof Response) return warehouse;
 		if (!isQueryName(name)) return json(404, { error: `unknown query ${JSON.stringify(name)}` });
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
@@ -492,7 +564,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	let sandbox: Promise<SqlSandbox> | undefined;
 
 	async function adhocSql(req: Request): Promise<Response> {
-		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		const warehouse = analyticsOr();
+		if (warehouse instanceof Response) return warehouse;
 		if (!config.sql) return json(404, { error: "ad-hoc SQL is off on this server (TYPETORCH_SQL=0)" });
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
@@ -530,7 +603,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	}
 
 	async function rollups(url: URL, kind: string): Promise<Response> {
-		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		const warehouse = analyticsOr();
+		if (warehouse instanceof Response) return warehouse;
 		const q = url.searchParams;
 		const limit = Math.min(10_000, Math.max(1, Number(q.get("limit") ?? 1000) || 1000));
 		const pid = q.get("pid");
@@ -555,7 +629,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	/** POST /v1/erasure: the Roblox webhook (signed), or the admin token / an admin session erasing by pid. */
 	async function erasure(req: Request, ip: string): Promise<Response> {
-		if (!warehouse) return json(404, { error: "the analytics part is off on this server" });
+		if (!config.parts.has("analytics")) return analyticsOff();
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		const text = Buffer.from(raw).toString("utf8");
@@ -571,13 +645,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const problem = cookieMutationProblem(req, proxyOpts);
 				if (problem) return json(403, { error: problem });
 			}
+			const w = analyticsOr();
+			if (w instanceof Response) return w;
 			const b = body as { pid?: unknown; pids?: unknown };
 			const pids = (Array.isArray(b.pids) ? b.pids : [b.pid]).filter((p): p is string => typeof p === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(p));
 			if (!pids.length) return json(400, { error: "give pid or pids" });
-			const { liveRows } = await warehouse.erase(pids);
+			const { liveRows } = await w.erase(pids);
 			await identities.deletePids(pids);
-			void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
-			logErasure(warehouse.layout.erasure, { source: "admin", pids: pids.length, liveRows });
+			void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
+			logErasure(w.layout.erasure, { source: "admin", pids: pids.length, liveRows });
 			return json(200, { erased: pids.length, liveRows, files: "rewriting in the background" });
 		}
 		if (!config.webhookSecret) return json(401, { error: "erasure webhook secret not configured" });
@@ -586,8 +662,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const request = parseErasureBody(body);
 		if (request.eventType === "SampleNotification") return json(200, { ok: true, sample: true });
 		if (request.eventType !== "RightToErasureRequest") return json(200, { ok: true, ignored: request.eventType });
+		// A handover: 503, and Roblox sends the notification again.
+		const w = analyticsOr();
+		if (w instanceof Response) return w;
 		if (config.universeId && request.gameIds.length && !request.gameIds.includes(config.universeId)) {
-			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "another game" });
+			logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "another game" });
 			return json(200, { ok: true, ignored: "another game" });
 		}
 		if (!request.userId) return json(400, { error: "no UserId in the payload" });
@@ -599,24 +678,24 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (linked && !pids.includes(linked)) pids.push(linked);
 			} catch (error) {
 				if (!pids.length) {
-					logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: `lookup failed: ${(error as Error).message.slice(0, 200)}` });
+					logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: `lookup failed: ${(error as Error).message.slice(0, 200)}` });
 					return json(502, { error: "pid lookup failed; Roblox will retry" });
 				}
 			}
 		} else if (!pids.length) {
-			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no identity row and no Open Cloud key for the DataStore lookup" });
+			logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no identity row and no Open Cloud key for the DataStore lookup" });
 			return json(202, { ok: true, pending: "no pid known for this UserId: configure OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID, or erase by pid with the admin token" });
 		}
 		if (!pids.length) {
-			logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no pid link (already anonymous)" });
+			logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no pid link (already anonymous)" });
 			return json(200, { ok: true, erased: 0 });
 		}
-		const { liveRows } = await warehouse.erase(pids);
+		const { liveRows } = await w.erase(pids);
 		// The rows first, then the link between the UserId and its pids.
 		await identities.deleteUid(request.userId);
 		await identities.deletePids(pids);
-		void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
-		logErasure(warehouse.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "erased", pids: pids.length, liveRows });
+		void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
+		logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "erased", pids: pids.length, liveRows });
 		return json(200, { ok: true, erased: pids.length });
 	}
 
@@ -636,6 +715,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const memory = process.memoryUsage();
 		const out: Record<string, unknown> = {
 			ok: true,
+			// ready | handover | failed | stopping (ServerState): only the admin view says it.
+			state: serverState(),
 			version: PACKAGE.version,
 			runtime: runtimeName(),
 			uptimeSeconds: Math.round(process.uptime()),
@@ -650,6 +731,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				pendingBytes: warehouse.raw.pendingBytes(),
 				live: await warehouse.liveRows(),
 			};
+		} else if (analytics === "handover" || analytics === "failed") {
+			out.analytics = { state: analytics, waitingSeconds: Math.round((Date.now() - handover.since) / 1000), giveUpSeconds: config.handoverSeconds };
 		}
 		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier.configured ? { webhook: notifier.stats } : {}) };
 		// The bus: per subscriber what was handled, what is waiting and what was dropped (full queue).
@@ -968,7 +1051,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (path === "/v1/settings" && method === "GET") return json(200, liveDials());
 			if (path === "/v1/queries" && method === "GET") return json(200, { queries: describeQueries() });
 			if (path === "/v1/sql") return method === "POST" ? adhocSql(req) : json(405, { error: "POST only" });
-			if (path === "/v1/storage" && method === "GET") return json(200, await storage());
+			if (path === "/v1/storage" && method === "GET") {
+				if (config.parts.has("analytics") && !warehouse) return analyticsUnavailable();
+				return json(200, await storage());
+			}
 			if (path === "/v1/identity" && method === "GET") return getIdentity(url);
 			if (path === "/v1/identity/backfill") return method === "POST" ? backfill(req) : json(405, { error: "POST only" });
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays") });
@@ -999,6 +1085,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return notFound();
 	}
 
+	/** Requests running now (a stream counts until its Response is returned): stop() lets them finish. */
+	let inflight = 0;
+
 	async function handle(req: Request, peer = ""): Promise<Response> {
 		const original = new URL(req.url);
 		const ip = clientIp(req, peer, proxyTrust);
@@ -1011,11 +1100,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			url.pathname = path;
 		}
 		let response: Response;
-		try {
-			response = await route(req, url, path, ip);
-		} catch (error) {
-			log(`${req.method} ${path} failed: ${((error as Error).message ?? String(error)).slice(0, 300)}`);
-			response = json(500, { error: "internal error" });
+		if (stopping) {
+			// Stopping: nothing new starts (the next server takes it; the senders retry on 503).
+			response = restarting();
+		} else {
+			inflight++;
+			try {
+				response = await route(req, url, path, ip);
+			} catch (error) {
+				log(`${req.method} ${path} failed: ${((error as Error).message ?? String(error)).slice(0, 300)}`);
+				response = json(500, { error: "internal error" });
+			} finally {
+				inflight--;
+			}
 		}
 		const html = (response.headers.get("content-type") ?? "").startsWith("text/html");
 		return withSecurityHeaders(response, { https: isHttps(req, proxyOpts), csp: html ? EXPLORER_CSP : API_CSP });
@@ -1037,43 +1134,138 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// Jobs: the loader every loadSeconds, the nightly export when the UTC day changes (and every 6 h for late rows), the
 	// fleet sweep every 10 s, the erasure rewrite after each erasure and at start, the error-log prune hourly.
 	const timers: ReturnType<typeof setInterval>[] = [];
-	let lastNightlyDay = -1;
-	let lastNightlyAt = 0;
+	/** The warehouse's jobs: at start, or when a handover ends. */
+	function startWarehouseJobs(w: Warehouse): void {
+		let loading = false;
+		let lastNightlyDay = -1;
+		let lastNightlyAt = 0;
+		const jobs = [
+			setInterval(() => {
+				if (loading) return;
+				loading = true;
+				w.load()
+					.catch((e) => log(`loader failed: ${(e as Error).message}`))
+					.finally(() => (loading = false));
+			}, config.loadSeconds * 1000),
+		];
+		const nightlyCheck = () => {
+			const now = clock();
+			const day = Math.floor(now / DAY_MS);
+			if (day === lastNightlyDay && now - lastNightlyAt < 6 * 3_600_000) return;
+			// Five minutes past midnight, so the day's last batches are in.
+			if (now - day * DAY_MS < 5 * 60_000 && lastNightlyDay !== -1) return;
+			lastNightlyDay = day;
+			lastNightlyAt = now;
+			w.nightly().catch((e) => log(`nightly failed: ${(e as Error).message}`));
+		};
+		jobs.push(setInterval(nightlyCheck, 60_000));
+		for (const t of jobs) t.unref?.();
+		timers.push(...jobs);
+		nightlyCheck();
+		void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
+	}
 	if (!options.manualJobs) {
-		if (warehouse) {
-			let loading = false;
-			timers.push(
-				setInterval(() => {
-					if (loading) return;
-					loading = true;
-					warehouse
-						.load()
-						.catch((e) => log(`loader failed: ${(e as Error).message}`))
-						.finally(() => (loading = false));
-				}, config.loadSeconds * 1000),
-			);
-			const nightlyCheck = () => {
-				const now = clock();
-				const day = Math.floor(now / DAY_MS);
-				if (day === lastNightlyDay && now - lastNightlyAt < 6 * 3_600_000) return;
-				// Five minutes past midnight, so the day's last batches are in.
-				if (now - day * DAY_MS < 5 * 60_000 && lastNightlyDay !== -1) return;
-				lastNightlyDay = day;
-				lastNightlyAt = now;
-				warehouse.nightly().catch((e) => log(`nightly failed: ${(e as Error).message}`));
-			};
-			timers.push(setInterval(nightlyCheck, 60_000));
-			nightlyCheck();
-			void warehouse.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
+		if (warehouse) startWarehouseJobs(warehouse);
+		const jobs = [setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000)];
+		if (fleet) jobs.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
+		for (const t of jobs) t.unref?.();
+		timers.push(...jobs);
+	}
+
+	// Rolling deploys ---------------------------------------------------------------------------------------------------
+	// Coolify starts the new container while the old one still runs, both on the same volume, and DuckDB allows one process
+	// per file. So a server that finds the files held starts anyway (handover: /healthz is 200, so the rolling update goes
+	// on and stops the old container; fleet, error logs and auth work; analytics answers 503 + Retry-After) and opens
+	// DuckDB as soon as the old one has let go (it closes on SIGTERM within seconds), then runs as usual.
+	const retryMs = options.handoverRetryMs ?? HANDOVER_RETRY_MS;
+	const scheduleHandover = () => {
+		if (stopping) return;
+		handover.timer = setTimeout(() => {
+			handover.timer = undefined;
+			handover.attempt = tryHandover()
+				.catch((error) => giveUp(error instanceof Error ? error : new Error(String(error))))
+				.finally(() => (handover.attempt = undefined));
+		}, retryMs);
+	};
+	const giveUp = (error: Error) => {
+		analytics = "failed";
+		log(`error: ${error.message}`);
+		options.onFatal?.(error);
+	};
+	async function tryHandover(): Promise<void> {
+		let opened: Warehouse;
+		try {
+			opened = await openWarehouse();
+		} catch (error) {
+			if (stopping) return;
+			const waited = Date.now() - handover.since;
+			if (!(error instanceof DataFolderLocked)) return giveUp(new Error(`analytics could not open its data folder: ${((error as Error).message ?? String(error)).slice(0, 300)}`));
+			if (waited >= config.handoverSeconds * 1000) {
+				return giveUp(
+					new Error(
+						`gave up after ${Math.round(waited / 1000)} s waiting for ${error.file}: another process still holds it. Only one server may use a data folder: stop the other container or process using ${config.dataDir}, then restart this one (TYPETORCH_HANDOVER_SECONDS sets the wait)`,
+					),
+				);
+			}
+			if (Date.now() - handover.lastWarn >= HANDOVER_WARN_MS) {
+				handover.lastWarn = Date.now();
+				log(`warning: handover: still waiting for ${error.file} after ${Math.round(waited / 1000)} s (another process holds it); giving up after ${config.handoverSeconds} s`);
+			}
+			scheduleHandover();
+			return;
 		}
-		if (fleet) timers.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
-		timers.push(setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000));
-		for (const t of timers) t.unref?.();
+		if (stopping) {
+			await opened.close();
+			return;
+		}
+		attachWarehouse(opened);
+		if (!options.manualJobs) startWarehouseJobs(opened);
+		log(`handover: DuckDB is open after ${((Date.now() - handover.since) / 1000).toFixed(1)} s; analytics is on`);
+	}
+	if (lockedAtStart) {
+		// DuckDB's own words name the other process where it can ("Conflicting lock is held in ... (PID n)").
+		const detail = lockedAtStart.detail.replace(/\s+/g, " ").slice(0, 300);
+		log(
+			`handover: ${lockedAtStart.file} is held by another process (the previous container of a rolling deploy?): the fleet, error logs and sign-in work now, analytics answers 503 until it lets go; trying every ${retryMs / 1000} s for up to ${config.handoverSeconds} s (${detail})`,
+		);
+		scheduleHandover();
+	}
+
+	let stopped: Promise<void> | undefined;
+	/**
+	 * Stops promptly, so a deploy hands the data folder over within seconds: new requests get 503 + Retry-After, the
+	 * running ones get up to STOP_DRAIN_MS, then the server closes; queued subscribers get a moment; the raw files are
+	 * synced (the next server loads them), a running DuckDB job is interrupted after STOP_JOB_GRACE_MS, DuckDB is
+	 * checkpointed and closed (its file locks go with it), then SQLite (WAL checkpoint).
+	 */
+	async function stopNow(): Promise<void> {
+		stopping = true;
+		if (handover.timer) clearTimeout(handover.timer);
+		for (const t of timers) clearInterval(t);
+		live.stop();
+		const drainUntil = Date.now() + STOP_DRAIN_MS;
+		while (inflight > 0 && Date.now() < drainUntil) await new Promise((done) => setTimeout(done, 20));
+		await served.stop();
+		// A handover attempt that is opening DuckDB right now closes what it opened (it sees `stopping`).
+		await handover.attempt;
+		// Queued subscribers get a moment to finish (a stuck webhook must not hold the shutdown).
+		await bus.idle(2000);
+		if (sandbox) await (await sandbox.catch(() => undefined))?.close();
+		if (warehouse) await warehouse.close(STOP_JOB_GRACE_MS);
+		// Alerts already handed to the webhook (each send has its own 5 s timeout).
+		await Promise.race([notifier.flush(), new Promise((done) => setTimeout(done, 2000))]);
+		if (fleet) await fleet.close();
+		else await sqlite.close();
 	}
 
 	return {
 		port: served.port,
-		...(warehouse ? { warehouse } : {}),
+		get state() {
+			return serverState();
+		},
+		get warehouse() {
+			return warehouse;
+		},
 		...(fleet ? { fleet } : {}),
 		notifier,
 		settings: runtime,
@@ -1085,20 +1277,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		handle,
 		load: () => (warehouse ? warehouse.load() : Promise.resolve({ files: 0, rows: 0 })),
 		nightly: () => (warehouse ? warehouse.nightly() : Promise.resolve({ days: [], pruned: 0, compacted: false })),
-		async stop() {
-			for (const t of timers) clearInterval(t);
-			live.stop();
-			await served.stop();
-			// Queued subscribers get a moment to finish (a stuck webhook must not hold the shutdown).
-			await bus.idle(3000);
-			if (sandbox) await (await sandbox.catch(() => undefined))?.close();
-			if (warehouse) {
-				await warehouse.load().catch(() => {});
-				await warehouse.close();
-			}
-			await notifier.flush();
-			if (fleet) await fleet.close();
-			else await sqlite.close();
+		stop() {
+			stopped ??= stopNow();
+			return stopped;
 		},
 	};
 }

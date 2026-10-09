@@ -66,6 +66,32 @@ export class RwLock {
 	}
 }
 
+/**
+ * Another process holds the data folder's DuckDB files (the previous container during a rolling deploy, or a second
+ * server on the same folder). DuckDB allows one writing process per file; the caller waits and tries again.
+ */
+export class DataFolderLocked extends Error {
+	override name = "DataFolderLocked";
+	constructor(
+		/** The file that could not be locked. */
+		readonly file: string,
+		/** DuckDB's message (names the other process where it can). */
+		readonly detail: string,
+	) {
+		super(`${file} is held by another process`);
+	}
+}
+
+/**
+ * DuckDB's "someone else has this file" errors: "Could not set lock on file ... Conflicting lock is held in ..." (Linux,
+ * macOS), "Cannot open file ...: The process cannot access the file because it is being used by another process. File is
+ * already open in ..." (Windows).
+ */
+export function isLockConflict(error: unknown): boolean {
+	const message = (error as Error | undefined)?.message ?? String(error);
+	return /Could not set lock on file|Conflicting lock is held|being used by another process|File is already open in/i.test(message);
+}
+
 /** Runs jobs one at a time. */
 export class Mutex {
 	private chain: Promise<unknown> = Promise.resolve();
@@ -111,7 +137,10 @@ export class Warehouse {
 	private readonly lock = new RwLock();
 	private readonly jobs = new Mutex();
 	private readonly free: DuckDBConnection[] = [];
+	/** Every read connection, free or running a query (close() interrupts and closes them all). */
+	private readonly pool = new Set<DuckDBConnection>();
 	private readonly waiters: ((c: DuckDBConnection) => void)[] = [];
+	private closing: Promise<void> | undefined;
 	private erased = new Set<string>();
 	/** Bumped whenever the live tables change (load, export, erasure): SQL snapshots older than it are stale. */
 	private liveVersion = 0;
@@ -131,6 +160,10 @@ export class Warehouse {
 		this.raw = new RawLog(this.layout.rawIncoming, options.fsyncMs, this.clock);
 	}
 
+	/**
+	 * Opens the data folder. Throws DataFolderLocked when another process holds it (nothing in the folder is touched then:
+	 * the raw files stay the other process's until it lets go).
+	 */
 	static async open(options: WarehouseOptions): Promise<Warehouse> {
 		const layout = dataLayout(options.dataDir);
 		for (const dir of [layout.root, layout.events, layout.recordings, layout.rollups, layout.rawIncoming, layout.rawArchive, layout.tmp, layout.erasure]) mkdirSync(dir, { recursive: true });
@@ -140,23 +173,60 @@ export class Warehouse {
 			temp_directory: layout.tmp.replace(/\\/g, "/"),
 			preserve_insertion_order: "false",
 		});
-		const writer = await instance.connect();
-		const warehouse = new Warehouse(options, instance, writer);
-		await warehouse.attachLive();
-		await warehouse.recover();
-		return warehouse;
+		let writer: DuckDBConnection | undefined;
+		let warehouse: Warehouse | undefined;
+		try {
+			writer = await instance.connect();
+			// The owner lock first: a server keeps it attached for its whole run, so no other process can slip in while
+			// compaction has live.duckdb detached. Then live.duckdb (a server from before the owner lock holds only that).
+			for (const [file, alias] of [
+				[layout.lock, "folder_lock"],
+				[layout.live, "live"],
+			] as const) {
+				try {
+					await writer.run(`ATTACH ${pathLit(file)} AS ${alias}`);
+				} catch (error) {
+					if (isLockConflict(error)) throw new DataFolderLocked(file, (error as Error).message);
+					throw error;
+				}
+			}
+			// Only now, with the folder ours, are the raw files touched (RawLog makes the last run's open files ready).
+			warehouse = new Warehouse(options, instance, writer);
+			await warehouse.prepareLive();
+			await warehouse.recover();
+			return warehouse;
+		} catch (error) {
+			// Let go of everything, so a retry (or another process) can open the folder.
+			if (warehouse) {
+				await warehouse.raw.close().catch(() => {});
+				warehouse.closeHandles();
+			} else {
+				try {
+					writer?.closeSync();
+				} catch {}
+				instance.closeSync();
+			}
+			throw error;
+		}
 	}
 
-	private async attachLive(): Promise<void> {
-		await this.writer.run(`ATTACH ${pathLit(this.layout.live)} AS live`);
+	/** The live tables (live.duckdb is attached), the erased list and a fresh pool of read connections. */
+	private async prepareLive(): Promise<void> {
 		for (const table of TABLES) await this.writer.run(createTableSql(`live.${table}`, table));
 		await this.writer.run("CREATE TABLE IF NOT EXISTS live.loaded_files (name VARCHAR PRIMARY KEY, loaded_at BIGINT)");
 		await this.writer.run("CREATE TABLE IF NOT EXISTS live.erased (pid VARCHAR PRIMARY KEY, erased_at BIGINT, rewritten BOOLEAN)");
 		await this.writer.run("CREATE TABLE IF NOT EXISTS live.exports (target VARCHAR PRIMARY KEY, tmp VARCHAR)");
 		this.erased = new Set((await readRows(this.writer, "SELECT pid FROM live.erased")).map((r) => String(r.pid)));
 		this.stats.erasedPids = this.erased.size;
-		for (const c of this.free.splice(0)) c.closeSync();
-		for (let i = 0; i < this.options.queryConcurrency; i++) this.free.push(await this.instance.connect());
+		// Every read connection is free here (open, or compaction under the write lock).
+		for (const c of this.pool) c.closeSync();
+		this.pool.clear();
+		this.free.length = 0;
+		for (let i = 0; i < this.options.queryConcurrency; i++) {
+			const c = await this.instance.connect();
+			this.pool.add(c);
+			this.free.push(c);
+		}
 	}
 
 	/** Finishes what a crash interrupted: half-done exports, and raw files loaded but not archived. */
@@ -415,7 +485,10 @@ export class Warehouse {
 		return removed;
 	}
 
-	/** Rewrites live.duckdb into a fresh file (DuckDB doesn't reliably give space back after deletes). */
+	/**
+	 * Rewrites live.duckdb into a fresh file (DuckDB doesn't reliably give space back after deletes). live.duckdb is
+	 * detached for a moment; the owner lock (lock.duckdb) stays attached, so no other process can take the folder then.
+	 */
 	compact(): Promise<void> {
 		return this.lock.write(async () => {
 			const next = join(this.layout.root, "live-next.duckdb");
@@ -432,7 +505,8 @@ export class Warehouse {
 			rmSync(`${this.layout.live}.wal`, { force: true });
 			renameSync(next, this.layout.live);
 			rmSync(old, { force: true });
-			await this.attachLive();
+			await this.writer.run(`ATTACH ${pathLit(this.layout.live)} AS live`);
+			await this.prepareLive();
 			this.stats.compactions++;
 		});
 	}
@@ -605,14 +679,64 @@ export class Warehouse {
 		});
 	}
 
-	async close(): Promise<void> {
+	/**
+	 * Closes for good, promptly (a deploy hands the folder to the next server): the raw files are synced and made ready
+	 * (the next start loads them), a running job gets `graceMs` and is then interrupted (every job is safe to cut: the next
+	 * start redoes or finishes it, see recover()), running queries are interrupted, then CHECKPOINT and close, which lets
+	 * go of live.duckdb and the owner lock. A second call waits for the first.
+	 */
+	close(graceMs = 3000): Promise<void> {
+		this.closing ??= this.closeNow(graceMs);
+		return this.closing;
+	}
+
+	private async closeNow(graceMs: number): Promise<void> {
 		await this.raw.close();
-		await this.jobs.run(async () => {});
-		for (const c of this.free.splice(0)) c.closeSync();
+		const jobDone = this.jobs.run(async () => {});
+		if (!(await settlesWithin(jobDone, graceMs))) {
+			this.log(`closing: interrupting the running job after ${graceMs / 1000} s (the next start redoes or finishes it)`);
+			// A job runs many statements (and some file work between them): interrupt until it gives up, for a while.
+			const deadline = Date.now() + graceMs;
+			for (;;) {
+				this.writer.interrupt();
+				if ((await settlesWithin(jobDone, 100)) || Date.now() >= deadline) break;
+			}
+		}
+		// Queries in flight: interrupted, then waited for (the write side of the lock waits for every reader).
+		for (const c of this.pool) c.interrupt();
+		await settlesWithin(this.lock.write(async () => {}), graceMs);
 		await this.writer.run("CHECKPOINT").catch(() => {});
-		this.writer.closeSync();
+		this.closeHandles();
+	}
+
+	/** Closes every DuckDB handle (the files' locks go with the instance). */
+	private closeHandles(): void {
+		for (const c of this.pool) {
+			try {
+				c.closeSync();
+			} catch {}
+		}
+		this.pool.clear();
+		this.free.length = 0;
+		try {
+			this.writer.closeSync();
+		} catch {}
 		this.instance.closeSync();
 	}
+}
+
+/** Whether `promise` settles (either way) within `ms`. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const settled = await Promise.race([
+		promise.then(
+			() => true,
+			() => true,
+		),
+		new Promise<boolean>((done) => (timer = setTimeout(() => done(false), ms))),
+	]);
+	clearTimeout(timer);
+	return settled;
 }
 
 const PID_FIELD = /"pid":"([^"\\]*)"/;

@@ -2,6 +2,7 @@
  * The DuckDB server's data folder, shared by the server and by a local read-only store over a copy of it:
  *
  *   data/live.duckdb                    today's rows (tables events, recordings, loaded_files), small
+ *   data/lock.duckdb                    empty; held (attached) by the one server that owns this folder, for its whole run
  *   data/events/YYYY-MM-DD.parquet      one file per finished day (zstd), written each night
  *   data/recordings/YYYY-MM-DD.parquet
  *   data/rollups/daily/YYYY-MM-DD.parquet, data/rollups/edges/YYYY-MM-DD.parquet, data/rollups/players.parquet
@@ -19,6 +20,8 @@ import { DAY_MS, lit } from "../sql/dialect.ts";
 export interface DataLayout {
 	root: string;
 	live: string;
+	/** The owner lock: the server keeps it attached while it runs (live.duckdb is detached for a moment by compaction). */
+	lock: string;
 	events: string;
 	recordings: string;
 	rollups: string;
@@ -33,6 +36,7 @@ export function dataLayout(root: string): DataLayout {
 	return {
 		root,
 		live: join(root, "live.duckdb"),
+		lock: join(root, "lock.duckdb"),
 		events: join(root, "events"),
 		recordings: join(root, "recordings"),
 		rollups: join(root, "rollups"),
