@@ -235,7 +235,6 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				log,
 			})
 		: undefined;
-	if (waker) log(waker.describe());
 
 	// Subscribers ------------------------------------------------------------------------------------------------------
 	// The DuckDB writer: appends the batch to the raw file before the 202 (a 202 means "on disk"). Subscribed once the
@@ -1323,6 +1322,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		);
 		scheduleHandover();
 	}
+	// Plans/25 "Instant wake": one line at the start saying whether it is on (names only, never the key).
+	if (waker) log(waker.describe());
 
 	let stopped: Promise<void> | undefined;
 	/**
