@@ -581,6 +581,9 @@ function budgetOf(text: string | null | undefined): Record<string, unknown> | nu
 	}
 }
 
+/** Plans/25: what the server page shows for a JobId of any age. */
+export type ServerState = "live" | "closed" | "lost" | "unknown";
+
 interface AlertRow {
 	id: number;
 	level: AlertLevel;
@@ -1025,6 +1028,15 @@ export class FleetService {
 			[job, from],
 		);
 		return { points: rows.map((r) => ({ t: r.t, tps: r.tps, tpsMin: r.tps_min, physFps: r.phys_fps, memMb: r.mem_mb, luaMb: r.lua_mb, players: r.players })) };
+	}
+
+	/** Plans/25 (the server page): one server by JobId, whatever its age (rows go a day after a server is gone), and its state. */
+	async server(job: string): Promise<{ server: (ServerInfo & { closedAt: string | null; lostAt: string | null }) | null; state: ServerState }> {
+		const now = this.clock();
+		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
+		if (!row) return { server: null, state: "unknown" };
+		const state: ServerState = row.closed_at !== null ? "closed" : row.lost_at !== null || now - row.last_seen > LOST_AFTER_MS ? "lost" : "live";
+		return { server: { ...serverInfo(row, now), closedAt: iso(row.closed_at), lostAt: iso(row.lost_at) }, state };
 	}
 
 	async reports(options: { seq?: number; artifact?: string; latest?: boolean; branch?: string } = {}): Promise<FleetReport> {

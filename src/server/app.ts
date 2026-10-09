@@ -20,6 +20,9 @@
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
  *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
+ *   GET  /v1/fleet/servers/<job>;  POST .../watch | .../commands;  GET .../commands/<id>;  GET /v1/fleet/debug/audit
+ *        remote debug (plans/25, fleet/remote-debug-http.ts; the game side: GET /v1/fleet/commands, POST /v1/fleet/results
+ *        with the API key)
  *   GET  /v1/access, PUT /v1/access { seq, owners } (admin token only): the owners who may sign in with Roblox
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
  *   GET  /v1/admin/settings         runtime settings (server/runtime-settings.ts): values, sources, bounds, audit; secrets as set/not set
@@ -50,6 +53,8 @@ import { IdentityStore, parseIdentities, parseUid, PID_PATTERN } from "../fleet/
 import { FLEET_LIMITS, handleFleet, NewJobLimiter } from "../fleet/http.ts";
 import { createNotifier, type Notifier } from "../fleet/notify.ts";
 import { FleetService, type Alert } from "../fleet/service.ts";
+import { RemoteDebugHub, type Caller } from "../fleet/remote-debug.ts";
+import { handleRemoteDebug, isRemoteDebugPath } from "../fleet/remote-debug-http.ts";
 import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
 import { runtimeName, serve, type Served } from "../runtime.ts";
 import { validateSettings } from "../settings.ts";
@@ -94,6 +99,8 @@ export interface App {
 	readonly errors: ErrorStore;
 	readonly access: AccessStore;
 	readonly live: LiveHub;
+	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
+	readonly remoteDebug?: RemoteDebugHub;
 	/** Explorer sessions open right now. */
 	sessionCount(): number;
 	handle(req: Request, ip?: string): Promise<Response>;
@@ -171,6 +178,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	});
 	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
+	// Plans/25: remote debug. Answers stay in this process's memory; only the audit (no answers) goes to disk.
+	const remoteDebug = fleet ? new RemoteDebugHub({ clock, log, auditDir: join(config.dataDir, "audit") }) : undefined;
 
 	// Subscribers ------------------------------------------------------------------------------------------------------
 	// The DuckDB writer: appends the batch to the raw file before the 202 (a 202 means "on disk").
@@ -227,6 +236,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const profileLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Roblox names and avatars for the player detail: fixed Roblox hosts, cached in memory, capped (server/roblox-profiles.ts).
 	const robloxProfiles = new RobloxProfiles({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
+	// Plans/25 remote debug: the kernel's polls and result posts per JobId, the explorer's commands and watches.
+	const debugLimiters = {
+		poll: new RateLimiter(90, clock),
+		results: new RateLimiter(120, clock),
+		userCommands: new RateLimiter(30, clock),
+		jobCommands: new RateLimiter(60, clock),
+		watches: new RateLimiter(30, clock),
+	};
 	const keepOpen = new WeakMap<Request, () => void>();
 
 	let settingsCache: { mtime: number; value: Record<string, unknown> } | undefined;
@@ -679,6 +696,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			};
 		}
 		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier.configured ? { webhook: notifier.stats } : {}) };
+		// Plans/25: counters and what is held in memory (never an answer).
+		if (remoteDebug) out.remoteDebug = { ...remoteDebug.stats, ...remoteDebug.memory };
 		// The bus: per subscriber what was handled, what is waiting and what was dropped (full queue).
 		out.bus = bus.stats();
 		out.live = live.stats;
@@ -956,6 +975,26 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (path === "/v1/ingest") return method === "POST" ? ingest(req, ip) : json(405, { error: "POST only" });
 		if (path === "/v1/errors" && method === "POST") return postErrors(req, ip);
 		if (path === "/v1/identity" && method === "POST") return postIdentity(req, ip);
+		if (path.startsWith("/v1/fleet/") && isRemoteDebugPath(path)) {
+			if (!fleet || !remoteDebug) return json(404, { error: "the fleet part is off on this server" });
+			return handleRemoteDebug(req, url, path, {
+				hub: remoteDebug,
+				fleet,
+				isGame: (r) => auth.hasGameKey(r),
+				badGameKey: (r) => badGameKey(r, ip, "remote debug"),
+				admin: (r) => {
+					const gate = adminGate(r, ip);
+					if ("response" in gate) return gate;
+					const user = gate.principal.user;
+					const caller: Caller = user.kind === "roblox" ? { kind: "roblox", userId: user.userId } : { kind: "token" };
+					return { caller };
+				},
+				limiters: debugLimiters,
+				readCapped,
+				keepOpen: (r) => keepOpen.get(r)?.(),
+				ip,
+			});
+		}
 		if (path.startsWith("/v1/fleet/")) {
 			if (!fleet) return json(404, { error: "the fleet part is off on this server" });
 			const gameWrite = method === "POST" && FLEET_GAME_ROUTES.has(path.slice("/v1/fleet/".length));
@@ -981,6 +1020,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 						newJobs: newFleetJobs,
 						keepOpen: (r) => keepOpen.get(r)?.(),
 						accept: (topic, message) => bus.publish(topic, message as never),
+						// Plans/25: a watched JobId's heartbeat reply wakes its kernel's debug poll.
+						heartbeatReply: (job) => remoteDebug?.heartbeatReply(job),
 					},
 					ip,
 				)) ?? json(404, { error: "not found" })
@@ -1106,6 +1147,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		...(fleet ? { fleet } : {}),
 		notifier,
 		settings: runtime,
+		...(remoteDebug ? { remoteDebug } : {}),
 		bus,
 		errors,
 		access,
@@ -1117,6 +1159,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		async stop() {
 			for (const t of timers) clearInterval(t);
 			live.stop();
+			remoteDebug?.stop();
 			await served.stop();
 			// Queued subscribers get a moment to finish (a stuck webhook must not hold the shutdown).
 			await bus.idle(3000);

@@ -105,6 +105,8 @@ export interface FleetHttpOptions {
 	keepOpen?(req: Request): void;
 	/** Seconds between SSE keep-alive comments (default 15). */
 	pingSeconds?: number;
+	/** Plans/25: extra fields for a heartbeat's 202 reply (`rd: 1` while the explorer watches that JobId). */
+	heartbeatReply?(job: string): Record<string, unknown> | undefined;
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -170,8 +172,12 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 			const header = req.headers.get("x-tt-job");
 			const accept = o.accept ?? ((_topic, message) => o.service.apply(message));
 			// Validated here, committed by whoever subscribes (the fleet store; the others only watch).
-			if (kind === "heartbeat") await accept("heartbeat", { kind: "heartbeat", heartbeat: parseHeartbeat(body, header) });
-			else if (kind === "report") await accept("deploy", { kind: "report", report: parseReport(body) });
+			if (kind === "heartbeat") {
+				const heartbeat = parseHeartbeat(body, header);
+				await accept("heartbeat", { kind: "heartbeat", heartbeat });
+				return json(202, { ok: true, ...(o.heartbeatReply?.(heartbeat.job) ?? {}) });
+			}
+			if (kind === "report") await accept("deploy", { kind: "report", report: parseReport(body) });
 			else if (kind === "closing") await accept("heartbeat", { kind: "closing", ...parseClosing(body, header) });
 			else if (kind === "deploy") await accept("deploy", { kind: "start", deploy: parseDeploy(body) });
 			else if (kind === "mark") await accept("deploy", { kind: "mark", mark: parseMark(body) });
