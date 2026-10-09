@@ -9,11 +9,24 @@ import type { FleetServer } from "./types";
 // Answers ---------------------------------------------------------------------------------------------------------------
 
 export type PerfGroupBy = "none" | "dev" | "input" | "screen" | "branch" | "art";
-export type Percentile = "p50" | "p90" | "p99";
-export const PERCENTILES: Percentile[] = ["p50", "p90", "p99"];
+export type Percentile = "p10" | "p50" | "p90" | "p99";
+export const PERCENTILES: Percentile[] = ["p10", "p50", "p90", "p99"];
 
-/** One metric over a group of samples. p90 / p99 are on the bad side (low for fps and tps, high for mem and ping). */
+/**
+ * The percentile that shows a metric's worst case, the same for every metric: p90 / p99 are on the bad side (fps and TPS: the
+ * 10th and the 1st percentile; memory and ping: the 90th and the 99th), so p99 is the most extreme either way. p10 is the plain
+ * 10th percentile: for fps and TPS the same value as p90 (p99 is below it), for memory and ping the best case.
+ */
+export const WORST_PERCENTILE: Percentile = "p99";
+
+/** A percentile's name for headers and chart titles: "p50", "p99 (worst)". */
+export function percentileName(p: Percentile): string {
+	return p === WORST_PERCENTILE ? `${p} (worst)` : p;
+}
+
+/** One metric over a group of samples. p10 is the plain 10th percentile; p90 / p99 are on the bad side (low for fps and tps, high for mem and ping). */
 export interface PerfStat {
+	p10: number | null;
 	p50: number | null;
 	p90: number | null;
 	p99: number | null;
@@ -142,9 +155,10 @@ export function fmtMetric(key: string, value: number | null | undefined): string
 }
 
 export const PERCENTILE_HELP: Record<Percentile, string> = {
+	p10: "10% of samples are this low or lower (the low end: for fps and TPS the same as p90, for memory and ping the best case)",
 	p50: "the median sample",
 	p90: "90% of samples are this good or better",
-	p99: "99% of samples are this good or better",
+	p99: "99% of samples are this good or better (the worst case)",
 };
 
 // Groups ------------------------------------------------------------------------------------------------------------------

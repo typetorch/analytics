@@ -29,7 +29,9 @@ const H = 3_600_000;
 const T = Date.UTC(2026, 9, 8, 0, 0, 0);
 const ART_OLD = "a1b2c3d-111111";
 const ART_NEW = "e4f5a6b-222222";
-const s = (p50: number, p90: number, p99: number): PerfStat => ({ p50, p90, p99, avg: p50, n: 50 });
+// p10 is the plain 10th percentile; a distinct number here (55% of the median) so the tests can tell the columns apart
+// (for fps and TPS the real p10 equals the bad-side p90).
+const s = (p50: number, p90: number, p99: number, p10 = Math.round(p50 * 0.55)): PerfStat => ({ p10, p50, p90, p99, avg: p50, n: 50 });
 
 function clientResult(by: string): PerfSeriesResult {
 	const metrics = (fps: number) => ({ fps: s(fps, fps - 12, fps - 25), mem: s(1800, 2600, 3100), ping: s(80, 190, 420) });
@@ -183,6 +185,48 @@ describe("Performance page", () => {
 		expect(window?.since).toBeLessThan(window?.until as number);
 	});
 
+	it("p10 next to p50/p90/p99: a column per metric, p99 marked as the worst case, sorted by the raw value", async () => {
+		mockApi();
+		mount();
+		const phone = (await screen.findByText("Phone", { selector: "td" })).closest("tr") as HTMLElement;
+		const table = phone.closest("table") as HTMLElement;
+		expect(within(phone).getByText("17 fps")).toBeTruthy(); // fps p10 of the phone: 55% of 31
+		expect(within(phone).getByText("990 MB")).toBeTruthy(); // memory p10
+		const header = (name: RegExp) => within(table).queryByRole("button", { name });
+		for (const name of [/^Frame rate p10/, /^Frame rate p50/, /^Frame rate p90/, /^Frame rate p99 \(worst\)/, /^Memory p10/, /^Memory p99 \(worst\)/, /^Ping p10/, /^Ping p99 \(worst\)/]) {
+			expect(header(name), String(name)).toBeTruthy();
+		}
+		// p10 is the low end, not the worst case, for any metric.
+		expect(header(/p10 \(worst\)/)).toBeNull();
+		// The raw value sorts it (fps p10: phone 17 < desktop 34); the first click goes high to low.
+		fireEvent.click(within(table).getByRole("button", { name: /^Frame rate p10/ }));
+		await waitFor(() => expect([...table.querySelectorAll("tbody tr")].map((tr) => tr.querySelector("td")?.textContent)).toEqual(["All", "Desktop", "Phone"]));
+		// The server table has it too, under the server memory name.
+		expect(await screen.findByRole("button", { name: /^Server memory p10/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^Server memory p99 \(worst\)/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^Server TPS p10/ })).toBeTruthy();
+	});
+
+	it("the chart toggle has p10; the line's title says which percentile and marks the worst case", async () => {
+		mockApi();
+		mount();
+		await screen.findByText("Phone", { selector: "td" });
+		expect(screen.getAllByText("Frame rate, p50").length).toBe(1);
+		const toggle = screen.getByRole("radiogroup", { name: "Percentile" });
+		expect(within(toggle).getAllByRole("radio").map((r) => r.textContent)).toEqual(["p10", "p50", "p90", "p99"]);
+		fireEvent.click(within(toggle).getByRole("radio", { name: "p10" }));
+		expect(await screen.findByText("Frame rate, p10")).toBeTruthy();
+		expect(screen.getAllByText("Memory, p10").length).toBe(2); // players' devices and servers
+		expect(screen.getByText("Server TPS, p10")).toBeTruthy();
+		expect(screen.queryByText(/\(worst\)/, { selector: "div.text-sm" })).toBeNull();
+		fireEvent.click(within(toggle).getByRole("radio", { name: "p99" }));
+		expect(await screen.findByText("Frame rate, p99 (worst)")).toBeTruthy();
+		expect(screen.getByText("Ping, p99 (worst)")).toBeTruthy();
+		expect(screen.getAllByText("Memory, p99 (worst)").length).toBe(2);
+		expect(screen.getByText("Server TPS, p99 (worst)")).toBeTruthy();
+		expect(screen.getByRole("figure", { name: "Frame rate, p99 (worst) over time" })).toBeTruthy();
+	});
+
 	it("draws a mark on every chart; clicking one filters to its build and offers before vs after", async () => {
 		const { calls } = mockApi();
 		mount();
@@ -209,6 +253,13 @@ describe("Performance page", () => {
 		expect(within(row).getByText("worse")).toBeTruthy();
 		const mem = screen.getByText("Memory p50", { selector: "td" }).closest("tr") as HTMLElement;
 		expect(within(mem).getByText("better")).toBeTruthy();
+		// p10 rows for every metric, p99 marked as the worst case.
+		const p10 = screen.getByText("Frame rate p10", { selector: "td" }).closest("tr") as HTMLElement;
+		expect(within(p10).getByText("33 fps")).toBeTruthy();
+		expect(within(p10).getByText("28 fps")).toBeTruthy();
+		expect(screen.getByText("Memory p99 (worst)", { selector: "td" })).toBeTruthy();
+		expect(screen.getByText("Server memory p99 (worst)", { selector: "td" })).toBeTruthy();
+		expect(screen.queryByText(/p10 \(worst\)/, { selector: "td" })).toBeNull();
 		expect(screen.getByRole("columnheader", { name: /^e4f5a6b-222222 #42/ })).toBeTruthy();
 		// The sample counts stay pinned on top.
 		expect(screen.getByText("Client samples", { selector: "td" }).closest("tr")?.className).toMatch(/font-medium/);
@@ -264,6 +315,17 @@ describe("Performance page", () => {
 		expect(changeOrder({ ...compare, periods: [{ ...newer, seq: null }, { ...older, seq: null }] })).toEqual([1, 0]);
 		expect(changeOrder({ ...compare, mode: "around", periods: [{ ...older, key: "before" }, { ...newer, key: "after" }] })).toEqual([0, 1]);
 		expect(changeOrder({ ...compare, periods: [older] })).toBeNull();
+	});
+
+	it("compare rows: p10 of every metric, in the percentiles' order, p99 named the worst case", () => {
+		const rows = compareRows(compare).rows;
+		expect(rows.filter((r) => r.id.startsWith("client-fps-")).map((r) => r.label)).toEqual(["Frame rate p10", "Frame rate p50", "Frame rate p90", "Frame rate p99 (worst)"]);
+		const p10 = rows.find((r) => r.id === "server-tps-p10");
+		expect(p10?.values).toEqual([33, 29]); // 55% of 60 and of 52
+		// Lower TPS is worse: the change is measured on the p10 values like on the others.
+		expect(p10?.change).toMatchObject({ better: false });
+		expect(rows.find((r) => r.id === "client-mem-p99")?.label).toBe("Memory p99 (worst)");
+		expect(rows).toHaveLength(6 * 4);
 	});
 
 	it("step choices: 2 to 400 steps in the window", () => {

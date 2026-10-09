@@ -1,9 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { bucketText, bucketTimes, delta, fmtDelta, fmtMetric, groupLabel, markDetails, marksIn, markTitle, pivot, rangeMs, seriesOf, timeTick, type DeployMark, type PerfSeriesResult } from "./perf";
+import {
+	bucketText,
+	bucketTimes,
+	delta,
+	fmtDelta,
+	fmtMetric,
+	groupLabel,
+	markDetails,
+	marksIn,
+	markTitle,
+	PERCENTILE_HELP,
+	PERCENTILES,
+	percentileName,
+	pivot,
+	rangeMs,
+	seriesOf,
+	timeTick,
+	WORST_PERCENTILE,
+	type DeployMark,
+	type PerfSeriesResult,
+} from "./perf";
 
 const H = 3_600_000;
 const T = Date.UTC(2026, 9, 9, 0, 0, 0);
-const stat = (p50: number | null, p90: number | null = p50, p99: number | null = p90) => ({ p50, p90, p99, avg: p50, n: p50 === null ? 0 : 10 });
+const stat = (p50: number | null, p90: number | null = p50, p99: number | null = p90, p10: number | null = p50) => ({ p10, p50, p90, p99, avg: p50, n: p50 === null ? 0 : 10 });
 
 const result: PerfSeriesResult = {
 	side: "server",
@@ -21,9 +41,9 @@ const result: PerfSeriesResult = {
 	],
 	groupsTotal: 2,
 	series: [
-		{ t: T, key: "a1b2c3d-111111", samples: 1, metrics: { tps: stat(60, 59) }, players: 10, servers: 1 },
-		{ t: T + 2 * H, key: "e4f5a6b-222222", samples: 2, metrics: { tps: stat(58, 50) }, players: 21.5, servers: 2 },
-		{ t: T + 3 * H, key: "e4f5a6b-222222", samples: 1, metrics: { tps: stat(57, 49) }, players: 20, servers: 2 },
+		{ t: T, key: "a1b2c3d-111111", samples: 1, metrics: { tps: stat(60, 59, 59, 59) }, players: 10, servers: 1 },
+		{ t: T + 2 * H, key: "e4f5a6b-222222", samples: 2, metrics: { tps: stat(58, 50, 44, 51) }, players: 21.5, servers: 2 },
+		{ t: T + 3 * H, key: "e4f5a6b-222222", samples: 1, metrics: { tps: stat(57, 49, 43, 50) }, players: 20, servers: 2 },
 	],
 };
 
@@ -40,6 +60,25 @@ describe("series", () => {
 			{ t: T + 3 * H, s0: 49, s1: null },
 		]);
 		expect(pivot(result, "", "players").map((r) => r.s0)).toEqual([null, null, 21.5, 20]);
+	});
+
+	it("pivots p10 and the worst case (p99) like the other percentiles", () => {
+		expect(pivot(result, "tps", "p10").map((r) => [r.s0, r.s1])).toEqual([
+			[null, 59],
+			[null, null],
+			[51, null],
+			[50, null],
+		]);
+		expect(pivot(result, "tps", WORST_PERCENTILE).map((r) => r.s0)).toEqual([null, null, 44, 43]);
+	});
+
+	it("lists p10 first, names the worst case, explains each percentile", () => {
+		expect(PERCENTILES).toEqual(["p10", "p50", "p90", "p99"]);
+		expect(WORST_PERCENTILE).toBe("p99");
+		expect(PERCENTILES.map(percentileName)).toEqual(["p10", "p50", "p90", "p99 (worst)"]);
+		for (const p of PERCENTILES) expect(PERCENTILE_HELP[p].length).toBeGreaterThan(10);
+		expect(PERCENTILE_HELP.p10).toMatch(/10%/);
+		expect(PERCENTILE_HELP.p99).toMatch(/worst/);
 	});
 
 	it("bucket times stop at the end and at 400", () => {

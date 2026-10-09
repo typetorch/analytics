@@ -1,6 +1,7 @@
 /**
  * Performance: how the game runs on players' devices (frame rate, memory, ping) and on the servers (TPS, memory,
- * players), over time, by device class / input / screen size / branch / build, with p50, p90 and p99 (on the bad side).
+ * players), over time, by device class / input / screen size / branch / build, with p10, p50, p90 and p99 (p90 and p99 on the
+ * bad side; p99 is marked as the worst case).
  * Every chart carries deploy marks (releases, rollbacks, kernel publishes, backup refreshes); clicking one filters to its
  * build. Builds can be compared side by side, or before vs after a mark over two equal windows.
  *
@@ -39,6 +40,7 @@ import {
 	METRICS,
 	PERCENTILE_HELP,
 	PERCENTILES,
+	percentileName,
 	pivot,
 	rangeMs,
 	SERIES_COLORS,
@@ -155,7 +157,7 @@ function countColumn<T>(id: string, header: string, value: (row: T) => number | 
 	return { id, header, type: "number", accessor: (r) => value(r) ?? null, cell: (r) => fmtInt(value(r)), format: (v) => fmtInt(v as number | null), ...extra };
 }
 
-/** A metric column ("Frame rate p90"): sorts by the raw value, shows it with its unit. */
+/** A metric column ("Frame rate p90", "Frame rate p99 (worst)"): sorts by the raw value, shows it with its unit. */
 function metricColumn<T>(id: string, header: string, key: string, value: (row: T) => number | null | undefined, extra: Partial<DataColumn<T>> = {}): DataColumn<T> {
 	return {
 		id,
@@ -183,7 +185,7 @@ export function groupColumns(side: "client" | "server", by: PerfGroupBy, metricK
 		...metricKeys.flatMap((k) => {
 			const label = side === "server" && k === "mem" ? "Server memory" : (METRICS[k]?.label ?? k);
 			return [
-				...PERCENTILES.map((p) => metricColumn<GroupRow>(`${k}-${p}`, `${label} ${p}`, k, (g) => g.metrics[k]?.[p], { title: PERCENTILE_HELP[p] })),
+				...PERCENTILES.map((p) => metricColumn<GroupRow>(`${k}-${p}`, `${label} ${percentileName(p)}`, k, (g) => g.metrics[k]?.[p], { title: PERCENTILE_HELP[p] })),
 				metricColumn<GroupRow>(`${k}-avg`, `${label} avg`, k, (g) => g.metrics[k]?.avg, { defaultHidden: true }),
 			];
 		}),
@@ -235,7 +237,7 @@ function SeriesCharts({ result, metricKeys, pct, players, ...marks }: { result: 
 	const series = seriesOf(result);
 	const charts: { key: string; title: string; about: string; rows: ChartRow[] }[] = metricKeys.map((k) => ({
 		key: k,
-		title: `${METRICS[k]?.label ?? k}, ${pct}`,
+		title: `${METRICS[k]?.label ?? k}, ${percentileName(pct)}`,
 		about: `${METRICS[k]?.about ?? ""} Line: ${PERCENTILE_HELP[pct]}.`,
 		rows: pivot(result, k, pct),
 	}));
@@ -498,7 +500,7 @@ export function compareRows(result: PerfCompareResult): { pinned: CompareRow[]; 
 			const values = periods.map((p) => p[side].metrics[key]?.[pct] ?? null);
 			return {
 				id: `${side}-${key}-${pct}`,
-				label: `${side === "server" && key === "mem" ? "Server memory" : (METRICS[key]?.label ?? key)} ${pct}`,
+				label: `${side === "server" && key === "mem" ? "Server memory" : (METRICS[key]?.label ?? key)} ${percentileName(pct)}`,
 				key,
 				values,
 				change: order ? delta(values[order[0]], values[order[1]], info(side, key)?.higherIsBetter ?? true) : null,
@@ -691,7 +693,7 @@ export default function Performance() {
 		<>
 			<PageHeader
 				title="Performance"
-				description={`Frame rate, memory and ping on players' devices, and TPS and memory on the servers, ${describeRange(state)}. Percentiles are on the bad side: p90 is the value 90% of samples reach or beat.`}
+				description={`Frame rate, memory and ping on players' devices, and TPS and memory on the servers, ${describeRange(state)}. p90 and p99 are on the bad side: p90 is the value 90% of samples reach or beat, p99 (marked worst) the value 99% do. p10 is the low end: 10% of samples are at or below it.`}
 				actions={
 					<>
 						<Select value={by} onValueChange={setBy}>
