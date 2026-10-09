@@ -18,6 +18,7 @@ import {
 	SERVER_PURCHASE,
 	str,
 	where,
+	windowBucketMs,
 	type QueryContext,
 } from "./core.ts";
 import type { NormalizedFilters } from "../sql/filters.ts";
@@ -36,9 +37,22 @@ export interface OverviewDay {
 	playtimeHours: number;
 }
 
+/** One step of a window shorter than a day (1 min, 5 min or 1 h), by the time a session started. */
+export interface OverviewBucket {
+	/** Bucket start, unix ms. */
+	t: number;
+	time: string;
+	players: number;
+	newPlayers: number;
+	sessions: number;
+	playtimeHours: number;
+}
+
 export interface OverviewResult {
 	from: string;
 	to: string;
+	/** The chart step for this window (windowBucketMs): a day for windows over a day, else 1 h, 5 min or 1 min. */
+	bucketMs: number;
 	players: number;
 	newPlayers: number;
 	returningPlayers: number;
@@ -48,16 +62,30 @@ export interface OverviewResult {
 	avgSessionMinutes: number;
 	playtimePerPlayerMinutes: number;
 	days: OverviewDay[];
+	/** Windows of a day or less: the same numbers per bucketMs (buckets without sessions are left out). */
+	buckets?: OverviewBucket[];
 }
 
 export const overview = defineQuery<Record<string, never>, OverviewResult>({
 	name: "overview",
-	summary: "players, new players, sessions and playtime, in total and per day",
+	summary: "players, new players, sessions and playtime, in total and per day (per hour, 5 min or minute for windows of a day or less)",
 	defaultDays: 30,
 	options: () => ({}),
 	statements(ctx, f) {
 		const lim = ctx.dialect.limit;
+		const bucketMs = windowBucketMs(f.to - f.from);
+		// Below a day: the same numbers per bucket (at most 78 rows; the window bounds the raw rows read).
+		const buckets: Record<string, string> =
+			bucketMs < DAY_MS
+				? {
+						buckets:
+							`WITH ${sessionCtes(ctx, f)}, sb AS (SELECT pid, isnew, t1 - t0 AS len, CAST(floor(t0 / ${int(bucketMs)}.0) AS BIGINT) AS b FROM s) ` +
+							`SELECT b, COUNT(DISTINCT pid) AS players, COUNT(DISTINCT CASE WHEN isnew = 1 THEN pid END) AS new_players, ` +
+							`COUNT(*) AS sessions, SUM(len) AS playtime_ms FROM sb GROUP BY b ORDER BY b ${lim(1000)}`,
+					}
+				: {};
 		return {
+			...buckets,
 			days:
 				`WITH ${sessionCtes(ctx, f)}, sd AS (SELECT pid, isnew, t1 - t0 AS len, ${dayOf("t0")} AS day FROM s) ` +
 				`SELECT day, COUNT(DISTINCT pid) AS players, COUNT(DISTINCT CASE WHEN isnew = 1 THEN pid END) AS new_players, ` +
@@ -69,6 +97,7 @@ export const overview = defineQuery<Record<string, never>, OverviewResult>({
 		};
 	},
 	shape(rows, _ctx, f) {
+		const bucketMs = windowBucketMs(f.to - f.from);
 		const t = rows.totals[0] ?? {};
 		const players = num(t.players);
 		const newPlayers = num(t.new_players);
@@ -77,6 +106,7 @@ export const overview = defineQuery<Record<string, never>, OverviewResult>({
 		return {
 			from: iso(f.from),
 			to: iso(f.to),
+			bucketMs,
 			players,
 			newPlayers,
 			returningPlayers: players - newPlayers,
@@ -92,6 +122,21 @@ export const overview = defineQuery<Record<string, never>, OverviewResult>({
 				sessions: num(r.sessions),
 				playtimeHours: round(num(r.playtime_ms) / 3_600_000, 1),
 			})),
+			...(rows.buckets
+				? {
+						buckets: rows.buckets.map((r) => {
+							const at = num(r.b) * bucketMs;
+							return {
+								t: at,
+								time: iso(at),
+								players: num(r.players),
+								newPlayers: num(r.new_players),
+								sessions: num(r.sessions),
+								playtimeHours: round(num(r.playtime_ms) / 3_600_000, 2),
+							};
+						}),
+					}
+				: {}),
 		};
 	},
 });

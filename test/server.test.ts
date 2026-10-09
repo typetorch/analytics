@@ -300,6 +300,16 @@ describe("nightly export", () => {
 		expect(one.rows.map((r) => r.pid)).toEqual([PID_WEBHOOK]);
 		const edges = (await (await fetch(`${base}/v1/rollups/edges?limit=5`, { headers: admin })).json()) as { rows: unknown[] };
 		expect(edges.rows.length).toBe(5);
+		// from / to: dates (inclusive) or exact instants, widened to the days they touch; nonsense is a 400.
+		const days = [...new Set((daily.rows as unknown as { day: string }[]).map((r) => r.day))].sort();
+		const day = days[0] as string;
+		const read = async (q: string) => ((await (await fetch(`${base}/v1/rollups/daily?${q}`, { headers: admin })).json()) as { rows: { day: string }[] }).rows;
+		const byDate = await read(`from=${day}&to=${day}`);
+		expect(new Set(byDate.map((r) => r.day))).toEqual(new Set([day]));
+		const start = Date.parse(`${day}T00:00:00Z`);
+		const hour = await read(`from=${new Date(start + 10 * 3_600_000).toISOString()}&to=${start + 11 * 3_600_000}`);
+		expect(hour).toEqual(byDate);
+		expect((await fetch(`${base}/v1/rollups/daily?from=yesterday`, { headers: admin })).status).toBe(400);
 	});
 
 	test("late rows for an exported day are merged into its file; resent rows are kept once", async () => {

@@ -83,6 +83,35 @@ describe("overview", () => {
 		expect(() => store.render("overview", { from: "2026-10-05", to: "2026-10-01" })).toThrow("before");
 		expect(() => store.render("overview", { from: "yesterday" })).toThrow("not a date");
 	});
+
+	test("short windows: exact instants, and the chart step follows the window (1 min, 5 min, hourly; daily beyond a day)", async () => {
+		const at = async (hours: number) => store.query("overview", { from: new Date(NOW - hours * 3_600_000).toISOString() });
+		for (const [hours, step] of [
+			[1, 60_000],
+			[6, 300_000],
+			[24, 3_600_000],
+		] as const) {
+			const r = await at(hours);
+			expect([hours, r.bucketMs]).toEqual([hours, step]);
+			const s = sessions(playerEvents(fx.events.filter((e) => e.t >= NOW - hours * 3_600_000 && e.t < NOW)));
+			expect(r.sessions).toBe(s.size);
+			const buckets = r.buckets ?? [];
+			expect(buckets.reduce((sum, b) => sum + b.sessions, 0)).toBe(s.size);
+			for (const b of buckets) {
+				expect(b.t % step).toBe(0);
+				expect(b.time).toBe(new Date(b.t).toISOString());
+			}
+			// One bucket against the reference: the sessions that started in it.
+			const busiest = [...buckets].sort((a, b) => b.sessions - a.sessions)[0];
+			if (busiest) expect(busiest.sessions).toBe([...s.values()].filter((x) => x.t0 >= busiest.t && x.t0 < busiest.t + step).length);
+		}
+		expect((await at(24)).buckets?.length).toBeGreaterThan(1);
+		// Longer windows keep the day series only; unix ms works as well as ISO.
+		const week = await store.query("overview", { from: NOW - 7 * DAY, to: NOW });
+		expect(week.bucketMs).toBe(DAY);
+		expect(week.buckets).toBeUndefined();
+		expect(week.days.length).toBeGreaterThan(1);
+	});
 });
 
 describe("roblox numbers and retention", () => {

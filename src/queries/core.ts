@@ -133,6 +133,18 @@ export function checkPid(pid: unknown): string {
 	return pid;
 }
 
+/**
+ * A chart's time step for a window (the explorer's date range): up to an hour -> 1 min, up to 6 hours -> 5 min, up to a
+ * day -> 1 hour, longer -> 1 day (the day series, as before). A little slack, so a window that starts on a whole minute
+ * (the explorer's "Last hour" is up to 61 minutes) keeps its step. At most 78 buckets below a day.
+ */
+export function windowBucketMs(spanMs: number): number {
+	if (spanMs <= 65 * 60_000) return 60_000;
+	if (spanMs <= 6.5 * 3_600_000) return 5 * 60_000;
+	if (spanMs <= 26 * 3_600_000) return 3_600_000;
+	return DAY_MS;
+}
+
 export function intOption(value: unknown, name: string, fallback: number, min: number, max: number): number {
 	if (value === undefined || value === null) return fallback;
 	const n = typeof value === "string" ? Number(value) : value;

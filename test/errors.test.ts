@@ -101,7 +101,9 @@ describe("parseErrorBatch", () => {
 		expect(spreadCount(100, T0 - 10 * MIN, T0).length).toBe(11);
 		expect(spreadCount(2, T0 - 3 * MIN, T0).reduce((s, x) => s + x.n, 0)).toBe(2);
 		expect(chooseBucket(3_600_000)).toBe(60);
+		expect(chooseBucket(6 * 3_600_000)).toBe(300);
 		expect(chooseBucket(24 * 3_600_000)).toBe(1800);
+		expect(chooseBucket(7 * 86_400_000)).toBe(21600);
 		expect(chooseBucket(30 * 86_400_000)).toBe(43200);
 		expect(chooseBucket(3_600_000, 300)).toBe(300);
 		expect(chooseBucket(30 * 86_400_000, 60)).toBeGreaterThan(60);

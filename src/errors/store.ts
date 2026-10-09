@@ -110,13 +110,16 @@ interface KindRow {
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-/** Picks a bucket size: about 48 buckets, a whole number of minutes from a short list, or the caller's. */
+/**
+ * Picks a bucket size: at most 72 buckets of a size from a short list (1 h -> 1 min, 6 h -> 5 min, 24 h -> 30 min, 7 d -> 6 h,
+ * 30 d -> 12 h), or the caller's.
+ */
 export function chooseBucket(spanMs: number, requestedSeconds?: number): number {
 	if (requestedSeconds !== undefined) {
 		const s = Math.max(60, Math.round(requestedSeconds / 60) * 60);
 		return Math.max(s, Math.ceil(spanMs / 500 / MINUTE) * 60);
 	}
-	for (const s of [60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400]) if (spanMs / (s * 1000) <= 60) return s;
+	for (const s of [60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400]) if (spanMs / (s * 1000) <= 72) return s;
 	return 86400;
 }
 

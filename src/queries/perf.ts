@@ -12,10 +12,12 @@
  * Percentiles are on the bad side: for fps and tps (higher is better) "p90" is the value 90% of samples reach or beat
  * (the 10th percentile) and "p99" the 1st; for mem and ping (lower is better) they are the 90th and 99th. p50 is the
  * median either way. Values outside a sane range (a client can send anything) are left out.
+ * The time step follows the window like every explorer chart (windowBucketMs: 1 h -> 1 min, 6 h -> 5 min, a day ->
+ * hourly, longer -> daily) unless the caller picks one (bucketMinutes) or a bucket count (buckets).
  * Bounded so a query stays small on DuckDB and Basin: 92 days, 400 buckets, 20 groups, 6 builds, 7-day windows.
  */
 import { whereSql, type NormalizedFilters } from "../sql/filters.ts";
-import { defineQuery, int, intOption, iso, num, numOrNull, round, str, where, type QueryContext, type Row } from "./core.ts";
+import { defineQuery, int, intOption, iso, num, numOrNull, round, str, where, windowBucketMs, type QueryContext, type Row } from "./core.ts";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -203,9 +205,9 @@ function serverCtes(ctx: QueryContext, f: NormalizedFilters, groupExpr: string):
 
 export interface PerfSeriesOptions {
 	by: PerfGroupBy;
-	/** About this many time buckets (10-400, default 120); the size snaps to BUCKET_STEPS_MS. */
-	buckets: number;
-	/** Or an exact bucket size in minutes (1-1440). */
+	/** About this many time buckets (10-400); the size snaps to BUCKET_STEPS_MS. Default: the step follows the window. */
+	buckets?: number;
+	/** Or an exact bucket size in minutes (1-1440); wins over buckets. */
 	bucketMinutes?: number;
 	/** Groups kept (busiest first), 1-20, default 8. */
 	maxGroups: number;
@@ -258,11 +260,8 @@ function seriesOptions(allowed: readonly PerfGroupBy[]) {
 	return (input: Partial<PerfSeriesOptions> = {}): PerfSeriesOptions => {
 		const by = (input.by ?? "none") as PerfGroupBy;
 		if (!allowed.includes(by)) throw new Error(`by must be one of ${allowed.join(", ")}`);
-		const out: PerfSeriesOptions = {
-			by,
-			buckets: intOption(input.buckets, "buckets", 120, 10, 400),
-			maxGroups: intOption(input.maxGroups, "maxGroups", 8, 1, 20),
-		};
+		const out: PerfSeriesOptions = { by, maxGroups: intOption(input.maxGroups, "maxGroups", 8, 1, 20) };
+		if (input.buckets !== undefined) out.buckets = intOption(input.buckets, "buckets", 120, 10, 400);
 		if (input.bucketMinutes !== undefined) out.bucketMinutes = intOption(input.bucketMinutes, "bucketMinutes", 15, 1, 1440);
 		return out;
 	};
@@ -270,7 +269,8 @@ function seriesOptions(allowed: readonly PerfGroupBy[]) {
 
 function bucketMsOf(f: NormalizedFilters, o: PerfSeriesOptions): number {
 	checkRange(f.from, f.to);
-	const ms = o.bucketMinutes !== undefined ? o.bucketMinutes * MINUTE_MS : bucketFor(f.to - f.from, o.buckets);
+	const span = f.to - f.from;
+	const ms = o.bucketMinutes !== undefined ? o.bucketMinutes * MINUTE_MS : o.buckets !== undefined ? bucketFor(span, o.buckets) : windowBucketMs(span);
 	if ((f.to - f.from) / ms > 400) throw new Error("more than 400 buckets: use a larger bucketMinutes or a shorter range");
 	return ms;
 }

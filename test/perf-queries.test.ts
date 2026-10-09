@@ -177,7 +177,7 @@ describe("perf-client", () => {
 	});
 
 	test("series: buckets snap to a step, points add up, a bucket matches the reference", async () => {
-		const r = await store.query("perf-client", DAY_RANGE, { by: "dev" });
+		const r = await store.query("perf-client", DAY_RANGE, { by: "dev", buckets: 120 });
 		expect(r.bucketMs).toBe(15 * MIN); // 24 h / 120 = 12 min -> 15 min
 		expect(bucketFor(24 * HOUR, 120)).toBe(15 * MIN);
 		expect(bucketFor(90 * 24 * HOUR, 120)).toBe(24 * HOUR);
@@ -188,6 +188,18 @@ describe("perf-client", () => {
 		expect(pick(point.metrics.fps)).toEqual(ref(rows, "fps", 1000, true));
 		// Oldest first.
 		for (let i = 1; i < r.series.length; i++) expect(r.series[i].t).toBeGreaterThanOrEqual(r.series[i - 1].t);
+	});
+
+	test("the default step follows the window: 1 h -> 1 min, 6 h -> 5 min, a day -> hourly, longer -> daily", async () => {
+		const step = async (hours: number, side: "perf-client" | "perf-server" = "perf-client") => (await store.query(side, { from: NOW - hours * HOUR, to: NOW }, {})).bucketMs;
+		expect(await step(1)).toBe(MIN);
+		expect(await step(6)).toBe(5 * MIN);
+		expect(await step(24)).toBe(HOUR);
+		expect(await step(24, "perf-server")).toBe(HOUR);
+		expect(await step(7 * 24)).toBe(24 * HOUR);
+		// "Last hour" from a whole minute is up to 61 minutes: still 1-minute steps. An explicit step wins.
+		expect(await step(61 / 60)).toBe(MIN);
+		expect((await store.query("perf-client", DAY_RANGE, { bucketMinutes: 5 })).bucketMs).toBe(5 * MIN);
 	});
 
 	test("by build, at most maxGroups: the busiest kept, the rest counted", async () => {
