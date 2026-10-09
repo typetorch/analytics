@@ -296,6 +296,19 @@ describe("the hub", () => {
 		expect(hub.enqueue("j1", "status", undefined, owner)).toBe("not_watched");
 	});
 
+	test("a command keeps the job watched 60 s from then (the kernel keeps polling while the owner works)", () => {
+		let now = T0;
+		const hub = new RemoteDebugHub({ clock: () => now });
+		hub.watch("j2", { kind: "token" });
+		now += 50_000;
+		hub.enqueue("j2", "status", undefined, { kind: "token" });
+		now += 50_000;
+		expect(hub.isWatched("j2")).toBe(true);
+		expect(hub.heartbeatReply("j2")).toEqual({ rd: 1 });
+		now += 11_000;
+		expect(hub.isWatched("j2")).toBe(false);
+	});
+
 	test("at most 32 jobs are watched; the oldest watch goes", () => {
 		let now = T0;
 		const hub = new RemoteDebugHub({ clock: () => now });
