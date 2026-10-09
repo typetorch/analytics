@@ -105,7 +105,8 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
 | `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill. |
-| `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests). |
+| `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
+| `TYPETORCH_MESSAGING_KEY` | no | Remote debug's [instant wake](#instant-wake): an Open Cloud key with **only** `universe-messaging-service:publish` on the game's universe (needs `TYPETORCH_UNIVERSE_ID`). Env only: never logged, returned or shown. Without it a watched server starts polling at its next heartbeat (up to 30 s). |
 | `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https; the server won't start with another scheme). Also settable on the Settings page. |
 
 <details><summary>Advanced (defaults suit a 1 GB machine)</summary>
@@ -172,7 +173,7 @@ as noted for the token login).
 The bounds apply to values saved on the page (the environment keeps its own, wider checks). A save is all or nothing: one
 wrong value and nothing changes. **Not editable** (change them on Coolify and redeploy): `TYPETORCH_API_KEY`,
 `TYPETORCH_API_KEY_PREVIOUS`, `TYPETORCH_ADMIN_TOKEN`, `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`,
-`TYPETORCH_PUBLIC_URL`, `TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`, the data dir,
+`TYPETORCH_MESSAGING_KEY`, `TYPETORCH_PUBLIC_URL`, `TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`, the data dir,
 `PORT` / `HOST`, and everything else in the tables above.
 
 **Where it is kept.** `<data dir>/runtime-settings.json` (`/data` on Coolify, so it survives redeploys): the saved values and
@@ -318,6 +319,8 @@ unread. A failure goes back to the login page with a plain sentence, never a sta
 4. Optional: `TYPETORCH_ADMIN_ALLOW_IPS=<your IP or range>` to hide the admin side from everyone else (needs real addresses:
    no Cloudflare orange cloud, or see "Behind Cloudflare" under [Security](#security)).
 5. Optional: the Roblox OAuth variables above.
+6. Optional: `TYPETORCH_MESSAGING_KEY` (an Open Cloud key with only `universe-messaging-service:publish`) and
+   `TYPETORCH_UNIVERSE_ID`: the server page connects to a game server within seconds ([instant wake](#instant-wake)).
 
 The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 
@@ -376,7 +379,7 @@ here): the files are checked by tests that read them, so expect to fix a typo on
    - `TYPETORCH_TRUST_PROXY=1` (default in `compose.yaml`; with the Dockerfile app set it yourself)
    - optional: `TYPETORCH_ADMIN_ALLOW_IPS`, `TYPETORCH_TRUSTED_PROXIES`, `TYPETORCH_CLOUDFLARE`,
      `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`, `ROBLOX_WEBHOOK_SECRET`, `OPENCLOUD_API_KEY`,
-     `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_ALERT_WEBHOOK_URL`
+     `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_MESSAGING_KEY` ([instant wake](#instant-wake)), `TYPETORCH_ALERT_WEBHOOK_URL`
 4. Deploy. The health check is `GET /healthz` inside the container (30 s start period); `docker logs` shows the startup
    line (what is set, never the values) and any old-variable warnings.
 5. Check: `curl https://backend.example.com/healthz` -> `{"ok":true}`;
@@ -963,13 +966,16 @@ The explorer's server page (`/servers/<JobId>`, plans/25) reads one **live** gam
 player's client log, the players, module state, a read-only Dex, modules and assets, builds, the budget view, error
 counters and network counters. **Read-only**: there is no op that changes the game server (no kick, ban, rollback, reload,
 pin, switch, Luau or Dex edit). Needs kernel 0.5.0 (the framework ops also framework 0.5.0 with devtools on; an older
-build answers "not supported" for those, the kernel's own ops still work).
+build answers "not supported" for those, the kernel's own ops still work). The [instant wake](#instant-wake) needs kernel
+0.5.1 and `TYPETORCH_MESSAGING_KEY`.
 
 A Roblox server can't be called into, so it **pulls**:
 
 1. The page sends `POST /v1/fleet/servers/<JobId>/watch` (again every 20 s while the tab is visible; a watch lapses 60 s
    after the last one, or 60 s after the last command).
 2. That server's next heartbeat gets `202 { ok: true, rd: 1 }` (heartbeats come every 30 s: the page says "Connecting").
+   With the [instant wake](#instant-wake) the backend also publishes a wake message when the watch starts, and the
+   server polls within seconds (the page says "Waking server...").
 3. The kernel then long-polls `GET /v1/fleet/commands?wait=8` (API key, JobId in `X-TT-Job`), runs each allow-listed
    op and posts the answers to `POST /v1/fleet/results`. It stops when the backend says the job is no longer watched.
    Not watched = no extra requests at all.
@@ -977,7 +983,7 @@ A Roblox server can't be called into, so it **pulls**:
 | Endpoint | Role | Body / answer |
 |---|---|---|
 | `GET /v1/fleet/servers/<jobId>` | admin | `{ server: <servers row of any age> \| null, state: live\|closed\|lost\|unknown, debug: { watched, watchedUntil?, connected, lastPollAt? } }` (`connected` = the server polled in the last 15 s) |
-| `POST /v1/fleet/servers/<jobId>/watch` | admin | `{ job, watched, watchedUntil, connected, lastPollAt? }`; `409` for a closed or unknown server (nothing to debug) |
+| `POST /v1/fleet/servers/<jobId>/watch` | admin | `{ job, watched, watchedUntil, connected, lastPollAt?, wake }` (`wake`: a wake message went out to this server in the last 30 s and didn't fail, and it isn't polling yet); `409` for a closed or unknown server (nothing to debug) |
 | `POST /v1/fleet/servers/<jobId>/commands` | admin | `{ op, args? }` -> `202 { id, op, state, createdAt, expiresAt }`; `400` an op outside the allow-list or bad args; `409` not watched (watch first); `429` limits |
 | `GET /v1/fleet/servers/<jobId>/commands/<id>` | admin | `{ id, op, state: queued\|sent\|done\|failed\|expired, createdAt, sentAt?, doneAt?, ms?, result?, error?, redacted? }`; only for whoever queued it (`404` for anyone else, and once the answer is dropped) |
 | `GET /v1/fleet/debug/audit?limit=` | admin | `{ entries: [{ at, who, ip, op, job, args, id }] }`, newest first (the last 500, in memory) |
@@ -1009,7 +1015,45 @@ Unknown argument keys are refused; args are at most 16 KB.
   after the server picked them up). The game routes: 90 polls and 120 result posts a minute per JobId; JobIds without a
   heartbeat (or without a command out) never reach those limiters, so made-up JobIds can't grow them.
 - `GET /healthz` (admin) shows the counters and what is held (`remoteDebug: { queued, sent, done, failed, expired,
-  ignored, dropped, commands, resultBytes, watched }`), never an answer.
+  ignored, dropped, commands, resultBytes, watched, wake }`), never an answer. `wake` is `"off"` or
+  `{ published, failed, recent, limited }`.
+
+### Instant wake
+
+Without it, a watched server learns it is watched from its next heartbeat reply: up to 30 s. With
+`TYPETORCH_MESSAGING_KEY` and `TYPETORCH_UNIVERSE_ID` set, a watch that **starts** (the page opens, or a lapsed watch
+comes back) on a server that **isn't polling** also publishes one tiny message through Roblox Open Cloud Messaging:
+
+```
+POST https://apis.roblox.com/cloud/v2/universes/<TYPETORCH_UNIVERSE_ID>:publishMessage
+x-api-key: <TYPETORCH_MESSAGING_KEY>
+{ "topic": "TypeTorch/deploy", "message": "{\"k\":\"rd\",\"j\":\"<JobId>\"}" }
+```
+
+Every kernel already subscribes to `TypeTorch/deploy` (its control topic: deploys, the settings ping, the peers' ask),
+so no server subscribes to anything new. Kernel 0.5.1+ servers check the JobId: the named one starts its debug poll at
+once, the others ignore it (older kernels ignore the message too). The page's repeated watches (every 20 s) send nothing.
+
+- **A hint, not a command.** The message is unsigned (anything that can publish to the universe could send one), so it
+  only does what the heartbeat's `rd: 1` does: the woken server's first poll asks this backend, which answers
+  `watch: false` unless the job really is watched. A forged wake costs that server one poll; the kernel acts on one
+  wake per 10 s at most.
+- **Limits.** One wake per JobId per 10 s and 10 a minute in all. Every server receives every message on the topic, and
+  Roblox allows (40 + 80 x servers) messages a minute per topic and (400 + 200 x servers) for the whole game, shared with
+  the game's own MessagingService use: 10 a minute stays far under both. Past the cap, the heartbeat wakes the server.
+- **Failures** (a refused key, a network error, 429) are logged in one line (never the key) and change nothing else:
+  the watch stands and the next heartbeat reply wakes the server. Without the key or the universe id nothing is
+  published, and the startup log says `remote debug wake is off`.
+
+**Make the key** (Creator Dashboard > **API Keys** > **Create API Key**, signed in as an account that can manage the
+game; for a group game, an account in the group with a role that has the permission): name it e.g. "TypeTorch backend
+wake"; under **Access Permissions**, **Select API System** = **messaging-service** only, keep **Restrict by Experience**
+on and pick the game, and in **Select Operations** choose only `universe-messaging-service:publish`; under **Security**,
+add the backend's outbound address in **Accepted IP Addresses** if it has a fixed one (leave **Restrict IP addresses** off
+otherwise); an expiration date is optional (renew the key before it ends). **Save & Generate key**, copy the key once, put
+it in `TYPETORCH_MESSAGING_KEY` on Coolify (as a secret) with `TYPETORCH_UNIVERSE_ID` = that game's universe id, and
+redeploy. Don't reuse the CLI's deploy key or `OPENCLOUD_API_KEY`: a key that can only publish messages can't touch
+DataStores, assets or places if it leaks (the server warns when `TYPETORCH_MESSAGING_KEY` equals `OPENCLOUD_API_KEY`).
 
 ## Privacy
 
