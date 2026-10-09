@@ -1,13 +1,16 @@
+import { useMemo } from "react";
+import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fmtInt, fmtNum, fmtPct, plural } from "@/lib/format";
 import { useAnalytics, useParam } from "@/lib/hooks";
 import type { ExperimentResult } from "@/lib/types";
 
 type Results = Extract<ExperimentResult, { variants: unknown }>;
+type Variant = Results["variants"][number];
+type Comparison = Results["comparisons"][number];
 
 const METRICS: Record<string, string> = {
 	returned: "came back (2+ days)",
@@ -23,7 +26,56 @@ function fmtMetric(metric: string, value: number): string {
 	return fmtNum(value);
 }
 
+/** A rate shown as "12.5% (30)": it sorts and filters by the rate, in percent. */
+const rateColumn = (id: string, header: string, pick: (v: Variant) => { rate: number; count: number }): DataColumn<Variant> => ({
+	id,
+	header,
+	accessor: (v) => pick(v).rate * 100,
+	cell: (v) => (
+		<>
+			{fmtPct(pick(v).rate)} <span className="text-muted-foreground">({fmtInt(pick(v).count)})</span>
+		</>
+	),
+	format: (_value, v) => `${fmtPct(pick(v).rate)} (${fmtInt(pick(v).count)})`,
+});
+
+const variantColumns = (control: string | null): DataColumn<Variant>[] => [
+	{
+		id: "variant",
+		header: "Variant",
+		accessor: (v) => v.variant,
+		cell: (v) => (
+			<>
+				{v.variant} {v.variant === control ? <Badge variant="secondary">control</Badge> : null}
+			</>
+		),
+		className: "font-medium",
+	},
+	{ id: "players", header: "Players", accessor: (v) => v.players, cell: (v) => fmtInt(v.players) },
+	rateColumn("returned", "Came back", (v) => v.returned),
+	rateColumn("payers", "Paid", (v) => v.payers),
+	{ id: "playtime", header: "Playtime / player", hint: "min", accessor: (v) => v.playtimeMinutes, cell: (v) => `${fmtNum(v.playtimeMinutes, 1)} min` },
+	{ id: "robux", header: "Robux / player", accessor: (v) => v.robuxPerPlayer, cell: (v) => fmtNum(v.robuxPerPlayer) },
+	{ id: "sessions", header: "Sessions / player", accessor: (v) => v.sessionsPerPlayer, cell: (v) => fmtNum(v.sessionsPerPlayer) },
+];
+
+const COMPARISON_COLUMNS: DataColumn<Comparison>[] = [
+	{ id: "words", header: "In words", accessor: (c) => c.words, className: "font-medium whitespace-normal" },
+	{ id: "metric", header: "Metric", type: "enum", accessor: (c) => c.metric, format: (v) => METRICS[v as string] ?? String(v), cell: (c) => METRICS[c.metric] ?? c.metric, className: "text-muted-foreground" },
+	{ id: "control", header: "Control", accessor: (c) => c.control, cell: (c) => fmtMetric(c.metric, c.control), format: (_v, c) => fmtMetric(c.metric, c.control) },
+	{ id: "value", header: "Variant", accessor: (c) => c.value, cell: (c) => fmtMetric(c.metric, c.value), format: (_v, c) => fmtMetric(c.metric, c.value) },
+	{
+		id: "lift",
+		header: "Lift",
+		accessor: (c) => c.lift,
+		cell: (c) => (c.lift === null ? "–" : `${c.lift > 0 ? "+" : ""}${fmtPct(c.lift)}`),
+		format: (_v, c) => (c.lift === null ? "" : `${c.lift > 0 ? "+" : ""}${fmtPct(c.lift)}`),
+	},
+	{ id: "sure", header: "Sure", accessor: (c) => c.sure, cell: (c) => <span title={c.method}>{fmtPct(c.sure, 0)}</span>, format: (_v, c) => fmtPct(c.sure, 0) },
+];
+
 function ResultsView({ data }: { data: Results }) {
+	const variants = useMemo(() => variantColumns(data.control), [data.control]);
 	if (!data.variants.length) return <EmptyState>No player in this experiment in this range.</EmptyState>;
 	return (
 		<>
@@ -31,67 +83,11 @@ function ResultsView({ data }: { data: Results }) {
 				title={data.scope === "server" ? "Per server: pinned artifacts vs unpinned servers" : `Variants of ${data.experiment}`}
 				description={`${data.control ? `Compared with the control variant "${data.control}".` : "No control variant."}${data.mixedPlayers ? ` ${plural(data.mixedPlayers, "player")} seen in more than one variant are left out.` : ""}`}
 			>
-				<Table>
-					<TableHeader>
-						<TableRow>
-							<TableHead>Variant</TableHead>
-							<TableHead className="text-right">Players</TableHead>
-							<TableHead className="text-right">Came back</TableHead>
-							<TableHead className="text-right">Paid</TableHead>
-							<TableHead className="text-right">Playtime / player</TableHead>
-							<TableHead className="text-right">Robux / player</TableHead>
-							<TableHead className="text-right">Sessions / player</TableHead>
-						</TableRow>
-					</TableHeader>
-					<TableBody>
-						{data.variants.map((v) => (
-							<TableRow key={v.variant}>
-								<TableCell className="font-medium">
-									{v.variant} {v.variant === data.control ? <Badge variant="secondary">control</Badge> : null}
-								</TableCell>
-								<TableCell className="text-right tabular-nums">{fmtInt(v.players)}</TableCell>
-								<TableCell className="text-right tabular-nums">
-									{fmtPct(v.returned.rate)} <span className="text-muted-foreground">({fmtInt(v.returned.count)})</span>
-								</TableCell>
-								<TableCell className="text-right tabular-nums">
-									{fmtPct(v.payers.rate)} <span className="text-muted-foreground">({fmtInt(v.payers.count)})</span>
-								</TableCell>
-								<TableCell className="text-right tabular-nums">{fmtNum(v.playtimeMinutes, 1)} min</TableCell>
-								<TableCell className="text-right tabular-nums">{fmtNum(v.robuxPerPlayer)}</TableCell>
-								<TableCell className="text-right tabular-nums">{fmtNum(v.sessionsPerPlayer)}</TableCell>
-							</TableRow>
-						))}
-					</TableBody>
-				</Table>
+				<DataTable id="experiment-variants" label="Variants" columns={variants} data={data.variants} rowId={(v) => v.variant} />
 			</Section>
 			<Section title="How sure" description="Each variant against the control: two-proportion test for shares, bootstrap (or Welch) for averages.">
 				{data.comparisons.length ? (
-					<Table>
-						<TableHeader>
-							<TableRow>
-								<TableHead>In words</TableHead>
-								<TableHead>Metric</TableHead>
-								<TableHead className="text-right">Control</TableHead>
-								<TableHead className="text-right">Variant</TableHead>
-								<TableHead className="text-right">Lift</TableHead>
-								<TableHead className="text-right">Sure</TableHead>
-							</TableRow>
-						</TableHeader>
-						<TableBody>
-							{data.comparisons.map((c) => (
-								<TableRow key={`${c.variant}-${c.metric}`}>
-									<TableCell className="font-medium whitespace-normal">{c.words}</TableCell>
-									<TableCell className="text-muted-foreground">{METRICS[c.metric] ?? c.metric}</TableCell>
-									<TableCell className="text-right tabular-nums">{fmtMetric(c.metric, c.control)}</TableCell>
-									<TableCell className="text-right tabular-nums">{fmtMetric(c.metric, c.value)}</TableCell>
-									<TableCell className="text-right tabular-nums">{c.lift === null ? "–" : `${c.lift > 0 ? "+" : ""}${fmtPct(c.lift)}`}</TableCell>
-									<TableCell className="text-right tabular-nums" title={c.method}>
-										{fmtPct(c.sure, 0)}
-									</TableCell>
-								</TableRow>
-							))}
-						</TableBody>
-					</Table>
+					<DataTable id="experiment-comparisons" label="Comparisons with the control" columns={COMPARISON_COLUMNS} data={data.comparisons} rowId={(c) => `${c.variant}-${c.metric}`} />
 				) : (
 					<p className="text-sm text-muted-foreground">Nothing to compare yet: it needs a control and at least one other variant with players.</p>
 				)}

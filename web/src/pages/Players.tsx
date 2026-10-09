@@ -1,9 +1,9 @@
 import { Search, Workflow } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { cn } from "cn";
 import { FacetToggle, isFacet, LazyGraph, MomentsToggle, PathStrip, SparseNote } from "@/components/LazyGraph";
-import { EventList } from "@/components/EventList";
+import { DataTable, type DataColumn } from "@/components/data-table";
+import { EventTable } from "@/components/EventTable";
 import { IdentityStatus, UserIdLink } from "@/components/Identity";
 import { MermaidButton } from "@/components/MermaidButton";
 import { EmptyState, KeyValue, PageHeader, QueryState, Section } from "@/components/common";
@@ -70,37 +70,49 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 			{missing ? <p className="text-xs text-muted-foreground">No pid known for {missing}: only players who joined after the identity update (or a backfill) are mapped.</p> : null}
 			<QueryState query={q} isEmpty={(d) => d.players.length === 0} empty={search ? "No pid matches." : "No players in this range."}>
 				{(data) => (
-					<div className="max-h-[70vh] space-y-1 overflow-y-auto pr-1">
-						{data.players.map((p) => (
-							<PlayerRow key={p.pid} player={p} active={p.pid === selected} onPick={onPick} />
-						))}
-					</div>
+					<DataTable
+						id="players-list"
+						label="Players"
+						columns={PLAYER_COLUMNS}
+						data={data.players}
+						rowId={(p) => p.pid}
+						density="compact"
+						onRowClick={(p) => onPick(p.pid)}
+						isRowSelected={(p) => p.pid === selected}
+					/>
 				)}
 			</QueryState>
 		</Section>
 	);
 }
 
-function PlayerRow({ player: p, active, onPick }: { player: PlayerSummary; active: boolean; onPick(pid: string): void }) {
-	return (
-		<button
-			type="button"
-			onClick={() => onPick(p.pid)}
-			className={cn("w-full rounded-md border px-2.5 py-2 text-left text-xs hover:bg-muted", active && "border-primary bg-muted")}
-		>
-			<div className="flex items-center justify-between gap-2">
-				<span className="truncate font-mono" title={p.pid}>
-					{shortId(p.pid, 10)}
-				</span>
-				{p.newInRange ? <Badge variant="secondary">new</Badge> : null}
-			</div>
-			{p.uid !== undefined ? <div className="mt-0.5 text-muted-foreground tabular-nums">UserId {p.uid}</div> : null}
-			<div className="mt-1 text-muted-foreground tabular-nums">
-				{fmtAgo(p.lastSeen)} · {fmtInt(p.sessions)} session{p.sessions === 1 ? "" : "s"} · {fmtMinutes(p.playtimeMinutes)}
-			</div>
-		</button>
-	);
-}
+/** The player list: pid with its UserId under it, then when, how often and how long. Sorts by the numbers, not the text. */
+const PLAYER_COLUMNS: DataColumn<PlayerSummary>[] = [
+	{
+		id: "pid",
+		header: "Player",
+		accessor: (p) => p.pid,
+		searchText: (p) => (p.uid !== undefined ? `UserId ${p.uid}` : ""),
+		cell: (p) => (
+			<>
+				<div className="flex items-center gap-2">
+					<span className="font-mono" title={p.pid}>
+						{shortId(p.pid, 10)}
+					</span>
+					{p.newInRange ? <Badge variant="secondary">new</Badge> : null}
+				</div>
+				{p.uid !== undefined ? <div className="text-muted-foreground tabular-nums">UserId {p.uid}</div> : null}
+			</>
+		),
+	},
+	{ id: "lastSeen", header: "Seen", type: "date", accessor: (p) => p.lastSeen, cell: (p) => fmtAgo(p.lastSeen), format: (_v, p) => fmtAgo(p.lastSeen) },
+	{ id: "sessions", header: "Sessions", accessor: (p) => p.sessions, cell: (p) => fmtInt(p.sessions) },
+	{ id: "playtime", header: "Playtime", accessor: (p) => p.playtimeMinutes, cell: (p) => fmtMinutes(p.playtimeMinutes), format: (_v, p) => fmtMinutes(p.playtimeMinutes) },
+	{ id: "events", header: "Events", accessor: (p) => p.events, defaultHidden: true },
+	{ id: "firstSeen", header: "First seen", type: "date", accessor: (p) => p.firstSeen, defaultHidden: true },
+	{ id: "new", header: "New", type: "boolean", accessor: (p) => p.newInRange, defaultHidden: true },
+	{ id: "uid", header: "UserId", type: "text", accessor: (p) => (p.uid === undefined ? null : String(p.uid)), defaultHidden: true },
+];
 
 function Timeline({ data, onGraph }: { data: TimelineResult; onGraph(sid: string): void }) {
 	const bySession = new Map<string, TimelineEvent[]>();
@@ -127,7 +139,12 @@ function Timeline({ data, onGraph }: { data: TimelineResult; onGraph(sid: string
 						</Button>
 					}
 				>
-					{bySession.get(s.sid)?.length ? <EventList events={bySession.get(s.sid) ?? []} /> : <EmptyState>No events of this session in the list.</EmptyState>}
+					{bySession.get(s.sid)?.length ? (
+						// One saved view for every session's table, kept off the URL (they would overwrite each other there).
+						<EventTable id="player-events" label={`Events of session ${shortId(s.sid)}`} events={bySession.get(s.sid) ?? []} urlSync={false} maxHeight="24rem" />
+					) : (
+						<EmptyState>No events of this session in the list.</EmptyState>
+					)}
 				</Section>
 			))}
 		</div>
@@ -252,7 +269,7 @@ export default function Players() {
 		<>
 			<PageHeader title="Players" description="Find a player by pid (random ids, never a UserId), then read their timeline and graph." />
 			<div className="flex flex-col gap-4 lg:flex-row lg:items-start">
-				<div className="w-full shrink-0 lg:w-80">
+				<div className="w-full shrink-0 lg:w-96">
 					<PlayerList selected={pid} onPick={setPid} initial={find} />
 					<div className="px-1 pt-2">
 						<IdentityStatus />

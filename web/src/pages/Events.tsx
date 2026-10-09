@@ -1,17 +1,19 @@
+import { useMemo } from "react";
 import { Link, useLocation } from "react-router";
-import { cn } from "cn";
-import { EventList } from "@/components/EventList";
+import { DataTable, type DataColumn } from "@/components/data-table";
+import { EventTable } from "@/components/EventTable";
 import { EmptyState, PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { FILTER_KEYS } from "@/lib/filters";
-import { fmtInt, shortId } from "@/lib/format";
+import { fmtInt, fmtPct, shortId } from "@/lib/format";
 import { useAnalytics, useParam } from "@/lib/hooks";
-import type { EventRow } from "@/lib/types";
+import type { EventRow, TopEventsResult } from "@/lib/types";
 
 const ALL = "all";
+
+type EventName = TopEventsResult["events"][number];
 
 /** A link to a player's page that keeps the filters. */
 function PlayerLink({ pid }: { pid: string }) {
@@ -26,6 +28,15 @@ function PlayerLink({ pid }: { pid: string }) {
 		</Link>
 	);
 }
+
+/** Columns after the standard event ones: who, where from, which build and server. */
+const ROW_COLUMNS: DataColumn<EventRow>[] = [
+	{ id: "pid", header: "Player", accessor: (e) => e.pid, cell: (e) => (e.pid ? <PlayerLink pid={e.pid} /> : <span className="text-xs text-muted-foreground">server row</span>) },
+	{ id: "branch", header: "Branch", type: "enum", accessor: (e) => e.branch, className: "text-xs" },
+	{ id: "dev", header: "Device", type: "enum", accessor: (e) => e.dev, className: "text-xs" },
+	{ id: "art", header: "Artifact", type: "enum", accessor: (e) => e.art, className: "font-mono text-xs" },
+	{ id: "job", header: "Job", accessor: (e) => e.job, cell: (e) => <span title={e.job}>{shortId(e.job, 6)}</span>, className: "font-mono text-xs" },
+];
 
 function RecentRows({ kind, name, pid, onClearPid }: { kind?: string; name?: string; pid?: string; onClearPid(): void }) {
 	const q = useAnalytics("events", { ...(kind ? { kind } : {}), ...(name ? { name } : {}), ...(pid ? { pid } : {}), limit: 100 });
@@ -43,28 +54,30 @@ function RecentRows({ kind, name, pid, onClearPid }: { kind?: string; name?: str
 			description="Up to 100, newest first. Fleet rows never show props (they can hold a private server's access code)."
 		>
 			<QueryState query={q} isEmpty={(d) => d.events.length === 0} empty="No rows of this event in this range.">
-				{(data) => <Rows rows={data.events} />}
+				{(data) => <EventTable id="events-rows" label="Newest event rows" events={data.events} dateToo extra={ROW_COLUMNS} />}
 			</QueryState>
 		</Section>
 	);
 }
 
-function Rows({ rows }: { rows: EventRow[] }) {
-	return (
-		<EventList
-			events={rows}
-			dateToo
-			extra={(e) => (
-				<>
-					{e.pid ? <PlayerLink pid={e.pid} /> : <span>server row</span>}
-					<span>{[e.branch, e.dev].filter(Boolean).join(" · ")}</span>
-					<span className="font-mono" title={e.job}>
-						{e.art} · job {shortId(e.job, 6)}
-					</span>
-				</>
-			)}
-		/>
-	);
+/** The event-name table: the share bar is scaled to the busiest name shown. */
+function nameColumns(max: number): DataColumn<EventName>[] {
+	return [
+		{ id: "kind", header: "Kind", type: "enum", accessor: (e) => e.kind, cell: (e) => <Badge variant="outline">{e.kind}</Badge> },
+		{ id: "name", header: "Event", accessor: (e) => e.name },
+		{ id: "count", header: "Count", accessor: (e) => e.count, cell: (e) => fmtInt(e.count) },
+		{
+			id: "share",
+			header: "Share",
+			title: "Of the busiest event shown",
+			accessor: (e) => e.count / max,
+			format: (v) => fmtPct(v as number),
+			cell: (e) => <ShareBar share={e.count / max} className="w-24" />,
+			filter: false,
+			minWidth: 120,
+		},
+		{ id: "players", header: "Players", title: "Distinct pids; server rows have none", accessor: (e) => e.players, cell: (e) => fmtInt(e.players) },
+	];
 }
 
 export default function Events() {
@@ -76,6 +89,7 @@ export default function Events() {
 	const kinds = [...new Set(events.map((e) => e.kind))].sort();
 	const shown = kindFilter === ALL ? events : events.filter((e) => e.kind === kindFilter);
 	const max = Math.max(1, ...shown.map((e) => e.count));
+	const columns = useMemo(() => nameColumns(max), [max]);
 	const at = picked.indexOf("/");
 	const pick = at > 0 ? { kind: picked.slice(0, at), name: picked.slice(at + 1) } : null;
 	return (
@@ -100,38 +114,16 @@ export default function Events() {
 								</ToggleGroup>
 							}
 						>
-							<Table>
-								<TableHeader>
-									<TableRow>
-										<TableHead>Event</TableHead>
-										<TableHead className="text-right">Count</TableHead>
-										<TableHead className="w-24" />
-										<TableHead className="text-right">Players</TableHead>
-									</TableRow>
-								</TableHeader>
-								<TableBody>
-									{shown.map((e) => {
-										const key = `${e.kind}/${e.name}`;
-										return (
-											<TableRow key={key} className={cn("cursor-pointer", picked === key && "bg-muted")} onClick={() => setPicked(key)}>
-												<TableCell>
-													<Badge variant="outline" className="mr-1.5">
-														{e.kind}
-													</Badge>
-													{e.name}
-												</TableCell>
-												<TableCell className="text-right tabular-nums">{fmtInt(e.count)}</TableCell>
-												<TableCell>
-													<ShareBar share={e.count / max} />
-												</TableCell>
-												<TableCell className="text-right tabular-nums" title="distinct pids; server rows have none">
-													{fmtInt(e.players)}
-												</TableCell>
-											</TableRow>
-										);
-									})}
-								</TableBody>
-							</Table>
+							<DataTable
+								id="events-names"
+								label="Event names"
+								columns={columns}
+								data={shown}
+								rowId={(e) => `${e.kind}/${e.name}`}
+								onRowClick={(e) => setPicked(`${e.kind}/${e.name}`)}
+								isRowSelected={(e) => picked === `${e.kind}/${e.name}`}
+								empty={<EmptyState>No events of this kind.</EmptyState>}
+							/>
 						</Section>
 						<div className="min-w-0 flex-1">
 							{pick || pid ? (

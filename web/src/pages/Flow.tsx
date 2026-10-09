@@ -1,74 +1,69 @@
 import { FacetToggle, isFacet, LazyGraph, MomentsToggle, SparseNote } from "@/components/LazyGraph";
 import { realStates } from "@/lib/graph-text";
 import { MermaidButton } from "@/components/MermaidButton";
+import { DataTable, type DataColumn } from "@/components/data-table";
 import { PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fmtDuration, fmtInt, fmtPct, plural } from "@/lib/format";
 import { exits, stateLines, topEdges } from "@/lib/graph-text";
 import { useAnalytics, useParam } from "@/lib/hooks";
-import type { GraphData } from "@/lib/types";
+import type { GraphData, GraphEdge } from "@/lib/types";
 
 const name = (id: string) => stateLines(id).join(" · ");
+
+type Exit = ReturnType<typeof exits>[number];
+
+const EXIT_COLUMNS: DataColumn<Exit>[] = [
+	{ id: "state", header: "State", accessor: (e) => e.state, cell: (e) => name(e.state), className: "whitespace-normal" },
+	{ id: "count", header: "Sessions", accessor: (e) => e.count, cell: (e) => fmtInt(e.count) },
+	{
+		id: "share",
+		header: "Share",
+		accessor: (e) => e.share,
+		format: (v) => fmtPct(v as number),
+		cell: (e) => (
+			<div className="flex items-center gap-2">
+				<ShareBar share={e.share} />
+				<span className="w-12 text-right text-xs tabular-nums">{fmtPct(e.share)}</span>
+			</div>
+		),
+		align: "left",
+		filter: false,
+		minWidth: 140,
+	},
+];
+
+const MOVE_COLUMNS: DataColumn<GraphEdge>[] = [
+	{ id: "from", header: "From", accessor: (e) => name(e.from), className: "whitespace-normal" },
+	{ id: "to", header: "To", accessor: (e) => name(e.to), className: "whitespace-normal" },
+	{ id: "count", header: "Times", accessor: (e) => e.count, cell: (e) => fmtInt(e.count) },
+	{ id: "share", header: "Share", accessor: (e) => e.share, cell: (e) => fmtPct(e.share), format: (v) => fmtPct(v as number) },
+	{
+		id: "before",
+		header: "Avg before",
+		title: "Average time in the state before the move",
+		accessor: (e) => (e.from === "(start)" ? null : e.count ? e.dwellMs / e.count : 0),
+		cell: (e) => (e.from === "(start)" ? "–" : fmtDuration(e.count ? e.dwellMs / e.count : 0)),
+		format: (_v, e) => (e.from === "(start)" ? "" : fmtDuration(e.count ? e.dwellMs / e.count : 0)),
+		exportValue: (e) => (e.from === "(start)" ? null : (e.count ? e.dwellMs / e.count : 0) / 1000),
+	},
+];
 
 function Tables({ graph }: { graph: GraphData }) {
 	const out = exits(graph);
 	const moves = topEdges(graph.edges, 15);
 	return (
 		<div className="grid gap-4 xl:grid-cols-2">
-			<Section title="Where sessions end" description="The last state before leaving (sessions that are over).">
+			<Section className="min-w-0" title="Where sessions end" description="The last state before leaving (sessions that are over).">
 				{out.length ? (
-					<Table>
-						<TableHeader>
-							<TableRow>
-								<TableHead>State</TableHead>
-								<TableHead className="text-right">Sessions</TableHead>
-								<TableHead className="w-40">Share</TableHead>
-							</TableRow>
-						</TableHeader>
-						<TableBody>
-							{out.map((e) => (
-								<TableRow key={e.state}>
-									<TableCell className="whitespace-normal">{name(e.state)}</TableCell>
-									<TableCell className="text-right tabular-nums">{fmtInt(e.count)}</TableCell>
-									<TableCell>
-										<div className="flex items-center gap-2">
-											<ShareBar share={e.share} />
-											<span className="w-12 text-right text-xs tabular-nums">{fmtPct(e.share)}</span>
-										</div>
-									</TableCell>
-								</TableRow>
-							))}
-						</TableBody>
-					</Table>
+					<DataTable id="flow-exits" label="Where sessions end" columns={EXIT_COLUMNS} data={out} rowId={(e) => e.state} />
 				) : (
 					<p className="text-sm text-muted-foreground">No session in this range is over yet.</p>
 				)}
 			</Section>
-			<Section title="Busiest moves" description="Share = of all moves out of the same state.">
-				<Table>
-					<TableHeader>
-						<TableRow>
-							<TableHead>From</TableHead>
-							<TableHead>To</TableHead>
-							<TableHead className="text-right">Times</TableHead>
-							<TableHead className="text-right">Share</TableHead>
-							<TableHead className="text-right">Avg before</TableHead>
-						</TableRow>
-					</TableHeader>
-					<TableBody>
-						{moves.map((e) => (
-							<TableRow key={`${e.from}>${e.to}`}>
-								<TableCell className="whitespace-normal">{name(e.from)}</TableCell>
-								<TableCell className="whitespace-normal">{name(e.to)}</TableCell>
-								<TableCell className="text-right tabular-nums">{fmtInt(e.count)}</TableCell>
-								<TableCell className="text-right tabular-nums">{fmtPct(e.share)}</TableCell>
-								<TableCell className="text-right tabular-nums">{e.from === "(start)" ? "–" : fmtDuration(e.count ? e.dwellMs / e.count : 0)}</TableCell>
-							</TableRow>
-						))}
-					</TableBody>
-				</Table>
+			<Section className="min-w-0" title="Busiest moves" description="Share = of all moves out of the same state.">
+				<DataTable id="flow-moves" label="Busiest moves" columns={MOVE_COLUMNS} data={moves} rowId={(e) => `${e.from}>${e.to}`} />
 			</Section>
 		</div>
 	);

@@ -1,12 +1,12 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Play } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ErrorState, JsonBlock, PageHeader, Section } from "@/components/common";
+import { DataTable, typeFromSql, type DataColumn } from "@/components/data-table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
@@ -112,40 +112,53 @@ function cell(value: unknown): string {
 	return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
+/** One column per result column. Ids are the column names (made unique), so a sort or filter on `n` carries to the next query that has an `n`. */
+export function sqlColumns(columns: SqlResult["columns"]): DataColumn<unknown[]>[] {
+	const used = new Map<string, number>();
+	return columns.map((c, i) => {
+		const seen = used.get(c.name) ?? 0;
+		used.set(c.name, seen + 1);
+		const mapped = typeFromSql(c.type);
+		// t is unix ms in every table here: sort and filter it as a time, but show and export the number as it is.
+		const isTime = c.name === "t" && mapped === "number";
+		return {
+			id: seen ? `${c.name}_${seen + 1}` : c.name,
+			header: c.name,
+			hint: c.type,
+			title: c.type,
+			...(isTime ? { type: "date" as const, exportValue: (row: unknown[]) => row[i] } : mapped ? { type: mapped } : {}),
+			accessor: (row: unknown[]) => row[i],
+			cell: (row: unknown[]) => {
+				const text = cell(row[i]);
+				return <span title={text}>{text}</span>;
+			},
+			format: (value: unknown) => cell(value),
+			// Numbers get a range, times a "last 24 hours" choice, text a "contains" box.
+			filter: mapped || isTime ? undefined : "text",
+			className: mapped === "number" ? "font-mono text-xs" : "max-w-96 truncate font-mono text-xs",
+		} satisfies DataColumn<unknown[]>;
+	});
+}
+
 function SqlTable({ data }: { data: SqlResult }) {
+	const columns = useMemo(() => sqlColumns(data.columns), [data.columns]);
+	const names = data.columns.map((c) => c.name);
 	return (
 		<Section
 			title={`${fmtInt(data.rows.length)} row${data.rows.length === 1 ? "" : "s"}${data.truncated ? " (more exist: raise the limit or narrow the query)" : ""}`}
 			description={`${data.ms} ms on the server`}
 		>
-			<div className="max-h-[60vh] overflow-auto">
-				<Table>
-					<TableHeader>
-						<TableRow>
-							{data.columns.map((c, i) => (
-								<TableHead key={`${c.name}-${i}`} title={c.type}>
-									{c.name} <span className="text-[10px] font-normal text-muted-foreground">{c.type}</span>
-								</TableHead>
-							))}
-						</TableRow>
-					</TableHeader>
-					<TableBody>
-						{data.rows.map((row, r) => (
-							<TableRow key={r}>
-								{row.map((v, c) => (
-									<TableCell
-										key={c}
-										className={typeof v === "number" ? "text-right font-mono text-xs tabular-nums" : "max-w-96 truncate font-mono text-xs"}
-										title={cell(v)}
-									>
-										{cell(v)}
-									</TableCell>
-								))}
-							</TableRow>
-						))}
-					</TableBody>
-				</Table>
-			</div>
+			<DataTable
+				id="query-sql"
+				label="SQL result"
+				columns={columns}
+				data={data.rows}
+				pageSize={100}
+				maxHeight="60vh"
+				search
+				rowJson={(row) => Object.fromEntries(names.map((name, i) => [name, row[i]]))}
+				empty={<p className="text-sm text-muted-foreground">The query returned no rows.</p>}
+			/>
 		</Section>
 	);
 }
