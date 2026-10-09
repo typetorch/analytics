@@ -9,9 +9,9 @@
  *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy      (fleet/http.ts)
  *
- *   admin routes (admin token as Bearer, or the explorer's session cookie); the `web` role gets the reads (GET, the
- *   queries, the SQL), not the changes: the backfill, the alert ack, remote debug watches and commands, the settings, the
- *   access list, erasure
+ *   admin routes (admin token as Bearer, or the explorer's session cookie); the `web` role gets the game-data reads (GET,
+ *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
+ *   server's own configuration: the settings file, storage, the runtime settings, the access list, the debug audit
  *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
  *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=   (from / to: dates, or unix ms / ISO instants)
  *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
@@ -140,6 +140,12 @@ const ERRORS_MAX_INFLATE = 2 * 1024 * 1024;
 /** The OAuth state cookie. */
 /** The answer to the web role on a route that changes something or is for owners. */
 const READ_ONLY = "read-only access: this needs the admin token or an owner's session";
+/**
+ * The only non-GET routes the web role may call: the two read-only query routes (a POST body carries the filters / the
+ * SELECT; nothing changes). Every other POST / PUT / PATCH / DELETE is refused to that role before any handler runs.
+ */
+const WEB_POST_ALLOWED = /^\/v1\/(query\/[A-Za-z-]+|sql)$/;
+const READ_METHODS = new Set(["GET", "HEAD"]);
 const OAUTH_COOKIE = "tt_oauth";
 const OAUTH_PATH = "/v1/auth/roblox";
 const FLEET_GAME_ROUTES = new Set(Object.keys(FLEET_LIMITS));
@@ -1074,7 +1080,16 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const problem = cookieMutationProblem(req, proxyOpts);
 			if (problem) return { response: json(403, { error: problem }) };
 		}
+		// The web role reads: GET / HEAD, or one of the two read-only query POSTs. Decided here, by method, so no handler
+		// has to remember it; the admin-only reads (the settings, storage, the debug audit) go through adminGate instead.
+		if (principal.role === "web" && !READ_METHODS.has(req.method) && !WEB_POST_ALLOWED.test(routePath(req))) return { response: json(403, { error: READ_ONLY }) };
 		return { principal };
+	}
+
+	/** The route of a request, with the explorer's /api prefix taken off (as `handle` does). */
+	function routePath(req: Request): string {
+		const path = new URL(req.url).pathname;
+		return path.startsWith("/api/") ? path.slice(4) : path;
 	}
 
 	/** The admin gate: readGate, and the web role is refused (403): the route changes something, or is for owners. */
@@ -1161,10 +1176,16 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const gate = readGate(req, ip);
 			if ("response" in gate) return gate.response;
 			const manage = (): (Principal & { role: "admin" }) | Response => (gate.principal.role === "admin" ? (gate.principal as Principal & { role: "admin" }) : json(403, { error: READ_ONLY }));
-			if (path === "/v1/settings" && method === "GET") return json(200, liveDials());
+			// The server's own settings file and its disk: owners only (a viewer sees game data, never the server's configuration).
+			if (path === "/v1/settings" && method === "GET") {
+				const admin = manage();
+				return admin instanceof Response ? admin : json(200, liveDials());
+			}
 			if (path === "/v1/queries" && method === "GET") return json(200, { queries: describeQueries() });
 			if (path === "/v1/sql") return method === "POST" ? adhocSql(req) : json(405, { error: "POST only" });
 			if (path === "/v1/storage" && method === "GET") {
+				const admin = manage();
+				if (admin instanceof Response) return admin;
 				if (config.parts.has("analytics") && !warehouse) return analyticsUnavailable();
 				return json(200, await storage());
 			}

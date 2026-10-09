@@ -7,7 +7,7 @@
  *   GET  /v1/fleet/commands?wait=0-8                  -> { watch, commands: [{ id, op, args, by, exp }] }
  *   POST /v1/fleet/results  { j, results: [...] }     -> 202 { accepted, ignored }
  *
- *   admin (the admin token or an explorer session; the GETs also for the read-only web role)
+ *   admin (the admin token or an explorer session; GET /v1/fleet/servers/<job> also for the read-only web role)
  *   GET  /v1/fleet/servers/<job>                      -> { server, state, debug }
  *   POST /v1/fleet/servers/<job>/watch                -> { job, ...debug, wake }   (wake: a wake message went out lately
  *                                                        for this job: "Waking server..."; remote-debug-wake.ts)
@@ -55,8 +55,8 @@ export interface RemoteDebugHttpOptions {
 	/** The answer for a game route without the API key (401, counted per address). */
 	badGameKey(req: Request): Response;
 	/**
-	 * The signed-in gate: the caller, or the answer to send (401/403/404/429). `read` (the GETs: a server's view, a
-	 * command's answer, the audit) lets the read-only web role in; `manage` (a watch, a command) is for admins.
+	 * The signed-in gate: the caller, or the answer to send (401/403/404/429). `read` (one server's view) lets the
+	 * read-only web role in; `manage` (a watch, a command, a command's answer, the audit with its addresses) is for admins.
 	 */
 	admin(req: Request, need: "read" | "manage"): { caller: Caller } | { response: Response };
 	limiters: RemoteDebugLimiters;
@@ -126,7 +126,8 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 		}
 
 		// Admin routes ------------------------------------------------------------------------------------------------------
-		const gate = o.admin(req, method === "GET" ? "read" : "manage");
+		const m = SERVER_ROUTE.exec(path);
+		const gate = o.admin(req, method === "GET" && m && !m[2] ? "read" : "manage");
 		if ("response" in gate) return gate.response;
 		const caller = gate.caller;
 		const who = caller.kind === "roblox" ? `roblox:${caller.userId}` : "token";
@@ -135,7 +136,6 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 			const limit = Number(url.searchParams.get("limit") ?? "100");
 			return json(200, { entries: o.hub.auditLog(Number.isFinite(limit) ? limit : 100) });
 		}
-		const m = SERVER_ROUTE.exec(path);
 		if (!m) return json(404, { error: "not found" });
 		let job: string;
 		try {

@@ -1,6 +1,7 @@
 import { DayBars, fillDays, fillSteps, type DayPoint } from "@/components/DayBars";
 import { StorageCard } from "@/components/StorageCard";
 import { Metric, PageHeader, QueryState, Section } from "@/components/common";
+import { isReadOnly, useAuth } from "@/lib/auth";
 import { describeRange } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum } from "@/lib/format";
 import { bucketText } from "@/lib/perf";
@@ -61,13 +62,15 @@ function Body({ data }: { data: OverviewResult }) {
 export default function Overview() {
 	const { state } = useFilters();
 	const q = useAnalytics("overview");
+	// The storage card is the server's disk: owners only (the backend refuses it to a viewer).
+	const readOnly = isReadOnly(useAuth());
 	return (
 		<>
 			<PageHeader title="Overview" description={`Players, sessions and playtime, ${describeRange(state)}. Session length = first to last event.`} />
 			<QueryState query={q} loadingRows={6}>
 				{(data) => <Body data={data} />}
 			</QueryState>
-			<StorageCard />
+			{readOnly ? null : <StorageCard />}
 		</>
 	);
 }
