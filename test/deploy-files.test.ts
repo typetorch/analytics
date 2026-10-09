@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../src/server/config.ts";
+import { SHUTDOWN_DEADLINE_MS } from "../src/server/lifecycle.ts";
 import { ADMIN, API } from "./harness.ts";
 
 const root = join(import.meta.dir, "..");
@@ -51,6 +52,10 @@ describe("Dockerfile", () => {
 		expect(text).toMatch(/HEALTHCHECK[\s\S]*\/healthz/);
 		expect(text).toContain("EXPOSE 8787");
 		expect(text).toContain('CMD ["bun", "src/server/main.ts"]');
+		// SIGTERM, delivered to bun itself (exec form: bun is PID 1 and handles it), not to a shell.
+		expect(text).toContain("STOPSIGNAL SIGTERM");
+		const commands = lines.filter((l, i) => l.startsWith("CMD") && !lines[i - 1]?.endsWith("\\")); // not HEALTHCHECK's
+		expect(commands).toEqual(['CMD ["bun", "src/server/main.ts"]']);
 		// Debian, not Alpine: DuckDB's prebuilt binding needs glibc.
 		expect(text).not.toMatch(/alpine/i);
 		// The volume is declared after /data is chowned (later changes to a volume path are discarded).
@@ -85,10 +90,18 @@ describe("compose.yaml", () => {
 		expect(text).toContain('- "8787"');
 		expect(text).toMatch(/TYPETORCH_API_KEY: \$\{TYPETORCH_API_KEY:\?/);
 		expect(text).toMatch(/TYPETORCH_ADMIN_TOKEN: \$\{TYPETORCH_ADMIN_TOKEN:\?/);
-		expect(text).toContain("stop_grace_period: 60s");
 		// The port is published only by the local override, so a Coolify host's own 8787 is never taken.
 		expect(text).not.toMatch(/^\s+ports:/m);
 		expect(read("compose.local.yaml")).toContain("127.0.0.1:");
+	});
+
+	test("SIGTERM reaches the server (init), and the stop grace period leaves room for the server's own deadline", () => {
+		expect(text).toMatch(/^ {4}init: true$/m);
+		const grace = /^ {4}stop_grace_period: (\d+)s$/m.exec(text);
+		expect(grace).not.toBeNull();
+		// The server exits within SHUTDOWN_DEADLINE_MS whatever happens; Docker's SIGKILL must come later.
+		expect(Number(grace?.[1]) * 1000).toBeGreaterThanOrEqual(SHUTDOWN_DEADLINE_MS + 5000);
+		expect(Number(grace?.[1])).toBeLessThanOrEqual(30);
 	});
 
 	test("it passes TYPETORCH_RUNTIME_SETTINGS through (the way back in after a Settings page lockout must reach the container)", () => {
