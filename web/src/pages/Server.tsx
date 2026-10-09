@@ -173,7 +173,9 @@ function ServerView({ job }: { job: string }) {
 
 	const [tabParam, setTab] = useParam("tab", "status");
 	// (the remote ops below are declared before any early return: hooks run in the same order every render)
-	const tab: TabId = SERVER_TABS.some((t) => t.id === tabParam) ? (tabParam as TabId) : "status";
+	// The audit (who sent which command, from which address) is for owners; a viewer's page has no fetches anyway.
+	const tabs = readOnly ? SERVER_TABS.filter((t) => t.id !== "audit") : SERVER_TABS;
+	const tab: TabId = tabs.some((t) => t.id === tabParam) ? (tabParam as TabId) : "status";
 	const status = useRemote<RemoteStatus>(call, "status");
 	// Once, as soon as the server polls, whatever the tab: the header's place version and the Status tab come from it.
 	useFirstFetch(ready, status.run);
@@ -233,7 +235,7 @@ function ServerView({ job }: { job: string }) {
 					<Tabs value={tab} onValueChange={setTab} className="gap-4">
 						<div className="-mx-1 overflow-x-auto px-1 pb-1 [scrollbar-width:thin]">
 							<TabsList className="w-max" aria-label="Server debug">
-								{SERVER_TABS.map((t) => (
+								{tabs.map((t) => (
 									<TabsTrigger key={t.id} value={t.id} className="px-2.5">
 										{t.label}
 									</TabsTrigger>
@@ -271,7 +273,7 @@ function ServerView({ job }: { job: string }) {
 							<NetworkTab active={tab === "network"} />
 						</TabsContent>
 						<TabsContent value="audit" forceMount className="data-[state=inactive]:hidden">
-							<AuditTab active={tab === "audit"} job={job} />
+							{readOnly ? null : <AuditTab active={tab === "audit"} job={job} />}
 						</TabsContent>
 					</Tabs>
 				</>

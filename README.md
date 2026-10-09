@@ -288,12 +288,21 @@ needs the admin or the web role. `GET /v1/auth/check` and the login routes only 
 
 ### Read-only access (the web role)
 
-To let someone look at the explorer without letting them change anything, give them the **web** role. It sees everything
-the explorer shows (the queries, the SQL page, the rollups, error logs, the live stream, the fleet lists and streams, a
-server's page with its heartbeats and audit) and gets `403 read-only access` on everything that changes something or is
-for owners: the identity backfill, the alert acknowledgement, remote debug watches and commands (they run on a live game
-server), the Settings page and its API, the owner list, erasure, and `/healthz`'s admin view. It is **Sign in with Roblox
-only**: there is no token for it to leak. List the viewers' Roblox UserIds in `TYPETORCH_WEB_VIEWERS`, or on the Settings
+To let someone look at the explorer without letting them change anything, give them the **web** role. It sees the game's
+data (the queries, the SQL page, the rollups, error logs, the live stream, the fleet lists and streams, a server's page with
+its heartbeats) and nothing about the server itself. Two rules, both enforced in the backend before any handler runs:
+
+- **Reads only, by method.** A web session may send `GET` / `HEAD`, plus the two read-only query routes that take their
+  filters in a `POST` body (`POST /v1/query/<name>`, `POST /v1/sql`: one SELECT over the two analytics views, in a
+  separate DuckDB with file access off). Every other `POST` / `PUT` / `PATCH` / `DELETE` answers `403 read-only access`
+  whatever the route: the identity backfill, the alert acknowledgement, remote debug watches and commands (they run on a
+  live game server), the settings, the owner list, erasure.
+- **Never the server's configuration.** The settings file's live dials (`GET /v1/settings`), the data folder and disk
+  (`GET /v1/storage`), the runtime settings (`GET /v1/admin/settings`, the Settings page), the owner list (`GET /v1/access`),
+  the remote debug audit with its addresses and a command's answer, and `/healthz`'s admin view are owners only. No route
+  reads `.env` or the environment for anyone; secrets are never returned to the admin either.
+
+It is **Sign in with Roblox only**: there is no token for it to leak. List the viewers' Roblox UserIds in `TYPETORCH_WEB_VIEWERS`, or on the Settings
 page under **Viewers (read-only)** (saved while the server runs; see
 [Runtime settings](#runtime-settings-the-settings-page)). They sign in like owners do and get the web role; an owner on
 both lists is an admin. Taking a viewer off the list ends their session on the next request.
@@ -347,7 +356,8 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 
 **game** = the API key (or the previous key). **admin** = the admin token as a Bearer header, or an owner's explorer session
 cookie. **web** = the read-only role: a Roblox viewer's session cookie (no token); it gets every route marked `admin, web`
-below and `403` on the rest of the admin routes. **open** = no credentials.
+below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / `PATCH` other than the two query routes.
+**open** = no credentials.
 
 | Route | Role | What |
 |---|---|---|
@@ -359,8 +369,8 @@ below and `403` on the rest of the admin routes. **open** = no credentials.
 | `POST /v1/query/<name>`, `GET /v1/queries` | admin, web | the logical queries |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin, web | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
 | `POST /v1/sql` | admin, web | one read-only SELECT |
-| `GET /v1/storage` | admin, web | what the data folder holds |
-| `GET /v1/settings` | admin, web | live dials from `data/settings.json` |
+| `GET /v1/storage` | admin | what the data folder holds |
+| `GET /v1/settings` | admin | live dials from `data/settings.json` |
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
@@ -368,8 +378,8 @@ below and `403` on the rest of the admin routes. **open** = no credentials.
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
-| `GET /v1/fleet/servers/<jobId>`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin, web | [remote debug](#remote-debug) reads: one server's view, a command's answer, the audit |
-| `POST /v1/fleet/servers/<jobId>/watch`, `POST .../commands` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
+| `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state) |
+| `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |

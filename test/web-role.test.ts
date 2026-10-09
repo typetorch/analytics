@@ -43,15 +43,11 @@ describe("the web role", () => {
 
 	test("reads work: queries, SQL, storage, identity, errors, the live stream, fleet lists and a server's view", async () => {
 		expect((await h.call("/v1/queries", { headers: web })).status).toBe(200);
-		expect((await h.call("/v1/settings", { headers: web })).status).toBe(200);
 		expect((await h.call("/v1/identity", { headers: web })).status).toBe(200);
 		expect((await h.call("/v1/errors", { headers: web })).status).toBe(200);
 		expect((await h.call("/v1/fleet/servers", { headers: web })).status).toBe(200);
 		expect((await h.call("/v1/fleet/alerts", { headers: web })).status).toBe(200);
 		expect(await asJson(await h.call(`/v1/fleet/servers/${JOB}`, { headers: web }))).toMatchObject({ state: "live", debug: { watched: false } });
-		expect((await h.call("/v1/fleet/debug/audit", { headers: web })).status).toBe(200);
-		expect((await h.call(`/v1/fleet/servers/${JOB}/commands/nope`, { headers: web })).status).toBe(404);
-		expect((await h.call("/v1/storage", { headers: web })).status).toBe(200);
 		expect((await h.call("/v1/rollups/daily?from=2026-10-01&to=2026-10-09", { headers: web })).status).toBe(200);
 		expect((await h.call("/v1/query/overview", { method: "POST", ...json({ filters: { from: T0 - 86_400_000, to: T0 } }), headers: { ...JSON_TYPE, ...web, ...XT } })).status).toBe(200);
 		expect((await h.call("/v1/sql", { method: "POST", ...json({ sql: "select 1 as one" }), headers: { ...JSON_TYPE, ...web, ...XT } })).status).toBe(200);
@@ -68,6 +64,11 @@ describe("the web role", () => {
 			expect(`${path} ${res.status}`).toBe(`${path} 403`);
 			expect((await asJson(res)).error).toContain("read-only");
 		};
+		// The server's own configuration, even as reads.
+		await refused("/v1/settings", {});
+		await refused("/v1/storage", {});
+		await refused("/v1/fleet/debug/audit", {});
+		await refused(`/v1/fleet/servers/${JOB}/commands/nope`, {});
 		await refused("/v1/admin/settings", {});
 		await refused("/v1/admin/settings", { method: "PATCH", ...json({ ipPerMinute: 5000 }), headers: JSON_TYPE });
 		await refused("/v1/admin/settings/test-alert", { method: "POST" });
@@ -89,6 +90,50 @@ describe("the web role", () => {
 		const res = await h.call("/v1/fleet/alerts/1/ack", { method: "POST", ...json({}), headers: { ...JSON_TYPE, ...web } });
 		expect(res.status).toBe(403);
 		expect((await asJson(res)).error).toContain("x-typetorch");
+	});
+
+	test("by method: every POST / PUT / PATCH / DELETE under /v1 is refused to the web role, known route or not; only the two query POSTs pass", async () => {
+		const session = { ...web, ...XT, origin: "http://backend.test", ...JSON_TYPE };
+		const paths = [
+			"/v1/queries",
+			"/v1/identity/backfill",
+			"/v1/identity/p1/profile",
+			"/v1/errors/fp",
+			"/v1/live",
+			"/v1/rollups/daily",
+			"/v1/storage",
+			"/v1/settings",
+			"/v1/access",
+			"/v1/admin/settings",
+			"/v1/admin/settings/test-alert",
+			"/v1/fleet/servers",
+			"/v1/fleet/alerts",
+			"/v1/fleet/alerts/1/ack",
+			"/v1/fleet/stream",
+			`/v1/fleet/servers/${JOB}`,
+			`/v1/fleet/servers/${JOB}/watch`,
+			`/v1/fleet/servers/${JOB}/commands`,
+			`/v1/fleet/servers/${JOB}/commands/x`,
+			"/v1/fleet/debug/audit",
+			"/v1/no-such-route",
+			"/api/v1/fleet/alerts/1/ack",
+		];
+		for (const path of paths) {
+			for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+				const res = await h.call(path, { method, ...json({}), headers: session });
+				expect(`${method} ${path} ${res.status}`).toBe(`${method} ${path} 403`);
+				expect((await asJson(res)).error).toContain("read-only");
+			}
+		}
+		// The game's own write routes (POST /v1/identity, /v1/errors, ...) never take a session (the API key only): 401.
+		for (const path of ["/v1/ingest", "/v1/errors", "/v1/identity", "/v1/fleet/heartbeat"]) expect((await h.call(path, { method: "POST", ...json({}), headers: session })).status).toBe(401);
+		// The two read-only POSTs pass the method rule (and are the only ones that do).
+		expect((await h.call("/v1/query/overview", { method: "POST", ...json({ filters: { from: T0 - 86_400_000, to: T0 } }), headers: session })).status).toBe(200);
+		expect((await h.call("/v1/sql", { method: "POST", ...json({ sql: "select 1 as one" }), headers: session })).status).toBe(200);
+		// And the SQL route reads no file for anyone (DuckDB's file functions are refused before the query runs).
+		const file = await h.call("/v1/sql", { method: "POST", ...json({ sql: "select * from read_text('/etc/passwd')" }), headers: session });
+		expect(file.status).toBe(400);
+		expect((await asJson(file)).error).not.toContain("root:");
 	});
 
 	test("the viewer list is a runtime setting: validated, saved from the dashboard, shown with its bounds; the env list is the default", async () => {
