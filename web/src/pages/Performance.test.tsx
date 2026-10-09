@@ -164,9 +164,14 @@ describe("Performance page", () => {
 		const phone = (await screen.findByText("Phone", { selector: "td" })).closest("tr") as HTMLElement;
 		expect(within(phone).getByText("31 fps")).toBeTruthy();
 		expect(within(phone).getByText("19 fps")).toBeTruthy(); // p90 on the bad side
-		const fpsCell = within(phone).getByText("6 fps");
-		expect(fpsCell.getAttribute("data-value")).toBe("6");
+		expect(within(phone).getByText("6 fps")).toBeTruthy();
 		expect(screen.getByText("Desktop", { selector: "td" })).toBeTruthy();
+		// The shared table: "All" is pinned above the groups, and the groups sort by the raw value (fps p50: phone 31 < desktop 61).
+		const table = phone.closest("table") as HTMLElement;
+		const firstCells = () => [...table.querySelectorAll("tbody tr")].map((tr) => tr.querySelector("td")?.textContent);
+		expect(firstCells()).toEqual(["All", "Phone", "Desktop"]);
+		fireEvent.click(within(table).getByRole("button", { name: /^Frame rate p50/ }));
+		await waitFor(() => expect(firstCells()).toEqual(["All", "Desktop", "Phone"]));
 		expect(calls.find((c) => c.name === "perf-client")?.options).toMatchObject({ by: "dev" });
 		// Servers have no device class: the server query runs ungrouped.
 		expect(calls.find((c) => c.name === "perf-server")?.options).toMatchObject({ by: "none" });
@@ -204,7 +209,9 @@ describe("Performance page", () => {
 		expect(within(row).getByText("worse")).toBeTruthy();
 		const mem = screen.getByText("Memory p50", { selector: "td" }).closest("tr") as HTMLElement;
 		expect(within(mem).getByText("better")).toBeTruthy();
-		expect(screen.getByText("e4f5a6b-222222 #42", { selector: "th" })).toBeTruthy();
+		expect(screen.getByRole("columnheader", { name: /^e4f5a6b-222222 #42/ })).toBeTruthy();
+		// The sample counts stay pinned on top.
+		expect(screen.getByText("Client samples", { selector: "td" }).closest("tr")?.className).toMatch(/font-medium/);
 	});
 
 	it("live servers: TPS and memory from heartbeats, a server's history on demand", async () => {

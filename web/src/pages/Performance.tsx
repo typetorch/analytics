@@ -4,18 +4,18 @@
  * Every chart carries deploy marks (releases, rollbacks, kernel publishes, backup refreshes); clicking one filters to its
  * build. Builds can be compared side by side, or before vs after a mark over two equal windows.
  *
- * Tables are plain markup with each number's raw value in `data-value` (the shared sortable table replaces them later).
+ * Every table is the shared DataTable (sort, filter, columns, CSV); a number column sorts by its raw value.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router";
 import { cn } from "cn";
+import { DataTable, type DataColumn } from "@/components/data-table";
 import { PerfChart } from "@/components/PerfChart";
 import { EmptyState, ErrorState, LoadingBlock, PageHeader, QueryState, Section } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, ApiError } from "@/lib/api";
@@ -53,6 +53,7 @@ import {
 	type PerfGroup,
 	type PerfGroupBy,
 	type PerfSeriesResult,
+	type PerfServer,
 	type ServerMetricPoint,
 } from "@/lib/perf";
 import type { Filters } from "@/lib/types";
@@ -149,58 +150,62 @@ function MarkBar({ mark, filtered, onFilter, onCompare, onClear }: { mark: Deplo
 
 // Tables ----------------------------------------------------------------------------------------------------------------
 
-function NumCell({ value, text }: { value: number | null | undefined; text?: string }) {
-	return (
-		<TableCell className="text-right tabular-nums" data-value={value ?? ""}>
-			{text ?? fmtInt(value)}
-		</TableCell>
-	);
+/** A count column: sorts by the number, shows it grouped. */
+function countColumn<T>(id: string, header: string, value: (row: T) => number | null | undefined, extra: Partial<DataColumn<T>> = {}): DataColumn<T> {
+	return { id, header, type: "number", accessor: (r) => value(r) ?? null, cell: (r) => fmtInt(value(r)), format: (v) => fmtInt(v as number | null), ...extra };
+}
+
+/** A metric column ("Frame rate p90"): sorts by the raw value, shows it with its unit. */
+function metricColumn<T>(id: string, header: string, key: string, value: (row: T) => number | null | undefined, extra: Partial<DataColumn<T>> = {}): DataColumn<T> {
+	return {
+		id,
+		header,
+		type: "number",
+		accessor: (r) => value(r) ?? null,
+		cell: (r) => fmtMetric(key, value(r)),
+		format: (v) => fmtMetric(key, v as number | null),
+		className: "whitespace-nowrap",
+		...extra,
+	};
+}
+
+/** A group with its name for people (the "All" row is pinned on top when there are groups). */
+type GroupRow = PerfGroup & { label: string };
+
+export function groupColumns(side: "client" | "server", by: PerfGroupBy, metricKeys: readonly string[]): DataColumn<GroupRow>[] {
+	return [
+		{ id: "group", header: GROUP_BY_LABELS[by], type: by === "none" ? "text" : "enum", accessor: (g) => g.label, className: "whitespace-nowrap" },
+		countColumn<GroupRow>("samples", "Samples", (g) => g.samples),
+		...(side === "client"
+			? [countColumn<GroupRow>("sessions", "Sessions", (g) => g.sessions), countColumn<GroupRow>("players", "Players", (g) => g.players)]
+			: [countColumn<GroupRow>("servers", "Servers", (g) => g.servers)]),
+		{ id: "seq", header: "Seq", type: "number", accessor: (g) => g.seq, title: "The highest deploy seq seen in the group", defaultHidden: true },
+		...metricKeys.flatMap((k) => {
+			const label = side === "server" && k === "mem" ? "Server memory" : (METRICS[k]?.label ?? k);
+			return [
+				...PERCENTILES.map((p) => metricColumn<GroupRow>(`${k}-${p}`, `${label} ${p}`, k, (g) => g.metrics[k]?.[p], { title: PERCENTILE_HELP[p] })),
+				metricColumn<GroupRow>(`${k}-avg`, `${label} avg`, k, (g) => g.metrics[k]?.avg, { defaultHidden: true }),
+			];
+		}),
+		{ id: "lastSeen", header: "Last sample", type: "date", accessor: (g) => g.lastSeen, defaultHidden: true, className: "text-xs" },
+	];
 }
 
 function GroupTable({ result, metricKeys }: { result: PerfSeriesResult; metricKeys: readonly string[] }) {
-	const client = result.side === "client";
-	const rows: PerfGroup[] = result.by === "none" ? [result.overall] : [result.overall, ...result.groups];
+	const columns = useMemo(() => groupColumns(result.side, result.by, metricKeys), [result.side, result.by, metricKeys]);
+	const overall: GroupRow = { ...result.overall, label: "All" };
+	const groups: GroupRow[] = result.groups.map((g) => ({ ...g, label: groupLabel(result.by, g.key, g.seq) }));
+	const grouped = result.by !== "none";
 	return (
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>{GROUP_BY_LABELS[result.by]}</TableHead>
-					<TableHead className="text-right">Samples</TableHead>
-					{client ? (
-						<>
-							<TableHead className="text-right">Sessions</TableHead>
-							<TableHead className="text-right">Players</TableHead>
-						</>
-					) : (
-						<TableHead className="text-right">Servers</TableHead>
-					)}
-					{metricKeys.flatMap((k) =>
-						PERCENTILES.map((p) => (
-							<TableHead key={`${k}-${p}`} className="text-right whitespace-nowrap">
-								{METRICS[k]?.label ?? k} {p}
-							</TableHead>
-						)),
-					)}
-				</TableRow>
-			</TableHeader>
-			<TableBody>
-				{rows.map((g, i) => (
-					<TableRow key={i === 0 ? "(all)" : g.key} className={i === 0 && result.by !== "none" ? "font-medium" : undefined}>
-						<TableCell className="whitespace-nowrap">{i === 0 ? "All" : groupLabel(result.by, g.key, g.seq)}</TableCell>
-						<NumCell value={g.samples} />
-						{client ? (
-							<>
-								<NumCell value={g.sessions} />
-								<NumCell value={g.players} />
-							</>
-						) : (
-							<NumCell value={g.servers} />
-						)}
-						{metricKeys.flatMap((k) => PERCENTILES.map((p) => <NumCell key={`${k}-${p}`} value={g.metrics[k]?.[p]} text={fmtMetric(k, g.metrics[k]?.[p])} />))}
-					</TableRow>
-				))}
-			</TableBody>
-		</Table>
+		<DataTable
+			id={`perf-${result.side}-groups`}
+			label={result.side === "client" ? "Client groups" : "Server groups"}
+			columns={columns}
+			data={grouped ? groups : [overall]}
+			{...(grouped ? { pinnedRows: [overall] } : {})}
+			rowId={(g) => g.key}
+			maxHeight="28rem"
+		/>
 	);
 }
 
@@ -356,9 +361,48 @@ function ServerHistory({ job, since, ...marks }: { job: string; since: number } 
 	);
 }
 
+/** The live servers' columns; the last one opens a server's history (`job` is the open one). */
+export function liveServerColumns(job: string, setJob: (job: string) => void): DataColumn<PerfServer>[] {
+	return [
+		{ id: "job", header: "Server", type: "text", accessor: (s) => s.job, cell: (s) => <span title={s.job}>{shortId(s.job, 6)}</span>, className: "font-mono text-xs" },
+		{ id: "branch", header: "Branch", type: "enum", accessor: (s) => s.branch },
+		{
+			id: "build",
+			header: "Build",
+			type: "enum",
+			accessor: (s) => s.artifact,
+			cell: (s) => `${s.artifact ?? "–"}${s.appliedSeq ? ` #${s.appliedSeq}` : ""}`,
+			className: "font-mono text-xs whitespace-nowrap",
+		},
+		countColumn<PerfServer>("players", "Players", (s) => s.players),
+		metricColumn<PerfServer>("tps", "TPS", "tps", (s) => s.tps),
+		metricColumn<PerfServer>("tpsMin", "TPS min", "tps", (s) => s.tpsMin, { title: "The slowest step in the last heartbeat window" }),
+		metricColumn<PerfServer>("physFps", "Physics FPS", "physFps", (s) => s.physFps),
+		metricColumn<PerfServer>("memMb", "Memory", "mem", (s) => s.memMb),
+		metricColumn<PerfServer>("luaMb", "Lua heap", "mem", (s) => s.luaMb),
+		{
+			id: "history",
+			header: "History",
+			accessor: () => null,
+			cell: (s) => (
+				<Button size="sm" variant={s.job === job ? "secondary" : "outline"} className="h-7" onClick={() => setJob(s.job === job ? "" : s.job)} aria-pressed={s.job === job}>
+					History
+				</Button>
+			),
+			sortable: false,
+			filter: false,
+			searchable: false,
+			hideable: false,
+			align: "right",
+			exportValue: () => null,
+		},
+	];
+}
+
 function LiveServers({ branch, since, ...marks }: { branch: string | undefined; since: number } & MarkProps) {
 	const [job, setJob] = useParam("job");
 	const q = useQuery({ queryKey: ["fleet", "perf-servers", branch ?? ""], queryFn: ({ signal }) => api.perfServers(branch, signal), refetchInterval: 30_000, retry: false });
+	const columns = useMemo(() => liveServerColumns(job, setJob), [job, setJob]);
 	return (
 		<Section title="Live servers" description="Each server's latest TPS and memory from its heartbeat; pick one for its history." contentClassName="space-y-3">
 			<QueryState query={q} isEmpty={(d) => d.servers.length === 0} empty="No live servers right now.">
@@ -367,47 +411,15 @@ function LiveServers({ branch, since, ...marks }: { branch: string | undefined; 
 					return (
 						<>
 							{!hasMetrics ? <p className="text-xs text-muted-foreground">These heartbeats carry no TPS or memory yet (they come with the heartbeat metrics update).</p> : null}
-							<Table>
-								<TableHeader>
-									<TableRow>
-										<TableHead>Server</TableHead>
-										<TableHead>Branch</TableHead>
-										<TableHead>Build</TableHead>
-										<TableHead className="text-right">Players</TableHead>
-										<TableHead className="text-right">TPS</TableHead>
-										<TableHead className="text-right">TPS min</TableHead>
-										<TableHead className="text-right">Physics FPS</TableHead>
-										<TableHead className="text-right">Memory</TableHead>
-										<TableHead className="text-right">Lua heap</TableHead>
-										<TableHead />
-									</TableRow>
-								</TableHeader>
-								<TableBody>
-									{d.servers.map((s) => (
-										<TableRow key={s.job} data-state={s.job === job ? "selected" : undefined}>
-											<TableCell className="font-mono text-xs" title={s.job}>
-												{shortId(s.job, 6)}
-											</TableCell>
-											<TableCell>{s.branch ?? "–"}</TableCell>
-											<TableCell className="font-mono text-xs">
-												{s.artifact ?? "–"}
-												{s.appliedSeq ? ` #${s.appliedSeq}` : ""}
-											</TableCell>
-											<NumCell value={s.players} />
-											<NumCell value={s.tps} text={fmtMetric("tps", s.tps)} />
-											<NumCell value={s.tpsMin} text={fmtMetric("tps", s.tpsMin)} />
-											<NumCell value={s.physFps} text={fmtMetric("physFps", s.physFps)} />
-											<NumCell value={s.memMb} text={fmtMetric("mem", s.memMb)} />
-											<NumCell value={s.luaMb} text={fmtMetric("mem", s.luaMb)} />
-											<TableCell className="text-right">
-												<Button size="sm" variant={s.job === job ? "secondary" : "outline"} className="h-7" onClick={() => setJob(s.job === job ? "" : s.job)} aria-pressed={s.job === job}>
-													History
-												</Button>
-											</TableCell>
-										</TableRow>
-									))}
-								</TableBody>
-							</Table>
+							<DataTable
+								id="perf-live-servers"
+								label="Live servers"
+								columns={columns}
+								data={d.servers}
+								rowId={(s) => s.job}
+								isRowSelected={(s) => s.job === job}
+								maxHeight="24rem"
+							/>
 						</>
 					);
 				}}
@@ -432,65 +444,94 @@ function periodLabel(result: PerfCompareResult, p: ComparePeriod): string {
 	return groupLabel("art", p.key, p.seq);
 }
 
-export function CompareTable({ result }: { result: PerfCompareResult }) {
+/** One row of the compare table: a metric at a percentile (or a sample count) per period, and the change. */
+interface CompareRow {
+	id: string;
+	label: string;
+	/** The metric key for formatting, or "samples". */
+	key: string;
+	values: (number | null)[];
+	change: ReturnType<typeof delta>;
+}
+
+export function compareRows(result: PerfCompareResult): { pinned: CompareRow[]; rows: CompareRow[] } {
 	const periods = result.periods;
 	const pair = periods.length === 2;
 	const info = (side: "client" | "server", key: string) => (side === "client" ? result.clientMetrics : result.serverMetrics).find((m) => m.key === key);
+	const pinned: CompareRow[] = [
+		{ id: "client-samples", label: "Client samples", key: "samples", values: periods.map((p) => p.client.samples), change: null },
+		{ id: "server-samples", label: "Server samples", key: "samples", values: periods.map((p) => p.server.samples), change: null },
+	];
+	const rows = COMPARE_ROWS.flatMap(({ side, key }) =>
+		PERCENTILES.map((pct): CompareRow => {
+			const values = periods.map((p) => p[side].metrics[key]?.[pct] ?? null);
+			return {
+				id: `${side}-${key}-${pct}`,
+				label: `${side === "server" && key === "mem" ? "Server memory" : (METRICS[key]?.label ?? key)} ${pct}`,
+				key,
+				values,
+				change: pair ? delta(values[0], values[1], info(side, key)?.higherIsBetter ?? true) : null,
+			};
+		}),
+	);
+	return { pinned, rows };
+}
+
+function compareColumns(result: PerfCompareResult): DataColumn<CompareRow>[] {
+	const fmt = (row: CompareRow, v: number | null | undefined) => (row.key === "samples" ? fmtInt(v) : fmtMetric(row.key, v));
+	const columns: DataColumn<CompareRow>[] = [
+		{ id: "metric", header: "Metric", type: "text", accessor: (r) => r.label, className: "whitespace-nowrap", hideable: false },
+		...result.periods.map(
+			(p, i): DataColumn<CompareRow> => ({
+				id: `period-${i}`,
+				header: periodLabel(result, p),
+				type: "number",
+				accessor: (r) => r.values[i] ?? null,
+				cell: (r) => fmt(r, r.values[i]),
+				format: (v, r) => fmt(r, v as number | null),
+				className: "whitespace-nowrap",
+				headerClassName: "whitespace-nowrap",
+				filter: false,
+			}),
+		),
+	];
+	if (result.periods.length === 2) {
+		columns.push({
+			id: "change",
+			header: "Change",
+			type: "number",
+			title: "From the first column to the second; green is better, red is worse",
+			accessor: (r) => (r.change ? Math.round(r.change.pct * 10) / 10 : null),
+			cell: (r) =>
+				r.key === "samples" ? (
+					""
+				) : (
+					<span className={cn(r.change?.better === true && "text-[var(--status-good)]", r.change?.better === false && "text-[var(--status-critical)]")}>
+						{fmtDelta(r.change)}
+						{r.change && r.change.better !== null ? <span className="ml-1 text-xs">{r.change.better ? "better" : "worse"}</span> : null}
+					</span>
+				),
+			format: (_v, r) => fmtDelta(r.change),
+			filter: false,
+		});
+	}
+	return columns;
+}
+
+export function CompareTable({ result }: { result: PerfCompareResult }) {
+	const columns = useMemo(() => compareColumns(result), [result]);
+	const { pinned, rows } = useMemo(() => compareRows(result), [result]);
 	return (
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>Metric</TableHead>
-					{periods.map((p) => (
-						<TableHead key={p.key} className="text-right whitespace-nowrap">
-							{periodLabel(result, p)}
-						</TableHead>
-					))}
-					{pair ? <TableHead className="text-right">Change</TableHead> : null}
-				</TableRow>
-			</TableHeader>
-			<TableBody>
-				<TableRow>
-					<TableCell className="text-muted-foreground">Client samples</TableCell>
-					{periods.map((p) => (
-						<NumCell key={p.key} value={p.client.samples} />
-					))}
-					{pair ? <TableCell /> : null}
-				</TableRow>
-				<TableRow>
-					<TableCell className="text-muted-foreground">Server samples</TableCell>
-					{periods.map((p) => (
-						<NumCell key={p.key} value={p.server.samples} />
-					))}
-					{pair ? <TableCell /> : null}
-				</TableRow>
-				{COMPARE_ROWS.flatMap(({ side, key }) =>
-					PERCENTILES.map((pct) => {
-						const values = periods.map((p) => p[side].metrics[key]?.[pct] ?? null);
-						const d = pair ? delta(values[0], values[1], info(side, key)?.higherIsBetter ?? true) : null;
-						return (
-							<TableRow key={`${side}-${key}-${pct}`}>
-								<TableCell className="whitespace-nowrap">
-									{side === "server" && key === "mem" ? "Server memory" : (METRICS[key]?.label ?? key)} {pct}
-								</TableCell>
-								{values.map((v, i) => (
-									<NumCell key={periods[i]?.key ?? i} value={v} text={fmtMetric(key, v)} />
-								))}
-								{pair ? (
-									<TableCell
-										className={cn("text-right tabular-nums", d?.better === true && "text-[var(--status-good)]", d?.better === false && "text-[var(--status-critical)]")}
-										data-value={d ? Math.round(d.pct * 10) / 10 : ""}
-									>
-										{fmtDelta(d)}
-										{d && d.better !== null ? <span className="ml-1 text-xs">{d.better ? "better" : "worse"}</span> : null}
-									</TableCell>
-								) : null}
-							</TableRow>
-						);
-					}),
-				)}
-			</TableBody>
-		</Table>
+		<DataTable
+			id={`perf-compare-${result.mode}`}
+			label={result.mode === "around" ? "Before vs after" : "Builds side by side"}
+			columns={columns}
+			data={rows}
+			pinnedRows={pinned}
+			rowId={(r) => r.id}
+			search={false}
+			pageSize={100}
+		/>
 	);
 }
 
