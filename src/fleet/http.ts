@@ -4,6 +4,7 @@
  *
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy     API key (game role)
  *   GET  /v1/fleet/servers?branch=&maxAge=                          admin token
+ *   GET  /v1/fleet/servers/<jobId>/metrics?since=<unix ms>         kernel 0.4.2: { points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }
  *   GET  /v1/fleet/reports?seq=|artifact=|latest&branch=
  *   GET  /v1/fleet/alerts?since=&level=&unacked=&limit=
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
@@ -188,6 +189,19 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 		if (route === "servers") {
 			const maxAge = intParam(q.get("maxAge"), "maxAge");
 			return json(200, await o.service.servers({ ...(q.get("branch") ? { branch: q.get("branch") as string } : {}), ...(maxAge !== undefined ? { maxAgeSeconds: maxAge } : {}) }));
+		}
+		// Kernel 0.4.2: one server's TPS / memory / players history, oldest first (the explorer's /servers/<JobId> graphs).
+		const metrics = /^servers\/([^/]+)\/metrics$/.exec(route);
+		if (metrics) {
+			let job: string;
+			try {
+				job = decodeURIComponent(metrics[1]);
+			} catch {
+				throw new FleetInputError("the JobId in the path is not valid URL encoding");
+			}
+			if (!job || job.length > JOB_ID_MAX || job.includes("\0")) throw new FleetInputError(`the JobId must be 1-${JOB_ID_MAX} characters`);
+			const since = timeParam(q.get("since"));
+			return json(200, await o.service.metrics(job, since !== undefined ? { since } : {}));
 		}
 		if (route === "reports") {
 			const seq = intParam(q.get("seq"), "seq");

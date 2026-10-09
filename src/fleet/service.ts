@@ -20,6 +20,10 @@ export const STUCK_WINDOW_MS = 30 * 60_000;
 export const KEEP_REPORTS_MS = 30 * 86_400_000;
 export const KEEP_ALERTS_MS = 90 * 86_400_000;
 export const KEEP_GONE_SERVERS_MS = 86_400_000;
+/** Kernel 0.4.2 metrics history: one point per heartbeat, kept this long per server (the sweep prunes older ones). */
+export const KEEP_METRICS_MS = 2 * 3_600_000;
+/** And at most this many points per server (heartbeats come every 30 s, sooner on changes; the oldest go first). */
+export const METRICS_MAX_POINTS = 720;
 
 /** The kernel sends critical and warning; the CLI may also post info. */
 export type AlertLevel = "critical" | "warning" | "info";
@@ -166,6 +170,24 @@ export interface ParsedHeartbeat {
 	sentAt: number | null;
 	/** Kernel 0.4.0: the budget summary (`bu`) as JSON text, or null (missing or not a small object of numbers). */
 	budget: string | null;
+	/** Kernel 0.4.2 (`pf`): server TPS averaged since the last heartbeat, its slowest second, the physics FPS. */
+	tps: number | null;
+	tpsMin: number | null;
+	physFps: number | null;
+	/** Kernel 0.4.0 (`bu.mem`): total memory and the Lua heap, MB. */
+	memMb: number | null;
+	luaMb: number | null;
+}
+
+/** One point of a server's metrics history (`GET /v1/fleet/servers/<job>/metrics`); t = when it arrived (unix ms). */
+export interface MetricPoint {
+	t: number;
+	tps: number | null;
+	tpsMin: number | null;
+	physFps: number | null;
+	memMb: number | null;
+	luaMb: number | null;
+	players: number | null;
 }
 
 export interface ParsedReport {
@@ -198,8 +220,9 @@ export type FleetMessage = HeartbeatMessage | DeployMessage;
 
 /**
  * The kernel's fleet status plus j = JobId (kernel src/server/Fleet.luau): { t = server type, b, c?, a?, n, m, s = start
- * (unix s), u = now (unix s), p, x = 1?, v, q, g, h, e?, sv = 2 }. `k` (an access code) is ignored. The JobId may also
- * come in the X-TT-Job header. Throws FleetInputError.
+ * (unix s), u = now (unix s), p, x = 1?, v, q, g, h, e?, sv = 2 }, plus bu? (0.4.0, the budget summary) and pf? (0.4.2,
+ * TPS: parseMetrics). `k` (an access code) is ignored. The JobId may also come in the X-TT-Job header. Throws
+ * FleetInputError.
  */
 export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedHeartbeat {
 	const b = asBody(raw);
@@ -226,6 +249,38 @@ export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedH
 		serverVersion: loose(b, "sv"),
 		sentAt: typeof b.t === "number" ? toMs(int(b, "t")) : null,
 		budget: parseBudget(b.bu),
+		...parseMetrics(b.pf, b.bu),
+	};
+}
+
+/** The highest TPS / physics FPS kept (servers run at 60, physics up to 240); anything above is not a reading. */
+export const METRIC_RATE_MAX = 1000;
+/** The highest memory reading kept, MB. */
+export const METRIC_MEMORY_MAX = 1_000_000;
+
+/** A finite number in [0, max], else null. */
+function reading(value: unknown, max: number): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= max ? value : null;
+}
+
+function fields(value: unknown): Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+/**
+ * Kernel 0.4.2: the heartbeat's `pf` = { a = TPS average since the last heartbeat, m = its slowest second, p = physics
+ * FPS } and the memory 0.4.0 already sends in the budget summary, `bu.mem` = { t = total MB, h = Lua heap MB }. Each
+ * value on its own: a missing or malformed one is null (never a reason to refuse the heartbeat).
+ */
+export function parseMetrics(pf: unknown, bu: unknown): Pick<ParsedHeartbeat, "tps" | "tpsMin" | "physFps" | "memMb" | "luaMb"> {
+	const p = fields(pf);
+	const mem = fields(fields(bu).mem);
+	return {
+		tps: reading(p.a, METRIC_RATE_MAX),
+		tpsMin: reading(p.m, METRIC_RATE_MAX),
+		physFps: reading(p.p, METRIC_RATE_MAX),
+		memMb: reading(mem.t, METRIC_MEMORY_MAX),
+		luaMb: reading(mem.h, METRIC_MEMORY_MAX),
 	};
 }
 
@@ -356,6 +411,11 @@ interface ServerRow {
 	last_error: string | null;
 	server_version: number | null;
 	budget: string | null;
+	tps: number | null;
+	tps_min: number | null;
+	phys_fps: number | null;
+	mem_mb: number | null;
+	lua_mb: number | null;
 	first_seen: number;
 	last_seen: number;
 	closed_at: number | null;
@@ -364,7 +424,17 @@ interface ServerRow {
 
 /** Columns read for servers. The access code is not among them because it is never stored. */
 const SERVER_COLUMNS =
-	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, first_seen, last_seen, closed_at, lost_at";
+	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen, closed_at, lost_at";
+
+/** Kernel 0.4.0 and 0.4.2 columns, added to fleet files made before them (name, type). */
+const ADDED_SERVER_COLUMNS: [string, string][] = [
+	["budget", "TEXT"],
+	["tps", "REAL"],
+	["tps_min", "REAL"],
+	["phys_fps", "REAL"],
+	["mem_mb", "REAL"],
+	["lua_mb", "REAL"],
+];
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
 
@@ -390,6 +460,11 @@ function serverInfo(r: ServerRow, now: number): ServerInfo {
 		lastError: r.last_error,
 		serverVersion: r.server_version,
 		budget: budgetOf(r.budget),
+		tps: r.tps ?? null,
+		tpsMin: r.tps_min ?? null,
+		physFps: r.phys_fps ?? null,
+		memMb: r.mem_mb ?? null,
+		luaMb: r.lua_mb ?? null,
 	};
 }
 
@@ -461,10 +536,15 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS servers (
 	job TEXT PRIMARY KEY, server_type TEXT, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER,
 	last_write INTEGER, place_id INTEGER, experiment INTEGER, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT,
-	last_error TEXT, server_version INTEGER, sent_at INTEGER, budget TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
-	closed_at INTEGER, lost_at INTEGER);
+	last_error TEXT, server_version INTEGER, sent_at INTEGER, budget TEXT, tps REAL, tps_min REAL, phys_fps REAL, mem_mb REAL, lua_mb REAL,
+	first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
 CREATE INDEX IF NOT EXISTS servers_branch ON servers (branch, last_seen);
 CREATE INDEX IF NOT EXISTS servers_seen ON servers (last_seen);
+CREATE TABLE IF NOT EXISTS server_metrics (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, t INTEGER NOT NULL, tps REAL, tps_min REAL, phys_fps REAL, mem_mb REAL, lua_mb REAL,
+	players INTEGER);
+CREATE INDEX IF NOT EXISTS server_metrics_job ON server_metrics (job, id);
+CREATE INDEX IF NOT EXISTS server_metrics_t ON server_metrics (t);
 CREATE TABLE IF NOT EXISTS reports (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL, branch TEXT, artifact TEXT, job TEXT NOT NULL, result TEXT NOT NULL,
 	error TEXT, seconds REAL, t INTEGER, generation INTEGER, kernel TEXT, players INTEGER, received INTEGER NOT NULL);
@@ -505,9 +585,11 @@ export class FleetService {
 	static async open(options: FleetServiceOptions): Promise<FleetService> {
 		const service = new FleetService(options);
 		await options.db.exec(SCHEMA);
-		// Kernel 0.4.0: the budget summary column, added to files made before it.
-		const columns = await options.db.all<{ name: string }>("PRAGMA table_info(servers)");
-		if (!columns.some((c) => c.name === "budget")) await options.db.exec("ALTER TABLE servers ADD COLUMN budget TEXT");
+		// Kernel 0.4.0 (the budget summary) and 0.4.2 (TPS, memory): columns added to files made before them.
+		const columns = new Set((await options.db.all<{ name: string }>("PRAGMA table_info(servers)")).map((c) => c.name));
+		for (const [name, type] of ADDED_SERVER_COLUMNS) {
+			if (!columns.has(name)) await options.db.exec(`ALTER TABLE servers ADD COLUMN ${name} ${type}`);
+		}
 		return service;
 	}
 
@@ -547,18 +629,24 @@ export class FleetService {
 
 	async applyHeartbeat(p: ParsedHeartbeat): Promise<void> {
 		const now = this.clock();
-		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, now, now];
+		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, now, now];
 		const job = p.job;
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
-		await this.db.run(
-			`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, first_seen, last_seen) ` +
-				`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
-				`artifact = excluded.artifact, players = excluded.players, max_players = excluded.max_players, started_at = excluded.started_at, ` +
-				`last_write = excluded.last_write, place_id = excluded.place_id, experiment = excluded.experiment, kernel = excluded.kernel, ` +
-				`applied_seq = excluded.applied_seq, generation = excluded.generation, health = excluded.health, last_error = excluded.last_error, ` +
-				`server_version = excluded.server_version, sent_at = excluded.sent_at, budget = excluded.budget, last_seen = excluded.last_seen, closed_at = NULL, lost_at = NULL`,
-			row,
-		);
+		// One commit: the row, the history point (kernel 0.4.2: one per heartbeat) and the per-server cap on points.
+		await this.db.transaction((tx) => {
+			tx.run(
+				`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen) ` +
+					`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
+					`artifact = excluded.artifact, players = excluded.players, max_players = excluded.max_players, started_at = excluded.started_at, ` +
+					`last_write = excluded.last_write, place_id = excluded.place_id, experiment = excluded.experiment, kernel = excluded.kernel, ` +
+					`applied_seq = excluded.applied_seq, generation = excluded.generation, health = excluded.health, last_error = excluded.last_error, ` +
+					`server_version = excluded.server_version, sent_at = excluded.sent_at, budget = excluded.budget, tps = excluded.tps, tps_min = excluded.tps_min, ` +
+					`phys_fps = excluded.phys_fps, mem_mb = excluded.mem_mb, lua_mb = excluded.lua_mb, last_seen = excluded.last_seen, closed_at = NULL, lost_at = NULL`,
+				row,
+			);
+			tx.run("INSERT INTO server_metrics (job, t, tps, tps_min, phys_fps, mem_mb, lua_mb, players) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [job, now, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.players]);
+			tx.run("DELETE FROM server_metrics WHERE job = ? AND id <= (SELECT id FROM server_metrics WHERE job = ? ORDER BY id DESC LIMIT 1 OFFSET ?)", [job, job, METRICS_MAX_POINTS]);
+		});
 		if (!this.listeners.size) return;
 		const after = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
 		if (!after) return;
@@ -689,6 +777,19 @@ export class FleetService {
 			byArtifact: [...art].map(([artifact, v]) => ({ artifact, ...v })).sort((a, b) => b.servers - a.servers),
 			byHealth,
 		};
+	}
+
+	/**
+	 * Kernel 0.4.2: a server's metrics history (one point per heartbeat, the last KEEP_METRICS_MS, at most
+	 * METRICS_MAX_POINTS), oldest first; `since` (unix ms) keeps only later points. An unknown JobId has no points.
+	 */
+	async metrics(job: string, options: { since?: number } = {}): Promise<{ points: MetricPoint[] }> {
+		const from = Math.max(options.since ?? 0, this.clock() - KEEP_METRICS_MS);
+		const rows = await this.db.all<{ t: number; tps: number | null; tps_min: number | null; phys_fps: number | null; mem_mb: number | null; lua_mb: number | null; players: number | null }>(
+			"SELECT t, tps, tps_min, phys_fps, mem_mb, lua_mb, players FROM server_metrics WHERE job = ? AND t > ? ORDER BY id",
+			[job, from],
+		);
+		return { points: rows.map((r) => ({ t: r.t, tps: r.tps, tpsMin: r.tps_min, physFps: r.phys_fps, memMb: r.mem_mb, luaMb: r.lua_mb, players: r.players })) };
 	}
 
 	async reports(options: { seq?: number; artifact?: string; latest?: boolean; branch?: string } = {}): Promise<FleetReport> {
@@ -852,6 +953,8 @@ export class FleetService {
 				details: { jobs: rows.slice(0, 100).map((r) => r.job), count: rows.length },
 			});
 		}
+		// Kernel 0.4.2: metrics history older than KEEP_METRICS_MS (every sweep: the index on t keeps it cheap).
+		await this.db.run("DELETE FROM server_metrics WHERE t <= ?", [now - KEEP_METRICS_MS]);
 		if (now - this.lastRetention > 3_600_000) {
 			this.lastRetention = now;
 			await this.db.run("DELETE FROM reports WHERE received < ?", [now - KEEP_REPORTS_MS]);

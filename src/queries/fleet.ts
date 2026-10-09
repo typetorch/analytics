@@ -72,6 +72,16 @@ export interface ServerInfo {
 	 * parseBudget in fleet/service.ts). Fleet API only; null when the server sent none.
 	 */
 	budget?: Record<string, unknown> | null;
+	/**
+	 * Kernel 0.4.2 (fleet API only; null when the server sent none, e.g. an older kernel): server TPS averaged over the
+	 * last heartbeat interval and its slowest second, physics FPS (heartbeat `pf`), total memory and Lua heap in MB (the
+	 * budget summary's `bu.mem`).
+	 */
+	tps?: number | null;
+	tpsMin?: number | null;
+	physFps?: number | null;
+	memMb?: number | null;
+	luaMb?: number | null;
 }
 
 /** Unix seconds or ms -> ms (the kernel sends seconds). */

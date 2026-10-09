@@ -7,7 +7,7 @@ import { createFleetClient, FleetApiError } from "../src/fleet/client.ts";
 import { openSqlite } from "../src/fleet/db.ts";
 import { FLEET_NEW_JOBS_PER_MINUTE, handleFleet, NewJobLimiter } from "../src/fleet/http.ts";
 import { alertText, createNotifier, detectFormat, webhookBody } from "../src/fleet/notify.ts";
-import { FleetService, parseBudget, type FleetEvent } from "../src/fleet/service.ts";
+import { FleetService, KEEP_METRICS_MS, METRIC_MEMORY_MAX, METRIC_RATE_MAX, METRICS_MAX_POINTS, parseBudget, parseHeartbeat, parseMetrics, type FleetEvent } from "../src/fleet/service.ts";
 import { startApp, type App } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 
@@ -414,5 +414,98 @@ describe("budget summary (kernel 0.4.0 heartbeat bu)", () => {
 		await service.heartbeat({ j: "job-old", t: "public", b: "prod", n: 1, m: 10, s: 1791547000, u: 1791547200, p: 1, v: "0.4.0", q: 1, g: 1, h: "ok", sv: 2, bu });
 		const { servers } = await service.servers({});
 		expect(servers[0].budget).toEqual(bu);
+		// Kernel 0.4.2's columns came with it.
+		expect(servers[0].memMb).toBe(812.5);
+		expect(servers[0].tps).toBeNull();
+	});
+});
+
+describe("metrics (kernel 0.4.2 heartbeat pf, bu.mem)", () => {
+	const T2 = Date.UTC(2026, 9, 9, 18, 0, 0);
+	const pf = { a: 59.8, m: 41.5, p: 60 };
+	const mem = { t: 812.5, h: 120.3 };
+	const beat = (j: string, over: Record<string, unknown> = {}) => ({ j, t: "public", b: "prod", n: 7, m: 20, s: 1791547000, u: 1791547200, p: 1, v: "0.4.2", q: 9, g: 2, h: "ok", sv: 2, pf, bu: { p: 7, mem }, ...over });
+	const metricsUrl = (job: string, query = "") => `${base}/v1/fleet/servers/${encodeURIComponent(job)}/metrics${query}`;
+	const admin = { authorization: `Bearer ${ADMIN}` };
+
+	test("parseMetrics: each value on its own; malformed ones are null", () => {
+		expect(parseMetrics(pf, { mem })).toEqual({ tps: 59.8, tpsMin: 41.5, physFps: 60, memMb: 812.5, luaMb: 120.3 });
+		expect(parseMetrics(undefined, undefined)).toEqual({ tps: null, tpsMin: null, physFps: null, memMb: null, luaMb: null });
+		expect(parseMetrics("fast", 3)).toEqual({ tps: null, tpsMin: null, physFps: null, memMb: null, luaMb: null });
+		expect(parseMetrics([59, 41], { mem: [1, 2] })).toEqual({ tps: null, tpsMin: null, physFps: null, memMb: null, luaMb: null });
+		// Strings, negatives, out of range: that value only.
+		expect(parseMetrics({ a: "59", m: -1, p: METRIC_RATE_MAX + 1 }, { mem: { t: METRIC_MEMORY_MAX + 1, h: 64 } })).toEqual({ tps: null, tpsMin: null, physFps: null, memMb: null, luaMb: 64 });
+		expect(parseMetrics({ a: 0, m: 0.3 }, { mem: { t: 0 } })).toEqual({ tps: 0, tpsMin: 0.3, physFps: null, memMb: 0, luaMb: null });
+		expect(parseHeartbeat(beat("job-x", { pf: { a: Number.POSITIVE_INFINITY } }), null).tps).toBeNull();
+	});
+
+	test("the latest values on the server row; a malformed pf or bu never refuses the heartbeat; old kernels give nulls", async () => {
+		expect((await ingest("heartbeat", beat("job-m1"))).status).toBe(202);
+		let row = (await client.servers()).servers.find((s) => s.job === "job-m1");
+		expect(row).toMatchObject({ tps: 59.8, tpsMin: 41.5, physFps: 60, memMb: 812.5, luaMb: 120.3 });
+		expect((await ingest("heartbeat", beat("job-m1", { pf: { a: "lots", m: { x: 1 } }, bu: "nope" }))).status).toBe(202);
+		row = (await client.servers()).servers.find((s) => s.job === "job-m1");
+		expect(row).toMatchObject({ tps: null, tpsMin: null, physFps: null, memMb: null, luaMb: null, players: 7 });
+		const { pf: _pf, bu: _bu, ...old } = beat("job-m2", { v: "0.3.9" });
+		expect((await ingest("heartbeat", old)).status).toBe(202);
+		row = (await client.servers()).servers.find((s) => s.job === "job-m2");
+		expect(row).toMatchObject({ tps: null, tpsMin: null, physFps: null, memMb: null, luaMb: null, kernel: "0.3.9" });
+	});
+
+	test("GET /v1/fleet/servers/<job>/metrics: admin only, one point per heartbeat, oldest first, since filters", async () => {
+		const start = now;
+		for (let i = 0; i < 3; i++) {
+			now = start + i * 30_000;
+			expect((await ingest("heartbeat", beat("job-m3", { pf: { a: 60 - i, m: 50 - i, p: 60 }, n: 3 + i }))).status).toBe(202);
+		}
+		// Roles: nobody and the game's API key get 401 (the key writes, it doesn't read); a write method is refused.
+		expect((await fetch(metricsUrl("job-m3"))).status).toBe(401);
+		expect((await fetch(metricsUrl("job-m3"), { headers: { authorization: `Bearer ${INGEST}` } })).status).toBe(401);
+		expect((await fetch(metricsUrl("job-m3"), { method: "POST", headers: { authorization: `Bearer ${INGEST}` } })).status).toBe(401);
+		expect((await fetch(metricsUrl("job-m3"), { method: "POST", headers: admin })).status).toBe(405);
+		const res = await fetch(metricsUrl("job-m3"), { headers: admin });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { points: Record<string, unknown>[] };
+		expect(Object.keys(body)).toEqual(["points"]);
+		expect(body.points).toEqual([
+			{ t: start, tps: 60, tpsMin: 50, physFps: 60, memMb: 812.5, luaMb: 120.3, players: 3 },
+			{ t: start + 30_000, tps: 59, tpsMin: 49, physFps: 60, memMb: 812.5, luaMb: 120.3, players: 4 },
+			{ t: start + 60_000, tps: 58, tpsMin: 48, physFps: 60, memMb: 812.5, luaMb: 120.3, players: 5 },
+		]);
+		// since = unix ms: only later points (a page polls with the last t it has).
+		const later = (await (await fetch(metricsUrl("job-m3", `?since=${start}`), { headers: admin })).json()) as { points: { t: number }[] };
+		expect(later.points.map((p) => p.t)).toEqual([start + 30_000, start + 60_000]);
+		// Another server's points never mix in; an unknown JobId has none.
+		expect(((await (await fetch(metricsUrl("job-m1"), { headers: admin })).json()) as { points: unknown[] }).points.length).toBe(2);
+		expect(await (await fetch(metricsUrl("never-seen"), { headers: admin })).json()).toEqual({ points: [] });
+		// Bad input: 400, not 500.
+		expect((await fetch(metricsUrl("job-m3", "?since=yesterday-ish"), { headers: admin })).status).toBe(400);
+		expect((await fetch(metricsUrl("j".repeat(65)), { headers: admin })).status).toBe(400);
+		expect((await fetch(`${base}/v1/fleet/servers/%E0%A4%A/metrics`, { headers: admin })).status).toBe(400);
+	});
+
+	test("history is pruned: older than 2 h by the sweep, and at most METRICS_MAX_POINTS per server", async () => {
+		let clock = T2;
+		const service = await FleetService.open({ db: await openSqlite(":memory:"), clock: () => clock });
+		for (let i = 0; i < METRICS_MAX_POINTS + 25; i++) {
+			clock = T2 + i * 1000;
+			await service.heartbeat(beat("job-cap", { pf: { a: i % 60, m: 1, p: 60 } }));
+		}
+		await service.heartbeat(beat("job-other"));
+		let points = (await service.metrics("job-cap")).points;
+		expect(points.length).toBe(METRICS_MAX_POINTS);
+		expect(points[0].t).toBe(T2 + 25_000); // the oldest went first
+		expect(points.at(-1)?.t).toBe(clock);
+		expect((await service.metrics("job-other")).points.length).toBe(1);
+		// Two hours later the sweep drops everything older than KEEP_METRICS_MS (and reads never return it meanwhile).
+		clock += KEEP_METRICS_MS - 10_000;
+		expect((await service.metrics("job-cap")).points.length).toBe(10);
+		await service.heartbeat(beat("job-cap"));
+		await service.sweep();
+		points = (await service.metrics("job-cap")).points;
+		expect(points.length).toBe(11);
+		const stored = await (service as unknown as { db: { first<T>(sql: string): Promise<T> } }).db.first<{ n: number }>("SELECT COUNT(*) AS n FROM server_metrics");
+		expect(stored.n).toBe(12); // job-cap's 11 and job-other's one (10 s inside the window)
+		await service.close();
 	});
 });
