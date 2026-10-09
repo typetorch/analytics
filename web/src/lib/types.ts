@@ -505,13 +505,24 @@ export interface DebugStatus {
 	lastPollAt?: number;
 }
 
-/** GET /v1/fleet/servers/<job>. TPS and memory come from the heartbeat-metrics work (plain numbers, null when unknown). */
+/** GET /v1/fleet/servers/<job>: its servers row of any age (rows go a day after a server is gone), its state, the debug session. */
 export interface FleetServerDetail {
-	server:
-		| (FleetServer & { closedAt?: string | null; lostAt?: string | null; tps?: number | null; tpsMin?: number | null; memMb?: number | null; luaMb?: number | null })
-		| null;
+	server: (FleetServer & { closedAt?: string | null; lostAt?: string | null }) | null;
 	state: ServerState;
 	debug: DebugStatus;
+}
+
+/** GET /v1/fleet/debug/audit: one queued command (never its answer, never a player's UserId). */
+export interface DebugAuditEntry {
+	at: number;
+	/** "roblox:<UserId>" (an owner) or "token". */
+	who: string;
+	ip: string;
+	op: string;
+	job: string;
+	/** Sizes and plain numbers only. */
+	args: string;
+	id: string;
 }
 
 /** GET /v1/fleet/servers/<job>/metrics: one point per heartbeat, oldest first (at most ~2 h). */
@@ -542,6 +553,232 @@ export interface RemoteCommand {
 	error?: string;
 	/** Secrets the kernel replaced with <redacted> in the answer. */
 	redacted?: number;
+}
+
+// Remote debug answers (plans/25). The shapes the kernel (RemoteDebug.luau, Kernel.server.luau ops) and the framework
+// (src/devtools/remote-debug.ts, the dev menu's readers) send; copied, not imported. Every field is optional where an
+// older kernel or framework may leave it out: the page shows what is there.
+
+/** A log line: `t` = unix seconds. Server ring (op logs) and a client's ring (op player.logs). */
+export interface RemoteLogEntry {
+	i: number;
+	t: number;
+	kind: "output" | "info" | "warning" | "error";
+	text: string;
+}
+
+/** op logs: the newest `limit` entries after `since`, oldest first; `last` = the newest index (for "Fetch newer"). */
+export interface RemoteLogs {
+	entries: RemoteLogEntry[];
+	last: number;
+}
+
+/** op player.logs. */
+export interface RemotePlayerLogs {
+	userId: number;
+	name: string;
+	entries: RemoteLogEntry[];
+}
+
+/** op players: one player in the server. */
+export interface RemotePlayer {
+	userId: number;
+	name: string;
+	displayName?: string;
+	/** Dev by the kernel's access rule (and why, and the role). */
+	dev?: boolean;
+	reason?: string;
+	role?: string;
+	accountAge?: number;
+	pingMs?: number;
+	/** How this client's generation start went (the kernel's client report). */
+	client?: { generation?: string; ok?: boolean; error?: string; at?: number; [key: string]: unknown };
+}
+
+export interface RemotePlayers {
+	players: RemotePlayer[];
+	max?: number;
+}
+
+/** op status: the kernel's status() (Server > Status) and the heartbeat's fleet status. Read loosely. */
+export interface RemoteStatus {
+	status?: {
+		jobId?: string;
+		placeId?: number;
+		placeVersion?: number;
+		serverType?: string;
+		branch?: string;
+		channel?: string;
+		rules?: string;
+		pinned?: boolean;
+		uptime?: number;
+		generation?: { name?: string; number?: number; uptime?: number; artifact?: { id?: string; [key: string]: unknown } };
+		players?: number;
+		maxPlayers?: number;
+		kernelVersion?: string;
+		kernelBuild?: string;
+		memoryMb?: number;
+		luaHeapKb?: number;
+		appliedSeq?: number;
+		signedOnly?: boolean;
+		health?: { state?: string; [key: string]: unknown };
+		remoteDebug?: { state?: string; polls?: number; commands?: number; answered?: number; refused?: number; redacted?: number; lastError?: string };
+		[key: string]: unknown;
+	};
+	fleet?: Record<string, unknown>;
+}
+
+/** op builds: Server > Branch. Branch heads, the known builds (one DataStore read) and this server's last deploy reports. */
+export interface RemoteBuilds {
+	branches?: { name: string; channel?: string; artifactId?: string; assetId?: number; commit?: string; seq?: number; deployedAt?: number; by?: unknown }[];
+	artifacts?: {
+		branch?: string;
+		artifactId?: string;
+		assetId?: number;
+		seq?: number;
+		commit?: string;
+		/** Unix seconds (the kernel's deployment entries call it `at`). */
+		at?: number;
+		channel?: string;
+		live?: boolean;
+		running?: boolean;
+		verified?: unknown;
+	}[];
+	artifactsError?: string;
+	/** The fleet report format: s seq, b branch, a artifact, r result, e error, d seconds, t unix s, g generation, k kernel. */
+	reports?: { s?: number; b?: string; a?: string; r?: string; e?: string; d?: number; t?: number; g?: number; k?: string }[];
+}
+
+/** op budget: Server > Budget (kernel 0.4.0 api:budget()). */
+export interface RemoteBudget {
+	missing?: boolean;
+	players?: number;
+	window?: number;
+	kinds?: Record<string, { rows?: { name: string; used: number; limit: number; left?: number }[]; callers?: Record<string, number> }>;
+	detail?: { caller: string; kind: string; op: string; perMinute: number; total: number }[];
+	memory?: { total?: number; luaHeap?: number; heapKb?: number; tags?: { name: string; mb: number }[] };
+	generations?: { name: string; modules: number; running: boolean }[];
+	refused?: number;
+}
+
+/** op errors: the error reports' counters and the busiest templates (never a raw message). */
+export interface RemoteErrors {
+	enabled?: boolean;
+	missing?: boolean;
+	kinds?: number;
+	waiting?: number;
+	seen?: { server: number; client: number };
+	sent?: number;
+	requests?: number;
+	failed?: number;
+	rejected?: number;
+	dropped?: Record<string, number>;
+	lastError?: string;
+	lastOkAt?: number;
+	top?: { fp: string; template: string; total: number; realm: "server" | "client" }[];
+}
+
+/** op modules: the running modules and the persist store summary (Modules tab). */
+export interface RemoteModules {
+	modules?: { name: string; dependencies?: string[]; loadOrder?: number; initMs?: number }[];
+	state?: {
+		modules?: { name: string; dependencies?: string[]; loadOrder?: number; initMs?: number; hooks?: string[] }[];
+		persist?: { key: string; kind: string; entries: number; preview: string }[];
+	};
+}
+
+/** One query of op state (Modules > State). root "" = the list of roots; path = segments below the root. */
+export interface StateQuery {
+	root: string;
+	path: string[];
+	page?: number;
+	filter?: string;
+	keep?: string[];
+}
+
+export interface StateEntry {
+	key: string;
+	/** The path segment that opens it (for a root: its token). */
+	seg: string;
+	type: string;
+	preview: string;
+	expandable: boolean;
+	cycle?: boolean;
+}
+
+/** One answer of op state (one per query, in order). */
+export interface StateReply {
+	type: string;
+	preview: string;
+	size: number;
+	capped?: boolean;
+	truncated?: boolean;
+	matched: number;
+	entries: StateEntry[];
+	page: number;
+	pages: number;
+	hasMore: boolean;
+	missing?: boolean;
+	tooDeep?: boolean;
+}
+
+/** op assets: the last hot-asset sync (Modules > Assets). */
+export interface RemoteAssets {
+	manifest?: "none" | "ok" | "invalid" | "unread";
+	from?: string;
+	errors?: string[];
+	running?: boolean;
+	ms?: number;
+	timedOut?: boolean;
+	entries?: { key: string; id: number; wanted?: number; n?: number; version?: number; live: boolean; source?: string; error?: string; ms?: number }[];
+	unmanaged?: string[];
+}
+
+/** op network: per-remote counters. */
+export interface RemoteNetwork {
+	remotes: { path: string; inbound: number; outbound: number; rejected: number; errors: number }[];
+	supported: boolean;
+}
+
+/** op dex.children: one page per node asked. `parent` 0 = game. */
+export interface DexRow {
+	id: number;
+	name: string;
+	className: string;
+	childCount: number;
+	parent: number;
+}
+
+export interface DexChildrenPage {
+	id: number;
+	rows: DexRow[];
+	total: number;
+	offset: number;
+	/** The id is no longer valid (destroyed, or the server forgot it). */
+	gone?: boolean;
+}
+
+/** op dex.props: one instance's properties, attributes and tags (read-only). */
+export interface DexPropRow {
+	name: string;
+	category: string;
+	kind: string;
+	text: string;
+	readOnly?: boolean;
+	deprecated?: boolean;
+	enumType?: string;
+	/** Instance values: the referenced instance's id. */
+	ref?: number;
+}
+
+export interface DexProps {
+	id: number;
+	name: string;
+	className: string;
+	path: string;
+	props: DexPropRow[];
+	attrs: DexPropRow[];
+	tags: string[];
 }
 
 export interface FleetServers {

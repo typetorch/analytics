@@ -7,6 +7,8 @@
 import type {
 	AuthInfo,
 	BackfillResult,
+	DebugAuditEntry,
+	DebugStatus,
 	ErrorDetail,
 	ErrorList,
 	Filters,
@@ -14,16 +16,15 @@ import type {
 	FleetReports,
 	FleetServerDetail,
 	FleetServers,
-	DebugStatus,
-	RemoteCommand,
-	RemoteOp,
-	ServerMetricPoint,
 	Health,
 	Identity,
 	PlayerProfile,
 	QueryInfo,
 	QueryName,
 	QueryResults,
+	RemoteCommand,
+	RemoteOp,
+	ServerMetricPoint,
 	SettingsView,
 	SqlResult,
 	StorageReport,
@@ -197,7 +198,10 @@ export function createApi(options: ApiOptions = {}) {
 		/** Queues one read-only op; the answer comes back through remoteResult. */
 		remoteCommand: (job: string, op: RemoteOp, args?: Record<string, unknown>, signal?: AbortSignal) =>
 			post<RemoteCommand>(`/v1/fleet/servers/${encodeURIComponent(job)}/commands`, { op, ...(args ? { args } : {}) }, signal),
+		/** A queued command's state and, once answered, its result (only for whoever queued it; answers are kept 3 minutes). */
 		remoteResult: (job: string, id: string, signal?: AbortSignal) => get<RemoteCommand>(`/v1/fleet/servers/${encodeURIComponent(job)}/commands/${encodeURIComponent(id)}`, signal),
+		/** The remote debug audit: the last queued commands, newest first (who, op, job, an args summary; never an answer). */
+		debugAudit: (limit = 100, signal?: AbortSignal) => get<{ entries: DebugAuditEntry[] }>(`/v1/fleet/debug/audit${qs({ limit })}`, signal).then((r) => r.entries),
 		/** The SSE stream's URL (EventSource can't set headers; the proxy adds the token). */
 		streamUrl: (params: { branch?: string; types?: string } = {}) => `${base}/v1/fleet/stream${qs(params)}`,
 	};
