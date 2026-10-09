@@ -525,17 +525,6 @@ export interface DebugAuditEntry {
 	id: string;
 }
 
-/** GET /v1/fleet/servers/<job>/metrics: one point per heartbeat, oldest first (at most ~2 h). */
-export interface ServerMetricPoint {
-	t: number;
-	tps: number | null;
-	tpsMin: number | null;
-	physFps: number | null;
-	memMb: number | null;
-	luaMb: number | null;
-	players: number | null;
-}
-
 /** The read-only remote debug ops (v1). */
 export type RemoteOp = "status" | "builds" | "budget" | "logs" | "players" | "player.logs" | "errors" | "modules" | "state" | "assets" | "network" | "dex.children" | "dex.props";
 

@@ -66,7 +66,7 @@ const answers: Partial<Record<RemoteOp, unknown>> = {
 function mockApi(d: FleetServerDetail = detail(), watchConnected = true) {
 	const fleetServer = vi.spyOn(api, "fleetServer").mockResolvedValue(d);
 	const watchServer = vi.spyOn(api, "watchServer").mockResolvedValue({ job: JOB, watched: true, connected: watchConnected });
-	vi.spyOn(api, "fleetServerMetrics").mockResolvedValue([
+	vi.spyOn(api, "serverMetrics").mockResolvedValue([
 		{ t: Date.now() - 60_000, tps: 59.9, tpsMin: 55, physFps: 60, memMb: 800, luaMb: 120, players: 3 },
 		{ t: Date.now(), tps: 58.2, tpsMin: 50, physFps: 60, memMb: 812, luaMb: 121, players: 3 },
 	]);

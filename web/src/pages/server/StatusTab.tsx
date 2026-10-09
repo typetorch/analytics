@@ -9,7 +9,8 @@ import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartToo
 import { api, ApiError } from "@/lib/api";
 import { fmtDuration, fmtInt, fmtNum, fmtTime } from "@/lib/format";
 import type { RemoteState } from "@/lib/remote-debug";
-import type { RemoteStatus, ServerMetricPoint } from "@/lib/types";
+import type { ServerMetricPoint } from "@/lib/perf";
+import type { RemoteStatus } from "@/lib/types";
 import { RemoteBar } from "./shared";
 
 /** The charts' window. */
@@ -102,8 +103,8 @@ function MetricChart({ title, unit, points, series, digits, minMax }: { title: s
 /** TPS, memory and players over the last hour, from the fleet metrics (also for a closed or lost server: its last hour). */
 export function ServerCharts({ job, live }: { job: string; live: boolean }) {
 	const metrics = useQuery({
-		queryKey: ["fleet", "server-metrics", job],
-		queryFn: ({ signal }) => api.fleetServerMetrics(job, Date.now() - CHART_MINUTES * 60_000, signal),
+		queryKey: ["fleet", "server-metrics", job, "last-hour"],
+		queryFn: ({ signal }) => api.serverMetrics(job, Date.now() - CHART_MINUTES * 60_000, signal),
 		refetchInterval: live ? 30_000 : false,
 	});
 	if (metrics.isPending) return <LoadingBlock rows={3} />;

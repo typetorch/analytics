@@ -24,7 +24,6 @@ import type {
 	QueryResults,
 	RemoteCommand,
 	RemoteOp,
-	ServerMetricPoint,
 	SettingsView,
 	SqlResult,
 	StorageReport,
@@ -190,9 +189,6 @@ export function createApi(options: ApiOptions = {}) {
 			get<{ points: ServerMetricPoint[] }>(`/v1/fleet/servers/${encodeURIComponent(job)}/metrics${qs({ since })}`, signal).then((r) => r.points),
 		/** Plans/25: one server by JobId (any age), its state and its remote debug session. */
 		fleetServer: (job: string, signal?: AbortSignal) => get<FleetServerDetail>(`/v1/fleet/servers/${encodeURIComponent(job)}`, signal),
-		/** TPS, memory and players over time (the heartbeat-metrics route), oldest first. */
-		fleetServerMetrics: (job: string, since?: number, signal?: AbortSignal) =>
-			get<{ points: ServerMetricPoint[] }>(`/v1/fleet/servers/${encodeURIComponent(job)}/metrics${qs({ since })}`, signal).then((r) => r.points),
 		/** The server page is open: the server polls for commands from its next heartbeat on (lapses after 60 s). */
 		watchServer: (job: string, signal?: AbortSignal) => post<DebugStatus & { job: string }>(`/v1/fleet/servers/${encodeURIComponent(job)}/watch`, {}, signal),
 		/** Queues one read-only op; the answer comes back through remoteResult. */
