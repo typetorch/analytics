@@ -1,8 +1,9 @@
-import { DayBars, fillDays } from "@/components/DayBars";
+import { DayBars, fillDays, fillSteps, type DayPoint } from "@/components/DayBars";
 import { StorageCard } from "@/components/StorageCard";
 import { Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { describeRange } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum } from "@/lib/format";
+import { bucketText } from "@/lib/perf";
 import { useAnalytics, useFilters } from "@/lib/hooks";
 import type { OverviewResult } from "@/lib/types";
 
@@ -12,6 +13,23 @@ const CHARTS: { key: "players" | "newPlayers" | "sessions" | "playtimeHours"; la
 	{ key: "sessions", label: "Sessions" },
 	{ key: "playtimeHours", label: "Playtime (hours)", decimals: 1 },
 ];
+
+const DAY_MS = 86_400_000;
+
+/** One chart's bars: per step for windows of a day or less (the backend's buckets), else per day. */
+export function overviewBars(data: OverviewResult, key: (typeof CHARTS)[number]["key"]): { points: DayPoint[]; per: string } {
+	const step = data.bucketMs;
+	if (step && step < DAY_MS && data.buckets) {
+		const points = fillSteps(
+			data.buckets.map((b) => ({ t: b.t, value: b[key] })),
+			Date.parse(data.from),
+			Date.parse(data.to),
+			step,
+		);
+		return { points, per: `per ${bucketText(step)} (UTC), by the time a session started` };
+	}
+	return { points: fillDays(data.days.map((d) => ({ date: d.date, value: d[key] })), data.from, data.to), per: "per day (UTC), by the day a session started" };
+}
 
 function Body({ data }: { data: OverviewResult }) {
 	return (
@@ -27,19 +45,14 @@ function Body({ data }: { data: OverviewResult }) {
 				<Metric label="Playtime per player" value={fmtMinutes(data.playtimePerPlayerMinutes)} />
 			</div>
 			<div className="grid gap-3 lg:grid-cols-2">
-				{CHARTS.map((c) => (
-					<Section key={c.key} title={c.label} description="per day (UTC), by the day a session started">
-						<DayBars
-							label={c.label}
-							decimals={c.decimals}
-							data={fillDays(
-								data.days.map((d) => ({ date: d.date, value: d[c.key] })),
-								data.from,
-								data.to,
-							)}
-						/>
-					</Section>
-				))}
+				{CHARTS.map((c) => {
+					const { points, per } = overviewBars(data, c.key);
+					return (
+						<Section key={c.key} title={c.label} description={per}>
+							<DayBars label={c.label} decimals={c.decimals} data={points} />
+						</Section>
+					);
+				})}
 			</div>
 		</>
 	);

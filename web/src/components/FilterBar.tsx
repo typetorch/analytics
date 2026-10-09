@@ -11,7 +11,15 @@ import { DEVICES } from "@/lib/types";
 const ANY = "__any";
 const SEP = "|";
 
-const RANGE_LABELS: Record<RangePreset, string> = { "1d": "Today", "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days", custom: "Custom" };
+const RANGE_LABELS: Record<RangePreset, string> = {
+	"1h": "Last 1 hour",
+	"6h": "Last 6 hours",
+	"1d": "Today",
+	"7d": "Last 7 days",
+	"30d": "Last 30 days",
+	"90d": "Last 90 days",
+	custom: "Custom",
+};
 
 /** A text filter with suggestions; commits after a short pause, on Enter or on blur. */
 function SuggestInput({

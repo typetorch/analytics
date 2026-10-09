@@ -36,6 +36,16 @@ export interface OverviewDay {
 	playtimeHours: number;
 }
 
+/** One step of a window of a day or less (1 min, 5 min or 1 h). */
+export interface OverviewBucket {
+	t: number;
+	time: string;
+	players: number;
+	newPlayers: number;
+	sessions: number;
+	playtimeHours: number;
+}
+
 export interface OverviewResult {
 	from: string;
 	to: string;
@@ -48,6 +58,10 @@ export interface OverviewResult {
 	avgSessionMinutes: number;
 	playtimePerPlayerMinutes: number;
 	days: OverviewDay[];
+	/** The chart step for the window (a day for windows over a day; older backends leave it out). */
+	bucketMs?: number;
+	/** Windows of a day or less: the same numbers per step, by the time a session started (empty steps left out). */
+	buckets?: OverviewBucket[];
 }
 
 export interface RobloxResult {

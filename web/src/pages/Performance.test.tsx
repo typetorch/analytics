@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
 import type { DeployMark, PerfCompareResult, PerfSeriesResult, PerfServer, PerfStat } from "@/lib/perf";
 import type { Filters } from "@/lib/types";
-import Performance, { historyRows } from "./Performance";
+import Performance, { historyRows, stepChoices } from "./Performance";
 
 beforeAll(() => {
 	// recharts measures its container: give it a size, so the charts (and their marks) render in jsdom.
@@ -229,6 +229,33 @@ describe("Performance page", () => {
 		mockApi({ serverMetrics: () => Promise.reject(new ApiError(404, "not found", "/v1/fleet/servers/x/metrics")) });
 		mount(`/performance?job=${liveServers[0]?.job}`);
 		expect(await screen.findByText(/keeps no per-server history yet/)).toBeTruthy();
+	});
+
+	it("the last hour: exact instants to the queries and the marks, the window's own step unless one is picked", async () => {
+		const { calls, marksSpy } = mockApi();
+		mount("/performance?range=1h");
+		await waitFor(() => expect(calls.some((c) => c.name === "perf-client")).toBe(true));
+		const client = calls.find((c) => c.name === "perf-client") as QueryCall;
+		expect(client.filters.from).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/);
+		const from = Date.parse(client.filters.from as string);
+		expect(Date.now() - from).toBeGreaterThanOrEqual(3_600_000);
+		expect(Date.now() - from).toBeLessThan(3_661_000);
+		expect(client.options.bucketMinutes).toBeUndefined();
+		const window = marksSpy.mock.calls[0]?.[0];
+		expect(window?.since).toBe(from);
+		cleanup();
+		const picked = mockApi();
+		mount("/performance?range=6h&step=15");
+		await waitFor(() => expect(picked.calls.find((c) => c.name === "perf-server")?.options.bucketMinutes).toBe(15));
+		expect(picked.calls.find((c) => c.name === "perf-client")?.options.bucketMinutes).toBe(15);
+	});
+
+	it("step choices: 2 to 400 steps in the window", () => {
+		const H = 3_600_000;
+		expect(stepChoices(H)).toEqual([1, 5, 15]);
+		expect(stepChoices(6 * H)).toEqual([1, 5, 15, 60]);
+		expect(stepChoices(7 * 24 * H)).toEqual([60, 360, 1440]);
+		expect(stepChoices(90 * 24 * H)).toEqual([360, 1440]);
 	});
 
 	it("history points in seconds or ms", () => {

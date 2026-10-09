@@ -19,7 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, ApiError } from "@/lib/api";
-import { describeRange } from "@/lib/filters";
+import { describeRange, windowBucketMs } from "@/lib/filters";
 import { fmtInt, shortId } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
 import {
@@ -262,8 +262,27 @@ function SeriesCharts({ result, metricKeys, pct, players, ...marks }: { result: 
 	);
 }
 
-function ClientSection({ by, pct, filters, ...marks }: { by: PerfGroupBy; pct: Percentile; filters: Filters } & MarkProps) {
-	const q = useAnalytics("perf-client", { by, maxGroups: 8 }, { filters });
+/** The chart steps (minutes) a user may pick instead of the window's own; offered when the window holds 2 to 400 of them. */
+export const STEP_MINUTES = [1, 5, 15, 60, 360, 1440];
+
+export function stepChoices(spanMs: number): number[] {
+	return STEP_MINUTES.filter((m) => m * 60_000 * 2 <= spanMs && spanMs / (m * 60_000) <= 400);
+}
+
+/** The series options: grouping, and the picked step (none = the backend's step for the window). */
+function seriesOptions(by: PerfGroupBy, stepMinutes: number | undefined) {
+	return { by, maxGroups: 8, ...(stepMinutes ? { bucketMinutes: stepMinutes } : {}) };
+}
+
+interface SectionProps extends MarkProps {
+	by: PerfGroupBy;
+	pct: Percentile;
+	filters: Filters;
+	stepMinutes: number | undefined;
+}
+
+function ClientSection({ by, pct, filters, stepMinutes, ...marks }: SectionProps) {
+	const q = useAnalytics("perf-client", seriesOptions(by, stepMinutes), { filters });
 	return (
 		<Section
 			title="Players' devices"
@@ -288,9 +307,9 @@ function ClientSection({ by, pct, filters, ...marks }: { by: PerfGroupBy; pct: P
 	);
 }
 
-function ServerSection({ by, pct, filters, ...marks }: { by: PerfGroupBy; pct: Percentile; filters: Filters } & MarkProps) {
+function ServerSection({ by, pct, filters, stepMinutes, ...marks }: SectionProps) {
 	const serverBy = SERVER_GROUPS.includes(by) ? by : "none";
-	const q = useAnalytics("perf-server", { by: serverBy, maxGroups: 8 }, { filters });
+	const q = useAnalytics("perf-server", seriesOptions(serverBy, stepMinutes), { filters });
 	const note = serverBy !== by ? ` Servers have no ${GROUP_BY_LABELS[by].toLowerCase()}: shown for everything.` : "";
 	return (
 		<Section
@@ -638,6 +657,10 @@ export default function Performance() {
 	const [markId] = useParam("mark");
 	const [marksShown] = useParam("marks", "on");
 	const range = useRange(apiFilters);
+	const span = range.to - range.from;
+	const steps = stepChoices(span);
+	const [stepParam, setStep] = useParam("step", "auto");
+	const stepMinutes = steps.includes(Number(stepParam)) ? Number(stepParam) : undefined;
 	const branch = typeof apiFilters.branch === "string" ? apiFilters.branch : undefined;
 	const marksQ = useMarks(range, branch);
 	const allMarks = marksQ.data ?? [];
@@ -665,6 +688,19 @@ export default function Performance() {
 								))}
 							</SelectContent>
 						</Select>
+						<Select value={stepMinutes ? String(stepMinutes) : "auto"} onValueChange={setStep}>
+							<SelectTrigger size="sm" className="w-40" aria-label="Chart step">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="auto">Step: auto ({bucketText(windowBucketMs(span))})</SelectItem>
+								{steps.map((m) => (
+									<SelectItem key={m} value={String(m)}>
+										Step: {bucketText(m * 60_000)}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
 						<ToggleGroup type="single" variant="outline" size="sm" value={pct} onValueChange={(v) => v && setPct(v)} aria-label="Percentile">
 							{PERCENTILES.map((p) => (
 								<ToggleGroupItem key={p} value={p} className="px-2.5 text-xs" title={PERCENTILE_HELP[p]}>
@@ -688,8 +724,8 @@ export default function Performance() {
 					onClear={() => patch({ mark: null, ...(apiFilters.art === selected.artifact ? { art: null } : {}) })}
 				/>
 			) : null}
-			<ClientSection by={by} pct={pct} filters={apiFilters} {...markProps} />
-			<ServerSection by={by} pct={pct} filters={apiFilters} {...markProps} />
+			<ClientSection by={by} pct={pct} filters={apiFilters} stepMinutes={stepMinutes} {...markProps} />
+			<ServerSection by={by} pct={pct} filters={apiFilters} stepMinutes={stepMinutes} {...markProps} />
 			<LiveServers branch={branch} since={range.from} {...markProps} />
 			<CompareSection filters={apiFilters} marks={allMarks} seqOf={seqOf} />
 		</>
