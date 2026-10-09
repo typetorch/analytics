@@ -15,6 +15,7 @@ import type {
 	FleetServers,
 	Health,
 	Identity,
+	PlayerProfile,
 	QueryInfo,
 	QueryName,
 	QueryResults,
@@ -155,6 +156,8 @@ export function createApi(options: ApiOptions = {}) {
 		/** How many pids are mapped, and whether the server can backfill older ones from the DataStore. */
 		identitySummary: (signal?: AbortSignal) => get<{ count: number; backfill: boolean }>("/v1/identity", signal),
 		backfillIdentities: (pageToken?: string, signal?: AbortSignal) => post<BackfillResult>("/v1/identity/backfill", pageToken ? { pageToken } : {}, signal),
+		/** A pid's UserId and its Roblox name, display name and headshot (the backend asks Roblox and caches the answer). */
+		playerProfile: (pid: string, signal?: AbortSignal) => get<PlayerProfile>(`/v1/identity/${encodeURIComponent(pid)}/profile`, signal),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		fleetAlerts: (params: { since?: number; level?: string; unacked?: boolean; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ alerts: FleetAlert[] }>(`/v1/fleet/alerts${qs(params)}`, signal).then((r) => r.alerts),

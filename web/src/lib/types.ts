@@ -243,6 +243,75 @@ export interface PlayersResult {
 	players: PlayerSummary[];
 }
 
+/** One bucket (a UTC day, or an hour for windows up to 2 days) of a player's numbers; sessions count where they start. */
+export interface PlayerBucket {
+	start: string;
+	sessions: number;
+	minutes: number;
+	robux: number;
+	purchases: number;
+}
+
+export interface PlayerSessionRow {
+	sid: string;
+	start: string;
+	end: string;
+	minutes: number;
+	events: number;
+	firstSession: boolean;
+	dev: string | null;
+	art: string;
+}
+
+export interface PlayerPurchase {
+	time: string;
+	t: number;
+	/** The purchase kind (`product`, `gamepass`, ...). */
+	kind: string;
+	product: string | null;
+	robux: number | null;
+	where: string | null;
+	sid: string | null;
+}
+
+/** The `player-stats` query: one player's spending, playtime and sessions over the filter range. */
+export interface PlayerStatsResult {
+	pid: string;
+	uid?: number;
+	window: { from: string; to: string; bucket: "hour" | "day"; days: number; clamped: boolean };
+	totals: {
+		sessions: number;
+		events: number;
+		playtimeMinutes: number;
+		avgSessionMinutes: number;
+		medianSessionMinutes: number;
+		playtimePerDayMinutes: number;
+		activeDays: number;
+		robux: number;
+		purchases: number;
+		firstSeen: string | null;
+		lastSeen: string | null;
+	};
+	series: PlayerBucket[];
+	sessions: PlayerSessionRow[];
+	sessionsTruncated: boolean;
+	purchases: PlayerPurchase[];
+	purchasesTruncated: boolean;
+}
+
+/** GET /v1/identity/<pid>/profile: the UserId and its Roblox names and headshot (looked up by the backend). */
+export interface PlayerProfile {
+	pid: string;
+	linked: boolean;
+	uid?: number;
+	/** ok, partial (one of the two Roblox APIs answered), not-found, unavailable (Roblox didn't answer). */
+	roblox?: "ok" | "partial" | "not-found" | "unavailable";
+	cached?: boolean;
+	name?: string | null;
+	displayName?: string | null;
+	avatar?: string | null;
+}
+
 export interface ValueCount {
 	value: string;
 	events: number;
@@ -336,6 +405,7 @@ export interface QueryResults {
 	funnel: FunnelResult;
 	timeline: TimelineResult;
 	"player-graph": GraphData;
+	"player-stats": PlayerStatsResult;
 	flow: GraphData;
 	experiment: ExperimentResult;
 	confusion: ConfusionResult;
