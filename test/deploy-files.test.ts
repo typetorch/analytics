@@ -91,6 +91,10 @@ describe("compose.yaml", () => {
 		expect(read("compose.local.yaml")).toContain("127.0.0.1:");
 	});
 
+	test("it passes TYPETORCH_RUNTIME_SETTINGS through (the way back in after a Settings page lockout must reach the container)", () => {
+		expect(text).toMatch(/^ {6}TYPETORCH_RUNTIME_SETTINGS: \$\{TYPETORCH_RUNTIME_SETTINGS:-on\}$/m);
+	});
+
 	test("every variable it sets is one the server reads", () => {
 		const names = [...text.matchAll(/^ {6}([A-Z][A-Z0-9_]+):/gm)].map((m) => m[1] as string);
 		expect(names.length).toBeGreaterThan(10);

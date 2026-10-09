@@ -2,7 +2,8 @@
 # secrets and the optional values below as environment variables, your domain on the `backend` service, port 8787.
 # Locally: docker compose -f compose.yaml -f compose.local.yaml up --build   (compose.local.yaml publishes 127.0.0.1:8787)
 #
-# One volume holds everything the backend keeps (events, fleet state, error logs, the owner list): back it up.
+# One volume holds everything the backend keeps (events, fleet state, error logs, the owner list, the values saved on the
+# explorer's Settings page, which include the alert webhook URL): back it up, and keep the backup as secret as the env.
 services:
   backend:
     build:
@@ -32,6 +33,9 @@ services:
       OPENCLOUD_API_KEY: ${OPENCLOUD_API_KEY:-}
       TYPETORCH_UNIVERSE_ID: ${TYPETORCH_UNIVERSE_ID:-}
       TYPETORCH_ALERT_WEBHOOK_URL: ${TYPETORCH_ALERT_WEBHOOK_URL:-}
+      # Values saved on the explorer's Settings page win over the ones above; "off" ignores them (they stay in /data) and
+      # makes the page read only: the way back in after locking yourself out (README "Runtime settings").
+      TYPETORCH_RUNTIME_SETTINGS: ${TYPETORCH_RUNTIME_SETTINGS:-on}
       # Advanced (defaults suit a 1 GB machine).
       TYPETORCH_MEMORY_LIMIT: ${TYPETORCH_MEMORY_LIMIT:-400MB}
       TYPETORCH_THREADS: ${TYPETORCH_THREADS:-2}
