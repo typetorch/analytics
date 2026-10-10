@@ -618,7 +618,9 @@ Counts and pids older than 30 days go (`TYPETORCH_ERROR_KEEP_DAYS`).
 
 Reads (admin): `GET /v1/errors?window=24h&realm=server&branch=prod&build=...&q=text&limit=100&bucket=300` (also
 `from=` / `to=` in unix ms or ISO) answers `{ window: { from, to, bucketSeconds, buckets }, kinds: [{ fp, template, topFrame,
-realm, count, players, firstAt, lastAt, total, spark: [..] }], totals: { count, kinds, players }, more }`; `GET /v1/errors/<fp>`
+realm, count, players, firstAt, lastAt, total, spark: [..] }], totals: { count, kinds, players }, more, builds: [{ build, n,
+lastAt }] }` (`builds`: the artifact ids with errors in the window under the other filters, most recently seen first, at most
+50; the Errors page's artifact filter, URL param `build`; a branch or build with control characters is a 400); `GET /v1/errors/<fp>`
 adds the sample `stack`, the dense `series` and `byBuild`, `byBranch`, `byRealm`. `players` counts distinct ids over the days the
 window touches. The explorer's **Errors** page shows both.
 
@@ -1019,7 +1021,9 @@ Kernels post to it directly (`kernel/src/server/Fleet.luau`, settings in the sig
 
 Rows use long names (`job`, `serverType`, `branch`, `artifact`, `players`, `maxPlayers`, `startedAt`, `lastWrite`,
 `appliedSeq`, `generation`, `health`, `lastError`, `kernel`, `experiment`, `serverVersion`, `budget`, and the latest
-`tps`, `tpsMin`, `physFps`, `memMb`, `luaMb`; reports `seq`, `job`, `result`, `error`, `seconds`, `at`...). Times are
+`tps`, `tpsMin`, `physFps`, `memMb`, `luaMb`, and `reasons`: why the server needs a look, `[{ signal, label, value,
+threshold, unit, op }]` from `src/fleet/health.ts` (kernel health not "ok"; heartbeat older than 75 s; TPS under 50; memory
+over 3,000 MB), empty when nothing tripped, shown by the explorer's Health badge and server page; reports `seq`, `job`, `result`, `error`, `seconds`, `at`...). Times are
 ISO strings, except `at` (unix ms).
 
 **TPS and memory** (kernel 0.4.2): each heartbeat's `pf` and `bu.mem` give the server row its latest `tps`, `tpsMin`,
