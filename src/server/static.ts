@@ -42,8 +42,8 @@ export class StaticSite {
 		} catch {
 			return undefined;
 		}
-		// No traversal, and no dotfiles (a stray .env in the build folder is never served).
-		if (path.includes("\0") || path.includes("\\") || path.split("/").some((part) => part.startsWith("."))) return undefined;
+		// No traversal, and no dotfiles or dot folders (a stray .env or .git in the build folder is never served).
+		if (path.includes("\0") || path.includes("\\") || path.split("/").some((part) => part === "." || part === ".." || /^\.[^.]/.test(part))) return undefined;
 		const file = resolve(join(this.root, path));
 		if (file !== this.root && !file.startsWith(this.root + sep)) return undefined;
 		const ext = extname(path).toLowerCase();
