@@ -206,6 +206,26 @@ describe("error kinds, counts and the admin reads", () => {
 		expect((await get("/v1/errors?window=1h&branch=nowhere")).kinds).toEqual([]);
 	});
 
+	test("artifact filter: builds in the window, most recent first; the build filter keeps the list and combines", async () => {
+		const all = await get("/v1/errors?window=1h");
+		// b2-000043 was last seen at T0-1m, a1b2c3d-000042 at T0-2m.
+		expect(all.builds.map((b: { build: string }) => b.build)).toEqual(["b2-000043", "a1b2c3d-000042"]);
+		expect(all.builds[0]).toMatchObject({ n: 2, lastAt: new Date(Math.floor((T0 - MIN) / MIN) * MIN).toISOString() });
+		const one = await get("/v1/errors?window=1h&build=b2-000043");
+		expect(one.totals.count).toBe(2);
+		expect(one.builds.length).toBe(2); // the choice stays listed
+		// With another filter: only builds under it, and the build filter combines with it.
+		expect((await get("/v1/errors?window=1h&branch=prod")).builds.map((b: { build: string }) => b.build)).toEqual(["a1b2c3d-000042"]);
+		expect((await get("/v1/errors?window=1h&branch=prod&build=b2-000043")).kinds).toEqual([]);
+		expect((await get("/v1/errors?window=24h&build=a1b2c3d-000042&realm=server")).totals.count).toBe(11);
+		// Invalid values are refused.
+		for (const q of [`build=${"x".repeat(65)}`, "build=a%00b", "build=a%0Ab", "branch=a%7Fb"]) {
+			expect([q, (await h.call(`/v1/errors?window=1h&${q}`, { headers: bearer(ADMIN) })).status]).toEqual([q, 400]);
+		}
+		// A value the SQL would mind is only a value (parameterized).
+		expect((await get("/v1/errors?window=1h&build=%27%20OR%201%3D1%20--")).kinds).toEqual([]);
+	});
+
 	test("one kind: the first sample stack is kept, series, where it happens", async () => {
 		const d = await get("/v1/errors/fp-boom?window=1h");
 		expect(d.kind).toMatchObject({ fp: "fp-boom", stack: "Workspace.Game.Round:42\nWorkspace.Game.Main:7", realm: "server", total: 12 });

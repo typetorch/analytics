@@ -1,13 +1,17 @@
 /**
  * Error log reads (admin):
- *   GET /v1/errors?window=24h|from=&to=&branch=&build=&realm=&q=&limit=&bucket=   -> kinds with counts, players, sparkline
+ *   GET /v1/errors?window=24h|from=&to=&branch=&build=&realm=&q=&limit=&bucket=   -> kinds with counts, players, sparkline,
+ *     and the builds (artifact ids) with errors in the window, most recent first (for the build filter)
  *   GET /v1/errors/<fp>?window=|from=&to=&branch=&build=&realm=&bucket=             -> one kind: sample stack, series, where
  * `window` is a number and a unit (30m, 6h, 7d); without `from` the window ends now. Times are unix ms or ISO.
  */
 import { ErrorInputError, FP_PATTERN } from "./parse.ts";
 import { chooseBucket, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
 
-const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+/** Control characters: a branch or build filter with one is refused (stored labels never need them). */
+const CONTROL = /[\u0000-\u001f\u007f]/;
+
+const UNITS: Record<string, number> ={ m: 60_000, h: 3_600_000, d: 86_400_000 };
 
 function timeParam(value: string | null, name: string): number | undefined {
 	if (!value) return undefined;
@@ -45,6 +49,7 @@ export function parseFilter(q: URLSearchParams): ErrorFilter {
 		const v = q.get(key);
 		if (v) {
 			if (v.length > 64) throw new ErrorInputError(`${key} is at most 64 characters`);
+			if (CONTROL.test(v)) throw new ErrorInputError(`${key} has control characters`);
 			filter[key] = v === "(unknown)" ? "" : v;
 		}
 	}

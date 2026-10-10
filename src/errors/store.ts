@@ -64,6 +64,11 @@ export interface ErrorList {
 	totals: { count: number; kinds: number; players: number };
 	/** Kinds that exist but didn't fit the `limit`. */
 	more: number;
+	/**
+	 * Builds (artifact ids) with errors in the window under the other filters (the build filter itself is ignored, so the
+	 * choice stays listed), most recently seen first, at most ERROR_BUILDS_LISTED. "(unknown)" is the empty build.
+	 */
+	builds: { build: string; n: number; lastAt: string }[];
 }
 
 export interface ErrorDetail {
@@ -137,6 +142,9 @@ export function spreadCount(count: number, firstAt: number, lastAt: number): { m
 	}
 	return out;
 }
+
+/** Builds listed with an error list (the explorer's artifact filter). */
+export const ERROR_BUILDS_LISTED = 50;
 
 /** New kinds one sender may add per clock hour: per JobId, and per address (JobIds are made up freely). */
 export const NEW_KINDS_PER_JOB_HOUR = 50;
@@ -450,6 +458,12 @@ export class ErrorStore {
 		);
 		const totalCount = Number((await this.db.first<{ n: number | null }>(`SELECT SUM(c.n) AS n FROM error_counts c WHERE c.minute BETWEEN ? AND ?${f.sql}`, [idx.fromMinute, idx.toMinute, ...f.params]))?.n ?? 0);
 		const kindsInWindow = Number((await this.db.first<{ n: number }>(`SELECT COUNT(DISTINCT c.fp) AS n FROM error_counts c WHERE c.minute BETWEEN ? AND ?${f.sql}`, [idx.fromMinute, idx.toMinute, ...f.params]))?.n ?? 0);
+		const { build: _build, ...others } = filter;
+		const bf = this.where(others, "c");
+		const builds = await this.db.all<{ build: string; n: number; last: number }>(
+			`SELECT c.build, SUM(c.n) AS n, MAX(c.minute) AS last FROM error_counts c WHERE c.minute BETWEEN ? AND ?${bf.sql} GROUP BY c.build ORDER BY last DESC, n DESC, c.build LIMIT ?`,
+			[idx.fromMinute, idx.toMinute, ...bf.params, ERROR_BUILDS_LISTED],
+		);
 		return {
 			window: { from: iso(w.from), to: iso(w.to), bucketSeconds: idx.bucketMinutes * 60, buckets: idx.buckets },
 			kinds: shown.map((r) => ({
@@ -466,6 +480,7 @@ export class ErrorStore {
 			})),
 			totals: { count: totalCount, kinds: kindsInWindow, players: totalPlayers },
 			more: Math.max(0, rows.length - limit),
+			builds: builds.map((b) => ({ build: b.build || "(unknown)", n: Number(b.n), lastAt: iso(Number(b.last) * MINUTE) })),
 		};
 	}
 
