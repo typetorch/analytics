@@ -570,6 +570,9 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 		expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_UNBLESSED: "admin" })).toThrow(/web or refuse/);
 		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_KIDS: "a1, b2" }).centralLogin?.kids).toEqual(["a1", "b2"]);
 		expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_ROBLOX_BROKER_DISCOVERY: "http://roblox.example.com/x" })).toThrow(/TYPETORCH_ROBLOX_BROKER_DISCOVERY/);
+		// Plain http on loopback only with a local broker.
+		expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_ROBLOX_BROKER_DISCOVERY: "http://127.0.0.1:8790/x" })).toThrow(/TYPETORCH_ROBLOX_BROKER_DISCOVERY/);
+		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_ISSUER: "http://127.0.0.1:8788", TYPETORCH_ROBLOX_BROKER_DISCOVERY: "http://127.0.0.1:8790/x" }).centralLogin?.robloxDiscoveryUrl).toBe("http://127.0.0.1:8790/x");
 	});
 
 	test("the switch off: no button, every route 404, no instance key, no report, admin token and per-game sign-in untouched", async () => {
@@ -685,6 +688,7 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 		const bad: [string, (f: Fakes) => void, string][] = [
 			["client id", (f) => (f.metadata = { ...f.metadata, roblox_client_id: "a b" }), "no valid roblox_client_id"],
 			["discovery", (f) => (f.metadata = { ...f.metadata, roblox_discovery: "http://roblox.test/oauth/.well-known/openid-configuration" }), "no valid roblox_discovery"],
+			["loopback discovery for a public issuer", (f) => (f.metadata = { ...f.metadata, roblox_discovery: "http://127.0.0.1:8790/oauth/.well-known/openid-configuration" }), "no valid roblox_discovery"],
 			["size", (f) => (f.metadata = { ...f.metadata, pad: "x".repeat(20_000) }), "too large"],
 		];
 		for (const [, setup, why] of bad) {
@@ -871,6 +875,9 @@ describe("Sign in with typetorch.dev: viewers stay strictly read-only", () => {
 		writeFileSync(join(web, "index.html"), "<!doctype html><title>explorer</title>");
 		writeFileSync(join(web, ".env"), "TYPETORCH_ADMIN_TOKEN=leaked-admin-token-0123456789abcdef");
 		writeFileSync(join(root, ".env"), "TYPETORCH_ADMIN_TOKEN=leaked-admin-token-0123456789abcdef");
+		mkdirSync(join(web, "assets", ".hidden"), { recursive: true });
+		writeFileSync(join(web, "assets", ".hidden", "x.js"), "leaked-admin-token-nested");
+		writeFileSync(join(web, "..env"), "leaked-admin-token-dotdot");
 		h = await harness({ ...ENV, TYPETORCH_EXPLORER: "on", TYPETORCH_WEB_DIR: web, TYPETORCH_ALERT_WEBHOOK_URL: "https://hooks.example.com/secret-webhook-path" }, { fetch: fakes.fetch });
 		fakes.h = h;
 		await h.call("/v1/access", { method: "PUT", ...json({ seq: 1, owners: [OWNER] }), headers: { "content-type": "application/json", ...bearer(ADMIN) } });
@@ -921,7 +928,7 @@ describe("Sign in with typetorch.dev: viewers stay strictly read-only", () => {
 	}
 
 	test("no .env (or any dotfile, or anything outside the build folder) is ever served", async () => {
-		for (const path of ["/.env", "/api/.env", "/assets/../.env", "/%2e%2e/.env", "/..%2f.env", "/.git/config", "/../.env"]) {
+		for (const path of ["/.env", "/api/.env", "/assets/../.env", "/%2e%2e/.env", "/..%2f.env", "/.git/config", "/../.env", "/%2eenv", "/%2Eenv", "/assets/.hidden/x.js", "/assets/%2ehidden/x.js", "/..env", "/%2e%2eenv", "/assets/./.hidden/x.js"]) {
 			const res = await h.call(path, { headers: viewer });
 			const text = await res.text();
 			expect(`${path} ${text.includes("leaked-admin-token")}`).toBe(`${path} false`);

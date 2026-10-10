@@ -19,7 +19,7 @@
  */
 import { createHash, createPublicKey, randomBytes, verify, type KeyObject } from "node:crypto";
 import { discoveryUrlOf, ROBLOX_CLIENT_ID_PATTERN } from "./config.ts";
-import { OAuthError, PENDING_TTL_MS, MAX_PENDING_PER_ADDRESS, RobloxIdTokens, safeEqual, type RobloxIdentity } from "./roblox-oauth.ts";
+import { OAuthError, PENDING_TTL_MS, MAX_PENDING_PER_ADDRESS, RobloxIdTokens, isLoopbackHost, safeEqual, type RobloxIdentity } from "./roblox-oauth.ts";
 
 const MAX_PENDING = 1000;
 const HTTP_TIMEOUT_MS = 10_000;
@@ -97,6 +97,8 @@ export class CentralLogin {
 	private readonly pending = new Map<string, Pending>();
 	private readonly doFetch: (input: string, init?: RequestInit) => Promise<Response>;
 	private readonly clock: () => number;
+	/** Plain http for Roblox's discovery and keys only when the broker itself is a local one (dash's fake Roblox). */
+	private readonly loopbackIssuer: boolean;
 	/** Roblox's discovery and keys, for the discovery URL in use (made again if it changes). */
 	private roblox: { url: string; tokens: RobloxIdTokens } | undefined;
 	private metadata: { at: number; settings: RobloxSettings } | undefined;
@@ -111,6 +113,7 @@ export class CentralLogin {
 	constructor(private readonly o: CentralLoginOptions) {
 		this.doFetch = o.fetch ?? ((input, init) => fetch(input, init));
 		this.clock = o.clock ?? Date.now;
+		this.loopbackIssuer = isLoopbackHost(new URL(o.issuer).hostname);
 	}
 
 	/**
@@ -183,13 +186,13 @@ export class CentralLogin {
 		if (m.issuer !== this.o.issuer) throw new OAuthError("failed", "typetorch.dev login metadata names another issuer");
 		if (typeof m.roblox_client_id !== "string" || !ROBLOX_CLIENT_ID_PATTERN.test(m.roblox_client_id)) throw new OAuthError("failed", "typetorch.dev login metadata has no valid roblox_client_id");
 		const discoveryUrl = typeof m.roblox_discovery === "string" ? discoveryUrlOf(m.roblox_discovery) : undefined;
-		if (!discoveryUrl) throw new OAuthError("failed", "typetorch.dev login metadata has no valid roblox_discovery (https, or http on loopback)");
+		if (!discoveryUrl || (!this.loopbackIssuer && !discoveryUrl.startsWith("https:"))) throw new OAuthError("failed", "typetorch.dev login metadata has no valid roblox_discovery (https; http on loopback only for a loopback issuer)");
 		return { clientId: m.roblox_client_id, discoveryUrl };
 	}
 
 	private robloxTokens(discoveryUrl: string): RobloxIdTokens {
 		if (this.roblox?.url !== discoveryUrl) {
-			this.roblox = { url: discoveryUrl, tokens: new RobloxIdTokens({ allowLoopbackHttp: true, discoveryUrl, ...(this.o.fetch ? { fetch: this.o.fetch } : {}), ...(this.o.clock ? { clock: this.o.clock } : {}) }) };
+			this.roblox = { url: discoveryUrl, tokens: new RobloxIdTokens({ allowLoopbackHttp: this.loopbackIssuer, discoveryUrl, ...(this.o.fetch ? { fetch: this.o.fetch } : {}), ...(this.o.clock ? { clock: this.o.clock } : {}) }) };
 		}
 		return this.roblox.tokens;
 	}

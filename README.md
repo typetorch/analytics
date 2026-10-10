@@ -372,8 +372,8 @@ Off unless `TYPETORCH_CENTRAL_LOGIN=on`; the admin token and the per-game Sign i
   broker's answers are never shown or logged.
 - **The broker's login metadata.** Before redeeming a code the backend reads `<issuer>/.well-known/typetorch-login`
   (`{ issuer, jwks_uri, roblox_client_id, roblox_discovery }`; 10-second timeout, 16 KB cap, cached an hour). Its `issuer`
-  must equal the configured issuer exactly; the client id must look like one; the discovery URL must be https (plain
-  http only on loopback). The Roblox ID token is checked against those two values, so no backend sets them. A failed
+  must equal the configured issuer exactly; the client id must look like one; the discovery URL must be https (plain http on
+  loopback only when the issuer is local too; Roblox's endpoints follow the same rule). The Roblox ID token is checked against those two values, so no backend sets them. A failed
   fetch backs off (2 seconds, doubling up to 5 minutes) and every typetorch.dev login fails closed until one succeeds;
   the admin token and the per-game sign-in are unaffected. `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` and
   `TYPETORCH_ROBLOX_BROKER_DISCOVERY` optionally pin the values: a published value that differs from a pin refuses

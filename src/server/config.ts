@@ -415,7 +415,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		let discovery: string | undefined;
 		if (env.TYPETORCH_ROBLOX_BROKER_DISCOVERY) {
 			discovery = discoveryUrlOf(env.TYPETORCH_ROBLOX_BROKER_DISCOVERY);
-			if (!discovery) throw new Error("TYPETORCH_ROBLOX_BROKER_DISCOVERY must be an https URL (plain http only for localhost / 127.0.0.1)");
+			const loopbackIssuer = ["localhost", "127.0.0.1", "[::1]"].includes(new URL(issuer).hostname);
+			if (!discovery || (!loopbackIssuer && !discovery.startsWith("https:"))) throw new Error("TYPETORCH_ROBLOX_BROKER_DISCOVERY must be an https URL (plain http only for localhost / 127.0.0.1, with a local issuer)");
 		}
 		const label = (env.TYPETORCH_CENTRAL_LOGIN_LABEL ?? (publicUrl ? new URL(publicUrl).host : "")).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 64);
 		if (!publicUrl) warnings.push("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL (the callback is <public url>/auth/typetorch/callback)");
