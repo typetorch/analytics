@@ -20,6 +20,7 @@ const OPTIONS: Partial<Record<QueryName, object>> = {
 	"player-stats": { pid: "p0015" },
 	flow: { facet: "zone" },
 	funnel: { funnel: "onboarding" },
+	"funnel-progress": { pids: ["p0003", "p0015"] },
 	experiment: { experiment: "onboarding" },
 	servers: { maxAgeSeconds: 150 },
 	deployReport: { maxAgeSeconds: 150 },

@@ -105,6 +105,7 @@ beforeEach(() => {
 		if (name === "player-stats") return statsFor(options.pid ?? "", options.pid === BETA);
 		if (name === "timeline") return timeline;
 		if (name === "player-graph") return graph;
+		if (name === "funnel-progress") return { funnels: [], progress: [] };
 		throw new Error(`unexpected query ${name}`);
 	}) as typeof api.query);
 });

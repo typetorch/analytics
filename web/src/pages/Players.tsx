@@ -1,18 +1,21 @@
-import { Search } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ListPlus, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { IdentityStatus } from "@/components/Identity";
 import { PlayerDetail } from "@/components/player-detail/PlayerDetail";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
+import { FunnelProgressBar } from "@/components/FunnelProgressBar";
 import { ToggleChip } from "@/components/ToggleChip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
-import { fmtAgo, fmtInt, fmtMinutes, shortId } from "@/lib/format";
-import { useAnalytics } from "@/lib/hooks";
-import type { PlayerSummary } from "@/lib/types";
+import { fmtAgo, fmtInt, fmtMinutes, plural, shortId } from "@/lib/format";
+import { useAnalytics, useParam } from "@/lib/hooks";
+import type { FunnelProgress, PlayerSummary } from "@/lib/types";
 
 const PID = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -43,6 +46,8 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 	const valid = search === "" || PID.test(search);
 	// The server returns 100 players: top spenders asks it for the 100 who spent most, not the 100 most recent re-sorted.
 	const q = useAnalytics("players", { limit: 100, ...(search ? { search } : {}), ...(topSpenders ? { sort: "robux" } : {}) }, { enabled: valid });
+	const [funnels, setFunnels] = useFunnelColumns();
+	const columns = useFunnelProgressColumns(q.data?.players, funnels);
 	return (
 		<Section
 			title="Players"
@@ -80,7 +85,8 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 					<DataTable
 						id="players-list"
 						label="Players"
-						columns={PLAYER_COLUMNS}
+						columns={columns}
+						columnsMenu={<AddFunnelMenu chosen={funnels} onChange={setFunnels} />}
 						data={data.players}
 						rowId={(p) => p.pid}
 						density="compact"
@@ -122,6 +128,101 @@ const PLAYER_COLUMNS: DataColumn<PlayerSummary>[] = [
 	{ id: "new", header: "New", type: "boolean", accessor: (p) => p.newInRange, defaultHidden: true },
 	{ id: "uid", header: "UserId", type: "text", accessor: (p) => (p.uid === undefined ? null : String(p.uid)), defaultHidden: true },
 ];
+
+/** The funnel columns the user added (Columns > Add funnel), in the URL as `funnels=a,b` so a link keeps them. */
+function useFunnelColumns(): [string[], (next: string[]) => void] {
+	const [value, setValue] = useParam("funnels");
+	const list = useMemo(() => [...new Set(value.split(",").filter(Boolean))], [value]);
+	return [list, (next) => setValue(next.join(","))];
+}
+
+/** The player columns plus one progress column per chosen funnel, filled from one `funnel-progress` answer for the listed players. */
+function useFunnelProgressColumns(players: readonly PlayerSummary[] | undefined, funnels: string[]): DataColumn<PlayerSummary>[] {
+	const pids = useMemo(() => (players ?? []).map((p) => p.pid), [players]);
+	const progress = useAnalytics("funnel-progress", { ...(funnels.length === 1 ? { funnel: funnels[0] } : {}), pids }, { enabled: funnels.length > 0 && pids.length > 0 });
+	const loading = progress.isPending;
+	const failed = progress.isError;
+	const byKey = useMemo(() => new Map((progress.data?.progress ?? []).map((p) => [`${p.pid}\n${p.funnel}`, p])), [progress.data]);
+	return useMemo(() => {
+		if (!funnels.length) return PLAYER_COLUMNS;
+		return [...PLAYER_COLUMNS, ...funnels.map((name) => funnelColumn(name, (pid) => byKey.get(`${pid}\n${name}`), loading, failed))];
+	}, [funnels, byKey, loading, failed]);
+}
+
+function funnelColumn(name: string, find: (pid: string) => FunnelProgress | undefined, loading: boolean, failed: boolean): DataColumn<PlayerSummary> {
+	const percent = (p: PlayerSummary) => {
+		const f = find(p.pid);
+		return f ? Math.round(f.share * 1000) / 10 : null;
+	};
+	return {
+		id: `funnel:${name}`,
+		header: name,
+		hint: "funnel",
+		title: `Progress in the ${name} funnel: the furthest step each player logged, as a share of the funnel's steps in this range`,
+		type: "number",
+		accessor: percent,
+		format: (v) => (v === null || v === undefined ? "not started" : `${String(v)}%`),
+		exportValue: percent,
+		cell: (p) => (loading ? <Skeleton className="h-5 w-full min-w-24" /> : failed ? <span className="text-muted-foreground">–</span> : <FunnelProgressBar progress={find(p.pid)} />),
+		hideable: false,
+		searchable: false,
+		minWidth: 140,
+	};
+}
+
+/** Columns > Add funnel: a checklist of the funnels in the range; a tick adds a progress column, another tick removes it. */
+function AddFunnelMenu({ chosen, onChange }: { chosen: string[]; onChange(next: string[]): void }) {
+	return (
+		<DropdownMenuSub>
+			<DropdownMenuSubTrigger>
+				<ListPlus className="size-4 text-muted-foreground" />
+				Add funnel
+				{chosen.length ? <span className="ml-auto text-xs text-muted-foreground tabular-nums">{chosen.length}</span> : null}
+			</DropdownMenuSubTrigger>
+			<DropdownMenuSubContent className="max-h-80 w-64 overflow-y-auto">
+				<FunnelChoices chosen={chosen} onChange={onChange} />
+			</DropdownMenuSubContent>
+		</DropdownMenuSub>
+	);
+}
+
+function FunnelChoices({ chosen, onChange }: { chosen: string[]; onChange(next: string[]): void }) {
+	const list = useAnalytics("funnel", {});
+	const found = list.data && list.data.funnel === null ? list.data.funnels : [];
+	// A chosen funnel with no rows in this range stays in the list, so it can still be removed.
+	const names = [...found.map((f) => f.name), ...chosen.filter((c) => !found.some((f) => f.name === c))];
+	if (list.isPending) return <DropdownMenuItem disabled>Loading funnels</DropdownMenuItem>;
+	if (list.isError) return <DropdownMenuItem disabled>Couldn't load the funnels</DropdownMenuItem>;
+	if (!names.length) return <DropdownMenuItem disabled>No funnels in this range</DropdownMenuItem>;
+	return (
+		<>
+			{names.map((name) => {
+				const players = found.find((f) => f.name === name)?.players;
+				return (
+					<DropdownMenuCheckboxItem
+						key={name}
+						checked={chosen.includes(name)}
+						onCheckedChange={(on) => onChange(on === true ? [...chosen, name] : chosen.filter((c) => c !== name))}
+						onSelect={(e) => e.preventDefault()}
+					>
+						<span className="truncate">{name}</span>
+						{players !== undefined ? <span className="ml-auto pl-2 text-xs text-muted-foreground tabular-nums">{plural(players, "player")}</span> : null}
+					</DropdownMenuCheckboxItem>
+				);
+			})}
+			{chosen.length ? (
+				<DropdownMenuItem
+					onSelect={(e) => {
+						e.preventDefault();
+						onChange([]);
+					}}
+				>
+					Remove all funnel columns
+				</DropdownMenuItem>
+			) : null}
+		</>
+	);
+}
 
 export default function Players() {
 	const [params, setParams] = useSearchParams();

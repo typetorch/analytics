@@ -19,7 +19,7 @@ export {
 } from "./queries/index.ts";
 export type { QueryContext, QueryDef, Row } from "./queries/core.ts";
 export type { OverviewResult, RobloxResult, RetentionResult, TopEventsResult } from "./queries/overview.ts";
-export type { FunnelResult, TimelineResult } from "./queries/funnel.ts";
+export type { FunnelProgressResult, FunnelResult, TimelineResult } from "./queries/funnel.ts";
 export type { ExperimentResult, Comparison, VariantStats } from "./queries/experiment.ts";
 export type { ConfusionResult } from "./queries/confusion.ts";
 export type { EventsResult, PlayersResult, ValuesResult } from "./queries/explore.ts";

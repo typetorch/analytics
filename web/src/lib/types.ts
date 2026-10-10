@@ -109,6 +109,24 @@ export type FunnelResult =
 	| { funnel: null; funnels: { name: string; players: number; events: number }[] }
 	| { funnel: string; players: number; steps: FunnelStep[]; biggestDrop: { step: number; lost: number; share: number } | null };
 
+/** The `funnel-progress` query: how far given players got in each funnel. */
+export interface FunnelProgress {
+	pid: string;
+	funnel: string;
+	step: number;
+	label: string | null;
+	/** The furthest step's place among the funnel's steps (1-based), of how many. */
+	reached: number;
+	of: number;
+	/** reached / of, 0-1. */
+	share: number;
+}
+
+export interface FunnelProgressResult {
+	funnels: { name: string; steps: { step: number; label: string | null }[] }[];
+	progress: FunnelProgress[];
+}
+
 export interface TimelineEvent {
 	time: string;
 	t: number;
@@ -421,6 +439,7 @@ export interface QueryResults {
 	roblox: RobloxResult;
 	retention: RetentionResult;
 	funnel: FunnelResult;
+	"funnel-progress": FunnelProgressResult;
 	timeline: TimelineResult;
 	"player-graph": GraphData;
 	"player-stats": PlayerStatsResult;
