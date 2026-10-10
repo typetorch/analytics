@@ -104,7 +104,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_ADMIN_ALLOW_IPS` | no | Comma-separated addresses and CIDR ranges. When set, admin routes, the explorer and the login answer 404 to every other address. Game routes stay open. |
 | `TYPETORCH_TOKEN_LOGIN` | no | `off` hides and refuses the admin-token login in the browser (the CLI's Bearer token still works). Default `on`. |
 | `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
-| `TYPETORCH_CENTRAL_LOGIN` | no | `on` turns on [Sign in with typetorch.dev](#sign-in-with-typetorchdev-trial) (needs `TYPETORCH_PUBLIC_URL` over https, or http on loopback; nothing Roblox-specific: the broker publishes TypeTorch's Roblox client id). **Off by default** during the trial: off, there is no button, every route of it answers 404, no instance key is made and no report is sent. |
+| `TYPETORCH_CENTRAL_LOGIN` | no | [Sign in with typetorch.dev](#sign-in-with-typetorchdev). **On by default**; it only turns on with `TYPETORCH_PUBLIC_URL` over https (or http on loopback), otherwise it stays off with a warning and the backend starts as usual (nothing Roblox-specific is needed: the broker publishes TypeTorch's Roblox client id). `off` turns it off: no button, no dashboard link, every route of it answers 404, no instance key is made and no report is sent. |
 | `TYPETORCH_CENTRAL_LOGIN_ISSUER` | no | The broker's origin (default `https://dash.typetorch.dev`; plain `http` only on `localhost` / `127.0.0.1`, for a local broker). |
 | `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` | no | What an owner gets on a browser that was never trusted: `web` (read-only, the default) or `refuse`. |
 | `TYPETORCH_CENTRAL_LOGIN_KIDS` | no | Comma-separated broker key ids to pin: an assertion signed by any other key is refused even if the broker publishes it. |
@@ -343,12 +343,15 @@ token login (with the user's name and avatar for the explorer's header). Roblox'
 unread. A failure goes back to the login page with a plain sentence, never a stack. Removing an owner (a higher-`seq`
 `PUT /v1/access` without them) ends their sessions at once.
 
-### Sign in with typetorch.dev (trial)
+### Sign in with typetorch.dev
 
 One Roblox sign-in at typetorch.dev for every backend a person owns or views, without a Roblox OAuth app per game
 (TypeTorch plans `typetorch-dev-login.md`). typetorch.dev is only an identity broker: it confirms who someone is and
 hands this backend a signed statement; the role comes from this backend's own lists, exactly as with Sign in with Roblox.
-Off unless `TYPETORCH_CENTRAL_LOGIN=on`; the admin token and the per-game Sign in with Roblox are untouched by it.
+On by default whenever `TYPETORCH_PUBLIC_URL` is https (http on loopback); `TYPETORCH_CENTRAL_LOGIN=off` turns it off.
+Without such a public URL it stays off with a warning on the startup line. The admin token and the per-game Sign in with
+Roblox are untouched by it. While it is on, the explorer shows a **TypeTorch Dashboard** link (the issuer, default
+`https://dash.typetorch.dev`) in its header and on the sign-in page; `GET /v1/auth/check` names that origin as `dashboard`.
 
 - **Identity.** On the first start with the login on, the backend makes an Ed25519 **instance key** in
   `<data dir>/instance.key` (mode 0600, backed up with the data folder). Its fingerprint
@@ -391,7 +394,7 @@ Off unless `TYPETORCH_CENTRAL_LOGIN=on`; the admin token and the per-game Sign i
   the admin sessions it opened. A browser trusted with the admin token stops counting when the token changes.
 
 To try it locally against a broker on `http://127.0.0.1:8788` (typetorch/dash, `bun run dev` and `bun run fake-roblox`):
-`TYPETORCH_CENTRAL_LOGIN=on TYPETORCH_CENTRAL_LOGIN_ISSUER=http://127.0.0.1:8788 bun run local -- --game ../template`
+`TYPETORCH_CENTRAL_LOGIN_ISSUER=http://127.0.0.1:8788 bun run local -- --game ../template`
 (the public URL is then `http://localhost:8787`, which the broker accepts as a loopback origin; the fake Roblox's client
 id and discovery URL come from the broker's `/.well-known/typetorch-login`, nothing to copy).
 
@@ -444,10 +447,10 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox, typetorch? } }` without valid credentials |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet }, dashboard? }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
-| `GET /auth/typetorch/start`, `/callback` | open (rate limited, lockout) | [Sign in with typetorch.dev](#sign-in-with-typetorchdev-trial); 404 while `TYPETORCH_CENTRAL_LOGIN` is off (so are the next rows) |
+| `GET /auth/typetorch/start`, `/callback` | open (rate limited, lockout) | [Sign in with typetorch.dev](#sign-in-with-typetorchdev); 404 while `TYPETORCH_CENTRAL_LOGIN` is off (so are the next rows) |
 | `POST /auth/device` | open: the admin token in the body, `X-TypeTorch` header | trusts this browser (device cookie) |
 | `GET /auth/bless/challenge`, `GET /auth/bless` | open (rate limited, lockout) | the CLI's signed trust link |
 | `GET /api/typetorch/challenge/<token>` | open (rate limited) | the origin challenge, only while a report is pending |
