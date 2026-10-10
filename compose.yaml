@@ -31,6 +31,17 @@ services:
       TYPETORCH_TOKEN_LOGIN: ${TYPETORCH_TOKEN_LOGIN:-on}
       ROBLOX_OAUTH_CLIENT_ID: ${ROBLOX_OAUTH_CLIENT_ID:-}
       ROBLOX_OAUTH_CLIENT_SECRET: ${ROBLOX_OAUTH_CLIENT_SECRET:-}
+      # Sign in with typetorch.dev (a trial, off by default; README "Sign in with typetorch.dev"). Needs TYPETORCH_PUBLIC_URL
+      # only: no Roblox client id is set here (the broker publishes it).
+      TYPETORCH_CENTRAL_LOGIN: ${TYPETORCH_CENTRAL_LOGIN:-off}
+      TYPETORCH_CENTRAL_LOGIN_ISSUER: ${TYPETORCH_CENTRAL_LOGIN_ISSUER:-}  # default https://dash.typetorch.dev
+      TYPETORCH_CENTRAL_LOGIN_UNBLESSED: ${TYPETORCH_CENTRAL_LOGIN_UNBLESSED:-}
+      TYPETORCH_CENTRAL_LOGIN_KIDS: ${TYPETORCH_CENTRAL_LOGIN_KIDS:-}
+      TYPETORCH_CENTRAL_LOGIN_LABEL: ${TYPETORCH_CENTRAL_LOGIN_LABEL:-}
+      # Optional pins: by default the Roblox client id and discovery come from <issuer>/.well-known/typetorch-login;
+      # set, a published value that differs refuses typetorch.dev logins. Leave empty.
+      TYPETORCH_ROBLOX_BROKER_CLIENT_ID: ${TYPETORCH_ROBLOX_BROKER_CLIENT_ID:-}
+      TYPETORCH_ROBLOX_BROKER_DISCOVERY: ${TYPETORCH_ROBLOX_BROKER_DISCOVERY:-}
       ROBLOX_WEBHOOK_SECRET: ${ROBLOX_WEBHOOK_SECRET:-}
       OPENCLOUD_API_KEY: ${OPENCLOUD_API_KEY:-}
       TYPETORCH_UNIVERSE_ID: ${TYPETORCH_UNIVERSE_ID:-}

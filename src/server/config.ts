@@ -67,6 +67,13 @@ export interface ServerConfig {
 	tokenLogin: boolean;
 	/** Sign in with Roblox: the OAuth app's client id and secret. Both set = on. */
 	robloxOAuth?: { clientId: string; clientSecret: string };
+	/**
+	 * Sign in with typetorch.dev (TYPETORCH_CENTRAL_LOGIN=on; off by default during the trial): the broker's origin, the
+	 * role of an owner on a device that was never blessed, optional pinned key ids, optional pins of TypeTorch's Roblox
+	 * client id and Roblox's discovery document (else read from <issuer>/.well-known/typetorch-login), and the label the
+	 * origin report sends. Needs TYPETORCH_PUBLIC_URL.
+	 */
+	centralLogin?: CentralLoginConfig;
 	/** The public https URL of this backend (no trailing slash): OAuth redirect, Secure cookies, origin checks. */
 	publicUrl?: string;
 	/** Proxies in front whose X-Forwarded-For hops are trusted (0 = none: the TCP peer is the client). */
@@ -145,6 +152,51 @@ export interface ServerConfig {
 	envSet: ReadonlySet<string>;
 	/** One line per old variable name that was read: "OLD is deprecated: use NEW". Never holds a value. */
 	warnings: string[];
+}
+
+export interface CentralLoginConfig {
+	issuer: string;
+	unblessed: "web" | "refuse";
+	kids?: string[];
+	/** TYPETORCH_ROBLOX_BROKER_CLIENT_ID: a pin; the broker's published value must equal it. */
+	robloxClientId?: string;
+	/** TYPETORCH_ROBLOX_BROKER_DISCOVERY: a pin; the broker's published value must equal it. */
+	robloxDiscoveryUrl?: string;
+	label: string;
+}
+
+/** The broker's default origin. */
+export const CENTRAL_LOGIN_ISSUER = "https://dash.typetorch.dev";
+/** A Roblox OAuth client id (public): the broker's, the `aud` of the Roblox ID tokens it passes on. */
+export const ROBLOX_CLIENT_ID_PATTERN = /^[\w.-]{1,128}$/;
+
+/** A discovery document URL: https, plain http only on loopback, no userinfo. Returns the normalized URL or undefined. */
+export function discoveryUrlOf(value: string): string | undefined {
+	if (value.length > 2048 || /[\s\x00-\x1f\x7f]/.test(value)) return undefined;
+	let u: URL;
+	try {
+		u = new URL(value);
+	} catch {
+		return undefined;
+	}
+	const loopback = u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+	if (u.username || u.password || !(u.protocol === "https:" || (loopback && u.protocol === "http:"))) return undefined;
+	return u.toString();
+}
+
+/** An http(s) origin: https anywhere, plain http only on loopback. Returns `scheme://host[:port]` or undefined. */
+export function originOf(value: string, allowLoopbackHttp = true): string | undefined {
+	if (value.length > 2048 || /[\s\x00-\x1f\x7f]/.test(value)) return undefined;
+	let u: URL;
+	try {
+		u = new URL(value);
+	} catch {
+		return undefined;
+	}
+	if (u.username || u.password || u.search || u.hash || (u.pathname !== "/" && u.pathname !== "")) return undefined;
+	const loopback = u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+	if (u.protocol !== "https:" && !(allowLoopbackHttp && loopback && u.protocol === "http:")) return undefined;
+	return `${u.protocol}//${u.host}`;
 }
 
 export function parseDotEnv(text: string): Record<string, string> {
@@ -345,6 +397,33 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (oauthId && oauthSecret && !publicUrl) warnings.push("Sign in with Roblox is off: set TYPETORCH_PUBLIC_URL (the redirect is <public url>/v1/auth/roblox/callback)");
 	const robloxOAuth = oauthId && oauthSecret && publicUrl ? { clientId: oauthId, clientSecret: oauthSecret } : undefined;
 
+	// Sign in with typetorch.dev: off unless TYPETORCH_CENTRAL_LOGIN=on (the trial on the central-oauth branch).
+	let centralLogin: CentralLoginConfig | undefined;
+	if (flag(env, "TYPETORCH_CENTRAL_LOGIN", false)) {
+		const issuer = originOf(env.TYPETORCH_CENTRAL_LOGIN_ISSUER ?? CENTRAL_LOGIN_ISSUER);
+		if (!issuer) throw new Error("TYPETORCH_CENTRAL_LOGIN_ISSUER must be an origin: https://host[:port] (plain http only for localhost / 127.0.0.1), no path");
+		const unblessed = (env.TYPETORCH_CENTRAL_LOGIN_UNBLESSED ?? "web").toLowerCase();
+		if (unblessed !== "web" && unblessed !== "refuse") throw new Error("TYPETORCH_CENTRAL_LOGIN_UNBLESSED is web or refuse");
+		const kids = (env.TYPETORCH_CENTRAL_LOGIN_KIDS ?? "")
+			.split(",")
+			.map((k) => k.trim())
+			.filter(Boolean);
+		if (kids.some((k) => !/^[\w.-]{1,128}$/.test(k))) throw new Error("TYPETORCH_CENTRAL_LOGIN_KIDS lists key ids (letters, digits, . _ -), comma separated");
+		// Optional pins: by default both come from <issuer>/.well-known/typetorch-login.
+		const clientId = env.TYPETORCH_ROBLOX_BROKER_CLIENT_ID || undefined;
+		if (clientId && !ROBLOX_CLIENT_ID_PATTERN.test(clientId)) throw new Error("TYPETORCH_ROBLOX_BROKER_CLIENT_ID must be a Roblox OAuth client id");
+		let discovery: string | undefined;
+		if (env.TYPETORCH_ROBLOX_BROKER_DISCOVERY) {
+			discovery = discoveryUrlOf(env.TYPETORCH_ROBLOX_BROKER_DISCOVERY);
+			const loopbackIssuer = ["localhost", "127.0.0.1", "[::1]"].includes(new URL(issuer).hostname);
+			if (!discovery || (!loopbackIssuer && !discovery.startsWith("https:"))) throw new Error("TYPETORCH_ROBLOX_BROKER_DISCOVERY must be an https URL (plain http only for localhost / 127.0.0.1, with a local issuer)");
+		}
+		const label = (env.TYPETORCH_CENTRAL_LOGIN_LABEL ?? (publicUrl ? new URL(publicUrl).host : "")).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 64);
+		if (!publicUrl) warnings.push("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL (the callback is <public url>/auth/typetorch/callback)");
+		else if (!originOf(publicUrl)) warnings.push("Sign in with typetorch.dev is off: TYPETORCH_PUBLIC_URL must be https (plain http only for localhost / 127.0.0.1)");
+		else centralLogin = { issuer, unblessed: unblessed as "web" | "refuse", label: label || "TypeTorch backend", ...(kids.length ? { kids } : {}), ...(clientId ? { robloxClientId: clientId } : {}), ...(discovery ? { robloxDiscoveryUrl: discovery } : {}) };
+	}
+
 	// The explorer: TYPETORCH_WEB_DIR, else web/dist next to src/ (or dist/) when it has been built.
 	let webDir: string | undefined;
 	if (flag(env, "TYPETORCH_EXPLORER", true)) {
@@ -402,6 +481,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (cloudflareIps) config.cloudflareIps = cloudflareIps;
 	if (robloxOAuth) config.robloxOAuth = robloxOAuth;
 	if (publicUrl) config.publicUrl = publicUrl;
+	if (centralLogin) config.centralLogin = centralLogin;
 	if (webDir) config.webDir = webDir;
 	if (env.ROBLOX_WEBHOOK_SECRET) config.webhookSecret = env.ROBLOX_WEBHOOK_SECRET;
 	if (env.OPENCLOUD_API_KEY) config.openCloudKey = env.OPENCLOUD_API_KEY;
@@ -435,6 +515,7 @@ export function describeConfig(config: ServerConfig): string {
 		`token login=${config.tokenLogin ? "on" : "off"}`,
 		`web viewers=${config.webViewers.length}`,
 		`roblox sign-in=${config.robloxOAuth ? "on" : "off"}`,
+		`typetorch.dev login=${config.centralLogin ? `on (issuer ${config.centralLogin.issuer}, unblessed owners: ${config.centralLogin.unblessed}${config.centralLogin.kids ? `, ${config.centralLogin.kids.length} pinned kid(s)` : ""}${config.centralLogin.robloxClientId || config.centralLogin.robloxDiscoveryUrl ? ", Roblox settings pinned" : ", Roblox settings from the broker"})` : "off"}`,
 		`admin allow list=${config.adminAllowIps ? `${config.adminAllowIps.length} rule(s)` : "off"}`,
 		`trust proxy=${config.trustProxy || "off"}${config.trustedProxies ? ` (from ${config.trustedProxies.length} proxy rule(s))` : ""}`,
 		`cloudflare=${config.cloudflareIps ? "on" : "off"}`,

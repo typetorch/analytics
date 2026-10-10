@@ -36,6 +36,13 @@
  *   GET  /v1/auth/check             which role the credentials have and which parts run (no side effects); 401 says which logins are on
  *   POST /v1/auth/login | logout    explorer session by pasting the admin token
  *   GET  /v1/auth/roblox/start | callback   Sign in with Roblox (owners only)
+ *   Sign in with typetorch.dev (TYPETORCH_CENTRAL_LOGIN=on, else 404; plans typetorch-dev-login):
+ *   GET  /auth/typetorch/start | callback   the broker login (owners: admin on a blessed device, else web or refused)
+ *   POST /auth/device { token }     the admin token once blesses this browser (device cookie)
+ *   GET  /auth/bless/challenge, GET /auth/bless?challenge=&sig=   the CLI's link signed by the game's signing key
+ *   GET  /api/typetorch/challenge/<token>   the origin challenge, only while a report is pending
+ *   GET  /v1/admin/devices, DELETE /v1/admin/devices/<id>, GET|PUT /v1/access/keys (PUT: admin token only),
+ *   POST /v1/central/report         owners only
  *   GET  /                          the built explorer (web/dist) and its files
  *
  * The explorer calls /api/<route> (its dev proxy's prefix); the backend takes that prefix off, so one build works both ways.
@@ -73,6 +80,10 @@ import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
+import { CentralLogin } from "./central-login.ts";
+import { CentralReporter, type ReportResult } from "./central-report.ts";
+import { BlessKeys, DEVICE_COOKIE, DEVICE_LIFE_MS, DeviceStore, agentLabel } from "./devices.ts";
+import { InstanceKey } from "./instance-key.ts";
 import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
@@ -94,6 +105,8 @@ export interface AppOptions {
 	onFatal?: (error: Error) => void;
 	/** How often a server in handover tries to open DuckDB again, ms (default 1000). */
 	handoverRetryMs?: number;
+	/** The wait between origin report polls while the typetorch.dev challenge runs (tests pass a fast one). */
+	reportSleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -126,6 +139,8 @@ export interface App {
 	sessionCount(): number;
 	/** The explorer's session store (tests make sessions directly, e.g. a viewer's without Roblox in the loop). */
 	readonly sessions: Sessions;
+	/** Sign in with typetorch.dev (TYPETORCH_CENTRAL_LOGIN=on): this backend's fingerprint and the origin report. */
+	readonly central?: { readonly fingerprint: string; report(): Promise<ReportResult>; readonly devices: DeviceStore };
 	handle(req: Request, ip?: string): Promise<Response>;
 	/** One loader tick. */
 	load(): Promise<{ files: number; rows: number }>;
@@ -148,6 +163,9 @@ const WEB_POST_ALLOWED = /^\/v1\/(query\/[A-Za-z-]+|sql)$/;
 const READ_METHODS = new Set(["GET", "HEAD"]);
 const OAUTH_COOKIE = "tt_oauth";
 const OAUTH_PATH = "/v1/auth/roblox";
+/** Sign in with typetorch.dev: its routes and its short-lived state cookie (path-scoped like the Roblox one). */
+const CENTRAL_PATH = "/auth/typetorch";
+const CENTRAL_COOKIE = "tt_central";
 const FLEET_GAME_ROUTES = new Set(Object.keys(FLEET_LIMITS));
 /** POST /v1/errors per JobId per minute (the kernel sends at most 6). */
 const ERROR_JOB_PER_MINUTE = 30;
@@ -295,6 +313,35 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const oauth = config.robloxOAuth && config.publicUrl
 		? new RobloxOAuth({ clientId: config.robloxOAuth.clientId, clientSecret: config.robloxOAuth.clientSecret, redirectUri: `${config.publicUrl}/v1/auth/roblox/callback`, clock, ...(options.fetch ? { fetch: options.fetch } : {}) })
 		: undefined;
+	// Sign in with typetorch.dev (off unless TYPETORCH_CENTRAL_LOGIN=on): the instance key, the login, the origin report,
+	// blessed devices and the signing keys a blessing link may use. Off: none of it exists and its routes answer 404.
+	const central = (() => {
+		const c = config.centralLogin;
+		if (!c || !config.publicUrl) return undefined;
+		const { key, created } = InstanceKey.loadOrCreate(config.dataDir);
+		if (created) log(`typetorch.dev login: made the instance key in ${join(config.dataDir, "instance.key")} (fingerprint ${key.fingerprint})`);
+		return {
+			config: c,
+			key,
+			login: new CentralLogin({
+				issuer: c.issuer,
+				fingerprint: key.fingerprint,
+				redirectUri: `${config.publicUrl}${CENTRAL_PATH}/callback`,
+				...(c.robloxClientId ? { robloxClientId: c.robloxClientId } : {}),
+				...(c.robloxDiscoveryUrl ? { robloxDiscoveryUrl: c.robloxDiscoveryUrl } : {}),
+				log,
+				...(c.kids ? { pinnedKids: c.kids } : {}),
+				...(options.fetch ? { fetch: options.fetch } : {}),
+				clock,
+			}),
+			reporter: new CentralReporter({ issuer: c.issuer, key, origin: config.publicUrl, label: c.label, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.reportSleep ? { sleep: options.reportSleep } : {}) }),
+			devices: DeviceStore.at(config.dataDir, clock),
+			blessKeys: BlessKeys.at(config.dataDir, clock),
+		};
+	})();
+	const adminTokenHash = Sessions.hashToken(config.adminToken);
+	/** The origin challenge, served to the broker (any address): per address per minute. */
+	const challengeLimiter = new RateLimiter(60, clock);
 	const site = config.webDir ? new StaticSite(config.webDir) : undefined;
 	// The allow list is a runtime setting: read on every request.
 	const adminIpOk = (ip: string) => {
@@ -822,12 +869,22 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		out.live = live.stats;
 		out.errors = errors.stats;
 		out.sessions = sessions.size;
+		if (central) {
+			const last = central.reporter.last;
+			out.central = {
+				fingerprint: central.key.fingerprint,
+				issuer: central.config.issuer,
+				report: last ? { at: new Date(last.at).toISOString(), result: last.result, ...(last.status !== undefined ? { status: last.status } : {}) } : "not yet",
+				devices: central.devices.size,
+				blessKeys: central.blessKeys.size,
+			};
+		}
 		return json(200, out);
 	}
 
 	// Auth routes -------------------------------------------------------------------------------------------------------
 
-	const loginOptions = () => ({ token: runtime.get("tokenLogin"), roblox: Boolean(oauth) });
+	const loginOptions = () => ({ token: runtime.get("tokenLogin"), roblox: Boolean(oauth), ...(central ? { typetorch: true } : {}) });
 	const secureCookie = (req: Request) => isHttps(req, proxyOpts);
 	const notFound = () => json(404, { error: "not found" });
 	const blockedResponse = (ip: string): Response | undefined => {
@@ -956,6 +1013,157 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 	}
 
+	// Sign in with typetorch.dev -----------------------------------------------------------------------------------------
+
+	const centralOff = () => json(404, { error: "Sign in with typetorch.dev is off on this server" });
+	function deviceCookie(req: Request, value: string): string {
+		return setCookie(DEVICE_COOKIE, value, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: DEVICE_LIFE_MS / 1000 });
+	}
+
+	/** GET /auth/typetorch/start: state, nonce and a PKCE verifier, then off to typetorch.dev's /authorize. */
+	function centralStart(req: Request, ip: string): Response {
+		if (!central) return centralOff();
+		if (!adminIpOk(ip)) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		if (!oauthLimiter.take(`central-start:${ip}`)) return tooMany(oauthLimiter.retryAfter(`central-start:${ip}`));
+		const { url, state } = central.login.start(ip);
+		const cookie = setCookie(CENTRAL_COOKIE, state, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: 600, path: CENTRAL_PATH });
+		return redirect(url, [cookie]);
+	}
+
+	/**
+	 * GET /auth/typetorch/callback: redeem the code, check the broker's assertion and Roblox's ID token, then the role from
+	 * this backend's own lists (the per-game sign-in's code path). An owner gets admin only on a blessed device; on any
+	 * other device what TYPETORCH_CENTRAL_LOGIN_UNBLESSED says (web, or refused). A fresh session every time.
+	 */
+	async function centralCallback(req: Request, url: URL, ip: string): Promise<Response> {
+		if (!central) return centralOff();
+		if (!adminIpOk(ip)) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		if (!oauthLimiter.take(`central-callback:${ip}`)) return tooMany(oauthLimiter.retryAfter(`central-callback:${ip}`));
+		const clear = clearCookie(CENTRAL_COOKIE, { secure: secureCookie(req), sameSite: "Lax", path: CENTRAL_PATH });
+		let who;
+		try {
+			who = await central.login.complete({ code: url.searchParams.get("code"), state: url.searchParams.get("state"), error: url.searchParams.get("error") }, readCookie(req, CENTRAL_COOKIE));
+		} catch (error) {
+			const code = error instanceof OAuthError ? error.code : "failed";
+			failedAuth(ip, `typetorch.dev login (${error instanceof OAuthError ? `${error.code}: ${error.detail}` : "unexpected error"})`);
+			return redirect(`/?login_error=${code}`, [clear]);
+		}
+		const listed = auth.roleOfRobloxUser(who.userId);
+		if (!listed) {
+			failedAuth(ip, `typetorch.dev login (user ${who.userId} is not an owner or a viewer)`);
+			return redirect("/?login_error=not_owner", [clear]);
+		}
+		let role = listed;
+		const cookies = [clear];
+		let rotated: string | undefined;
+		if (listed === "admin") {
+			rotated = central.devices.use(readCookie(req, DEVICE_COOKIE), adminTokenHash);
+			if (rotated) cookies.push(deviceCookie(req, rotated));
+			else if (central.config.unblessed === "refuse") {
+				log(`login: typetorch.dev refused owner ${who.userId} from ${ip}: this device was never blessed (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=refuse)`);
+				return redirect("/?login_error=not_blessed", [clear]);
+			} else role = "web";
+		}
+		// Never reuse a session id from before the login.
+		sessions.destroy(readCookie(req, SESSION_COOKIE));
+		authFailures.reset(ip);
+		const deviceId = role === "admin" && rotated ? rotated.slice(0, rotated.indexOf(".")) : undefined;
+		const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}), login: "typetorch.dev" }, role, undefined, deviceId);
+		log(`login: typetorch.dev user ${who.userId} role ${role}${listed === "admin" ? (role === "admin" ? " (blessed device)" : " (owner on a device that was never blessed: read-only)") : ""} from ${ip}`);
+		return redirect("/", [...cookies, sessionCookie(req, id)]);
+	}
+
+	/** POST /auth/device { token }: the admin token once on this browser blesses it (sets the device cookie). */
+	async function blessWithToken(req: Request, ip: string): Promise<Response> {
+		if (!central) return centralOff();
+		if (!adminIpOk(ip)) return notFound();
+		// The browser takes the admin token only while the token login is on; otherwise `typetorch backend bless`.
+		if (!runtime.get("tokenLogin")) return json(404, { error: "the token login is off on this server: bless this browser with `typetorch backend bless`" });
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		const problem = cookieMutationProblem(req, proxyOpts);
+		if (problem) return json(403, { error: problem });
+		if (!oauthLimiter.take(`device:${ip}`)) return tooMany(oauthLimiter.retryAfter(`device:${ip}`));
+		if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON: { token }" });
+		const raw = await readCapped(req, 4096);
+		let token: unknown;
+		try {
+			token = raw ? (JSON.parse(Buffer.from(raw).toString("utf8")) as { token?: unknown }).token : undefined;
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		if (typeof token !== "string" || !tokenIn(token, [config.adminToken])) {
+			failedAuth(ip, "device blessing (admin token)");
+			return json(401, { error: "wrong token" });
+		}
+		authFailures.reset(ip);
+		const agent = agentLabel(req.headers.get("user-agent"));
+		const value = central.devices.bless("admin token", { tokenHash: adminTokenHash, ...(agent ? { agent } : {}) });
+		log(`device blessed with the admin token from ${ip}`);
+		return json(200, { ok: true, blessed: true }, { "set-cookie": deviceCookie(req, value) });
+	}
+
+	/** GET /auth/bless/challenge: a one-time challenge for `typetorch backend bless` to sign with the game's signing key. */
+	function blessChallenge(ip: string): Response {
+		if (!central) return centralOff();
+		if (!adminIpOk(ip)) return notFound();
+		if (!central.blessKeys.size) return json(404, { error: "no signing keys are known here: the CLI sends them with PUT /v1/access/keys" });
+		if (!oauthLimiter.take(`bless:${ip}`)) return tooMany(oauthLimiter.retryAfter(`bless:${ip}`));
+		return json(200, { challenge: central.blessKeys.challenge(), fingerprint: central.key.fingerprint, expires_in: 300 });
+	}
+
+	/** GET /auth/bless?challenge=&sig=: the CLI's signed link, opened in the browser to bless; single use. */
+	function blessWithLink(req: Request, url: URL, ip: string): Response {
+		if (!central) return centralOff();
+		if (!adminIpOk(ip)) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		if (!oauthLimiter.take(`bless:${ip}`)) return tooMany(oauthLimiter.retryAfter(`bless:${ip}`));
+		const ok = central.blessKeys.check(central.key.fingerprint, url.searchParams.get("challenge") ?? "", url.searchParams.get("sig") ?? "");
+		if (!ok) {
+			failedAuth(ip, "device blessing (signed link)");
+			return redirect("/?login_error=bless");
+		}
+		const agent = agentLabel(req.headers.get("user-agent"));
+		const value = central.devices.bless("signing key", agent ? { agent } : {});
+		log(`device blessed with a signed link from ${ip}`);
+		return redirect("/?blessed=1", [deviceCookie(req, value)]);
+	}
+
+	/** GET /api/typetorch/challenge/<token>: the origin challenge, answered only while a report is pending. */
+	function originChallenge(token: string, ip: string): Response {
+		if (!central || token.length > 128) return notFound();
+		if (!challengeLimiter.take(ip)) return tooMany(challengeLimiter.retryAfter(ip));
+		const answer = central.reporter.challengeAnswer(token);
+		if (!answer) return notFound();
+		return new Response(answer, { status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+	}
+
+	/** PUT /v1/access/keys { keys } (the admin token only): the signing keys a blessing link may be signed with. */
+	async function putBlessKeys(req: Request, principal: Principal): Promise<Response> {
+		if (!central) return centralOff();
+		if (principal.via !== "bearer") return json(403, { error: "the signing keys are set with the admin token (the CLI), not from the explorer" });
+		const raw = await readCapped(req, 8 * 1024);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: { keys?: unknown };
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8")) as { keys?: unknown };
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		try {
+			const keys = central.blessKeys.put(body?.keys);
+			log(`signing keys for device blessing updated: ${keys.length} key(s)`);
+			return json(200, { keys });
+		} catch (error) {
+			return json(400, { error: (error as Error).message });
+		}
+	}
+
 	/** PUT /v1/access (the admin token only: the CLI sends the signed access list's owners). */
 	async function putAccess(req: Request, principal: Principal): Promise<Response> {
 		if (principal.via !== "bearer") return json(403, { error: "the owner list is set with the admin token (the CLI), not from the explorer" });
@@ -1004,6 +1212,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			// For the page's guards: the caller's address as this server sees it, and whether Roblox sign-in is usable.
 			you: { ip, roblox: isRobloxSession(principal) },
 			robloxSignIn: Boolean(oauth),
+			// Read-only line on the Settings page: whether Sign in with typetorch.dev is on (set in the environment only).
+			centralLogin: central ? { on: true, issuer: central.config.issuer, fingerprint: central.key.fingerprint, unblessed: central.config.unblessed, blessKeys: central.blessKeys.size } : { on: false },
 		};
 	}
 
@@ -1110,6 +1320,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (path === "/v1/auth/logout") return method === "POST" ? logout(req) : json(405, { error: "POST only" });
 		if (path === "/v1/auth/roblox/start") return method === "GET" ? robloxStart(req, ip) : json(405, { error: "GET only" });
 		if (path === "/v1/auth/roblox/callback") return method === "GET" ? robloxCallback(req, url, ip) : json(405, { error: "GET only" });
+		// Sign in with typetorch.dev, blessing a device, the origin challenge (404 while TYPETORCH_CENTRAL_LOGIN is off).
+		if (path === `${CENTRAL_PATH}/start`) return method === "GET" ? centralStart(req, ip) : json(405, { error: "GET only" });
+		if (path === `${CENTRAL_PATH}/callback`) return method === "GET" ? centralCallback(req, url, ip) : json(405, { error: "GET only" });
+		if (path === "/auth/device") return method === "POST" ? blessWithToken(req, ip) : json(405, { error: "POST only" });
+		if (path === "/auth/bless/challenge") return method === "GET" ? blessChallenge(ip) : json(405, { error: "GET only" });
+		if (path === "/auth/bless") return method === "GET" ? blessWithLink(req, url, ip) : json(405, { error: "GET only" });
+		if (path.startsWith("/typetorch/challenge/")) return method === "GET" ? originChallenge(path.slice("/typetorch/challenge/".length), ip) : json(405, { error: "GET only" });
 
 		// Game routes (API key).
 		if (path === "/v1/ingest") return method === "POST" ? ingest(req, ip) : json(405, { error: "POST only" });
@@ -1210,6 +1427,39 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				return admin instanceof Response ? admin : testAlert(admin);
 			}
 			if (path === "/v1/live" && method === "GET") return live.connect(req, url, () => keepOpen.get(req)?.());
+			// Sign in with typetorch.dev: blessed devices (list, revoke), the blessing keys, a report now. Owners only.
+			if (path === "/v1/admin/devices" || path.startsWith("/v1/admin/devices/")) {
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				if (!central) return centralOff();
+				if (path === "/v1/admin/devices") {
+					if (method !== "GET") return json(405, { error: "GET only" });
+					return json(200, { devices: central.devices.list(central.devices.idOf(readCookie(req, DEVICE_COOKIE), adminTokenHash)) });
+				}
+				if (method !== "DELETE") return json(405, { error: "DELETE only" });
+				const id = path.slice("/v1/admin/devices/".length);
+				if (!/^[0-9a-f]{16}$/.test(id)) return json(400, { error: "bad device id" });
+				if (!central.devices.revoke(id)) return json(404, { error: "no such device" });
+				// The admin sessions that device opened end with it.
+				const ended = sessions.endWhere((s) => s.device === id);
+				log(`device ${id} revoked by ${actorOf(admin).who}${ended ? `; ${ended} session(s) ended` : ""}`);
+				return json(200, { ok: true, sessionsEnded: ended, devices: central.devices.list(central.devices.idOf(readCookie(req, DEVICE_COOKIE), adminTokenHash)) });
+			}
+			if (path === "/v1/access/keys") {
+				if (method !== "GET" && method !== "PUT") return json(405, { error: "GET or PUT only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				if (!central) return centralOff();
+				return method === "GET" ? json(200, { keys: central.blessKeys.list() }) : putBlessKeys(req, admin);
+			}
+			if (path === "/v1/central/report") {
+				if (method !== "POST") return json(405, { error: "POST only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				if (!central) return centralOff();
+				const result = await central.reporter.report();
+				return json(result === "ok" ? 200 : 502, { ok: result === "ok", fingerprint: central.key.fingerprint });
+			}
 			if (path === "/v1/access") {
 				if (method !== "GET" && method !== "PUT") return json(405, { error: "GET or PUT only" });
 				const admin = manage();
@@ -1317,6 +1567,17 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		for (const t of jobs) t.unref?.();
 		timers.push(...jobs);
 	}
+	// Sign in with typetorch.dev: the origin report right after the start (never awaited: the start never waits on
+	// typetorch.dev), then daily; after a failure again in 10 minutes. POST /v1/central/report sends one now.
+	let reportTimer: ReturnType<typeof setTimeout> | undefined;
+	if (central && !options.manualJobs) {
+		const next = (ms: number) => {
+			if (stopping) return;
+			reportTimer = setTimeout(() => void central.reporter.report().then((result) => next(result === "ok" ? 86_400_000 : 10 * 60_000)), ms);
+			reportTimer.unref?.();
+		};
+		next(0);
+	}
 
 	// Rolling deploys ---------------------------------------------------------------------------------------------------
 	// Coolify starts the new container while the old one still runs, both on the same volume, and DuckDB allows one process
@@ -1395,6 +1656,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		stopping = true;
 		if (handover.timer) clearTimeout(handover.timer);
 		for (const t of timers) clearInterval(t);
+		if (reportTimer) clearTimeout(reportTimer);
 		live.stop();
 		remoteDebug?.stop();
 		const drainUntil = Date.now() + STOP_DRAIN_MS;
@@ -1429,6 +1691,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		errors,
 		access,
 		live,
+		...(central ? { central: { fingerprint: central.key.fingerprint, report: () => central.reporter.report(), devices: central.devices } } : {}),
 		sessionCount: () => sessions.size,
 		sessions,
 		handle,

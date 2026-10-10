@@ -587,7 +587,7 @@ describe("headers and the explorer's files", () => {
 			const res = await h.call(path);
 			expect([path, res.status === 200 && (await res.text()).includes("typetorch")]).toEqual([path, false]);
 		}
-		expect((await h.call("/..secret.txt")).status).toBe(200); // a file whose name starts with dots is still inside the folder
+		expect((await h.call("/..secret.txt")).status).toBe(404); // any segment starting with a dot is refused, even inside the folder
 	});
 
 	test("security headers on the explorer, the API and errors; no CORS anywhere", async () => {

@@ -880,7 +880,7 @@ export interface StorageReport {
 // Sign-in (GET /v1/auth/check) -----------------------------------------------------------------------------------------
 
 /** Who is signed in: the admin token, or a Roblox owner or viewer. */
-export type AuthUser = { kind: "token" } | { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string };
+export type AuthUser = { kind: "token" } | { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string; login?: "typetorch.dev" };
 
 /** "admin" reads and manages; "web" is read-only (a Roblox viewer); "game" is the API key (no explorer). */
 export type AuthRole = "admin" | "web" | "game";
@@ -898,6 +898,28 @@ export interface AuthInfo {
 export interface LoginOptions {
 	token: boolean;
 	roblox: boolean;
+	/** Sign in with typetorch.dev (the backend's TYPETORCH_CENTRAL_LOGIN=on). */
+	typetorch?: boolean;
+}
+
+/** A browser blessed for full admin through typetorch.dev (GET /v1/admin/devices). */
+export interface BlessedDevice {
+	id: string;
+	created: string;
+	used: string;
+	via: "admin token" | "signing key";
+	agent?: string;
+	/** This browser. */
+	current?: boolean;
+}
+
+/** The Settings page's read-only line about Sign in with typetorch.dev (set in the environment only). */
+export interface CentralLoginInfo {
+	on: boolean;
+	issuer?: string;
+	fingerprint?: string;
+	unblessed?: "web" | "refuse";
+	blessKeys?: number;
 }
 
 // Error logs (GET /v1/errors) ------------------------------------------------------------------------------------------
@@ -1004,6 +1026,8 @@ export interface SettingsView {
 	/** The caller's address as the server sees it, and whether this is a Roblox session. */
 	you: { ip: string; roblox: boolean };
 	robloxSignIn: boolean;
+	/** Sign in with typetorch.dev (missing on backends before it). */
+	centralLogin?: CentralLoginInfo;
 	/** On a save: the keys that changed, and browser token sessions ended (token login turned off). */
 	changed?: string[];
 	sessionsEnded?: number;

@@ -12,15 +12,17 @@ export function useAuth(): AuthInfo | null {
 /** The offers on the login page: the backend's list from the 401 body, else the token form only. */
 export function loginOptionsOf(body: unknown): LoginOptions {
 	const login = (body as { login?: Partial<LoginOptions> } | undefined)?.login;
-	return { token: login?.token ?? true, roblox: login?.roblox ?? false };
+	return { token: login?.token ?? true, roblox: login?.roblox ?? false, ...(login?.typetorch ? { typetorch: true } : {}) };
 }
 
-/** The plain sentences for the `login_error` the backend puts in the address after a failed Roblox sign-in. */
+/** The plain sentences for the `login_error` the backend puts in the address after a failed Roblox or typetorch.dev sign-in. */
 export const LOGIN_ERRORS: Record<string, string> = {
 	not_owner: "That Roblox account is not an owner or a viewer of this game.",
-	denied: "Sign-in was cancelled at Roblox.",
+	denied: "Sign-in was cancelled.",
 	state: "That sign-in link expired or was already used. Try again.",
-	failed: "Roblox sign-in did not work. Try again in a moment.",
+	failed: "Sign-in did not work. Try again in a moment.",
+	not_blessed: "This browser is not trusted for owners yet. Trust it once with the admin token or `typetorch backend bless`.",
+	bless: "That trust link expired, was already used or is not signed by this game's key.",
 };
 
 export function loginErrorText(code: string | null | undefined): string | null {

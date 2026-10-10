@@ -42,7 +42,9 @@ export class StaticSite {
 		} catch {
 			return undefined;
 		}
-		if (path.includes("\0") || path.includes("\\") || path.split("/").includes("..")) return undefined;
+		// No traversal, and no dotfiles or dot folders at any depth, checked after decoding (so %2e counts): any segment that
+		// starts with a dot (".", "..", ".env", "..env", ".git") is refused. A stray .env or .git is never served.
+		if (path.includes("\0") || path.includes("\\") || path.split("/").some((part) => part.startsWith("."))) return undefined;
 		const file = resolve(join(this.root, path));
 		if (file !== this.root && !file.startsWith(this.root + sep)) return undefined;
 		const ext = extname(path).toLowerCase();

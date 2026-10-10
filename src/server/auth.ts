@@ -21,7 +21,7 @@ export const CSRF_HEADER = "x-typetorch";
 /** Who a session belongs to. */
 export type SessionUser =
 	| { kind: "token" }
-	| { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string };
+	| { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string; login?: "typetorch.dev" };
 
 /** What a session (or a Bearer) may do: `admin` reads and manages, `web` only reads. */
 export type AccessRole = "admin" | "web";
@@ -33,6 +33,8 @@ export interface Session {
 	seen: number;
 	/** Hash of the admin token this session was made with. */
 	tokenHash: string;
+	/** The blessed device a typetorch.dev admin session came from: revoking the device ends the session. */
+	device?: string;
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -61,11 +63,11 @@ export class Sessions {
 	}
 
 	/** A new session; returns the cookie value (a random 32-byte id, base64url). */
-	create(user: SessionUser, role: AccessRole = "admin", tokenHash: string = this.tokenHash): string {
+	create(user: SessionUser, role: AccessRole = "admin", tokenHash: string = this.tokenHash, device?: string): string {
 		const id = randomBytes(32).toString("base64url");
 		const now = this.clock();
 		this.sweep(now);
-		this.byId.set(sha256(id), { user, role, created: now, seen: now, tokenHash });
+		this.byId.set(sha256(id), { user, role, created: now, seen: now, tokenHash, ...(device ? { device } : {}) });
 		const max = this.options.maxSessions ?? 200;
 		while (this.byId.size > max) this.byId.delete(this.byId.keys().next().value as string);
 		return id;
@@ -167,9 +169,12 @@ export class Auth {
 		return { session, cookie };
 	}
 
-	/** Whether a Roblox user still holds the role of their session. */
+	/**
+	 * Whether a Roblox user still holds the role of their session. A web session is held by a viewer, or by an owner
+	 * who signed in through typetorch.dev on a device that was never blessed (read-only until the device is blessed).
+	 */
 	robloxStillHolds(userId: number, role: AccessRole): boolean {
-		return role === "admin" ? this.o.isOwner(userId) : this.o.isViewer(userId);
+		return role === "admin" ? this.o.isOwner(userId) : this.o.isViewer(userId) || this.o.isOwner(userId);
 	}
 
 	/**
