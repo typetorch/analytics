@@ -154,9 +154,12 @@ export interface ServerConfig {
 	warnings: string[];
 }
 
+export type CentralUnblessed = "admin" | "web" | "refuse";
+
 export interface CentralLoginConfig {
 	issuer: string;
-	unblessed: "web" | "refuse";
+	/** What an owner gets on a browser that was never blessed: admin (the default), web (read-only) or refused. */
+	unblessed: CentralUnblessed;
 	kids?: string[];
 	/** TYPETORCH_ROBLOX_BROKER_CLIENT_ID: a pin; the broker's published value must equal it. */
 	robloxClientId?: string;
@@ -403,8 +406,9 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (flag(env, "TYPETORCH_CENTRAL_LOGIN", true)) {
 		const issuer = originOf(env.TYPETORCH_CENTRAL_LOGIN_ISSUER ?? CENTRAL_LOGIN_ISSUER);
 		if (!issuer) throw new Error("TYPETORCH_CENTRAL_LOGIN_ISSUER must be an origin: https://host[:port] (plain http only for localhost / 127.0.0.1), no path");
-		const unblessed = (env.TYPETORCH_CENTRAL_LOGIN_UNBLESSED ?? "web").toLowerCase();
-		if (unblessed !== "web" && unblessed !== "refuse") throw new Error("TYPETORCH_CENTRAL_LOGIN_UNBLESSED is web or refuse");
+		// admin (default): an owner gets admin on any browser; web / refuse require a blessed (trusted) browser for admin.
+		const unblessed = (env.TYPETORCH_CENTRAL_LOGIN_UNBLESSED || "admin").trim().toLowerCase();
+		if (unblessed !== "admin" && unblessed !== "web" && unblessed !== "refuse") throw new Error("TYPETORCH_CENTRAL_LOGIN_UNBLESSED is admin, web or refuse");
 		const kids = (env.TYPETORCH_CENTRAL_LOGIN_KIDS ?? "")
 			.split(",")
 			.map((k) => k.trim())
@@ -422,7 +426,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		const label = (env.TYPETORCH_CENTRAL_LOGIN_LABEL ?? (publicUrl ? new URL(publicUrl).host : "")).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 64);
 		if (!publicUrl) warnings.push("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL (the callback is <public url>/auth/typetorch/callback)");
 		else if (!originOf(publicUrl)) warnings.push("Sign in with typetorch.dev is off: TYPETORCH_PUBLIC_URL must be https (plain http only for localhost / 127.0.0.1)");
-		else centralLogin = { issuer, unblessed: unblessed as "web" | "refuse", label: label || "TypeTorch backend", ...(kids.length ? { kids } : {}), ...(clientId ? { robloxClientId: clientId } : {}), ...(discovery ? { robloxDiscoveryUrl: discovery } : {}) };
+		else centralLogin = { issuer, unblessed: unblessed as CentralUnblessed, label: label || "TypeTorch backend", ...(kids.length ? { kids } : {}), ...(clientId ? { robloxClientId: clientId } : {}), ...(discovery ? { robloxDiscoveryUrl: discovery } : {}) };
 	}
 
 	// The explorer: TYPETORCH_WEB_DIR, else web/dist next to src/ (or dist/) when it has been built.
@@ -516,7 +520,7 @@ export function describeConfig(config: ServerConfig): string {
 		`token login=${config.tokenLogin ? "on" : "off"}`,
 		`web viewers=${config.webViewers.length}`,
 		`roblox sign-in=${config.robloxOAuth ? "on" : "off"}`,
-		`typetorch.dev login=${config.centralLogin ? `on (issuer ${config.centralLogin.issuer}, unblessed owners: ${config.centralLogin.unblessed}${config.centralLogin.kids ? `, ${config.centralLogin.kids.length} pinned kid(s)` : ""}${config.centralLogin.robloxClientId || config.centralLogin.robloxDiscoveryUrl ? ", Roblox settings pinned" : ", Roblox settings from the broker"})` : "off"}`,
+		`typetorch.dev login=${config.centralLogin ? `on (issuer ${config.centralLogin.issuer}, unblessed owners: ${config.centralLogin.unblessed}${config.centralLogin.unblessed === "admin" ? " (typetorch.dev logins grant owners admin without device trust)" : ""}${config.centralLogin.kids ? `, ${config.centralLogin.kids.length} pinned kid(s)` : ""}${config.centralLogin.robloxClientId || config.centralLogin.robloxDiscoveryUrl ? ", Roblox settings pinned" : ", Roblox settings from the broker"})` : "off"}`,
 		`admin allow list=${config.adminAllowIps ? `${config.adminAllowIps.length} rule(s)` : "off"}`,
 		`trust proxy=${config.trustProxy || "off"}${config.trustedProxies ? ` (from ${config.trustedProxies.length} proxy rule(s))` : ""}`,
 		`cloudflare=${config.cloudflareIps ? "on" : "off"}`,

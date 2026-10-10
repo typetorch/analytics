@@ -10,7 +10,7 @@ import { createHash, generateKeyPairSync, randomBytes, sign as edSign, verify as
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../src/server/config.ts";
+import { describeConfig, loadConfig } from "../src/server/config.ts";
 import { canonicalReport } from "../src/server/central-report.ts";
 import { blessMessage } from "../src/server/devices.ts";
 import { fingerprintOf, FINGERPRINT_PATTERN } from "../src/server/instance-key.ts";
@@ -203,6 +203,8 @@ const ENV = {
 	TYPETORCH_CENTRAL_LOGIN: "on",
 	TYPETORCH_CENTRAL_LOGIN_ISSUER: BROKER,
 	TYPETORCH_WEB_VIEWERS: String(VIEWER),
+	// Most tests here cover the trusted-browser flow; the default (admin) has its own describe below.
+	TYPETORCH_CENTRAL_LOGIN_UNBLESSED: "web",
 };
 /** The optional pins of the broker's published Roblox settings. */
 const PINS = { TYPETORCH_ROBLOX_BROKER_CLIENT_ID: BROKER_CLIENT_ID, TYPETORCH_ROBLOX_BROKER_DISCOVERY: ROBLOX_DISCOVERY };
@@ -627,7 +629,7 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 
 	test("on by default with an https public URL; explicit off turns it off", () => {
 		const unset = loadConfig([], { ...base, TYPETORCH_PUBLIC_URL: PUBLIC });
-		expect(unset.centralLogin).toEqual({ issuer: "https://dash.typetorch.dev", unblessed: "web", label: "backend.example.com" });
+		expect(unset.centralLogin).toEqual({ issuer: "https://dash.typetorch.dev", unblessed: "admin", label: "backend.example.com" });
 		expect(unset.warnings.join(" ")).not.toContain("typetorch.dev");
 		for (const off of ["off", "0", "false", "no", "OFF"]) {
 			const c = loadConfig([], { ...base, TYPETORCH_PUBLIC_URL: PUBLIC, TYPETORCH_CENTRAL_LOGIN: off });
@@ -674,7 +676,13 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 		for (const bad of ["http://broker.example.com", "https://broker.test/path", "https://user:pw@broker.test", "nope"]) {
 			expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_ISSUER: bad })).toThrow(/TYPETORCH_CENTRAL_LOGIN_ISSUER/);
 		}
-		expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_UNBLESSED: "admin" })).toThrow(/web or refuse/);
+		for (const [value, mode] of [["admin", "admin"], ["web", "web"], ["refuse", "refuse"], ["REFUSE", "refuse"], ["", "admin"]] as const) {
+			expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_UNBLESSED: value }).centralLogin?.unblessed).toBe(mode);
+		}
+		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_UNBLESSED: undefined as never }).centralLogin?.unblessed).toBe("admin");
+		for (const bad of ["owner", "read-only", "yes", "admin,web"]) {
+			expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_UNBLESSED: bad })).toThrow(/admin, web or refuse/);
+		}
 		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_KIDS: "a1, b2" }).centralLogin?.kids).toEqual(["a1", "b2"]);
 		expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_ROBLOX_BROKER_DISCOVERY: "http://roblox.example.com/x" })).toThrow(/TYPETORCH_ROBLOX_BROKER_DISCOVERY/);
 		// Plain http on loopback only with a local broker.
@@ -915,6 +923,69 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("Sign in with typetorch.dev: TYPETORCH_CENTRAL_LOGIN_UNBLESSED=admin (the default)", () => {
+	let h: Harness;
+	let fakes: Fakes;
+	const c = client(() => ({ h, fakes }));
+	const check = async (session: string | undefined) => asJson(await h.call("/v1/auth/check", { headers: session ? { cookie: session } : {} }));
+	const { TYPETORCH_CENTRAL_LOGIN_UNBLESSED: _web, ...DEFAULT_ENV } = ENV;
+
+	beforeAll(async () => {
+		fakes = new Fakes();
+		fakes.robloxKeys = [await robloxKey("roblox-k1")];
+		h = await harness(DEFAULT_ENV, { fetch: fakes.fetch, reportSleep: async () => {} });
+		fakes.h = h;
+		expect((await h.call("/v1/access", { method: "PUT", ...json({ seq: 1, owners: [OWNER] }), headers: { "content-type": "application/json", ...bearer(ADMIN) } })).status).toBe(200);
+	});
+	afterAll(() => h.close());
+
+	test("the startup line names the mode and says owners get admin without device trust", () => {
+		expect(h.app.central).toBeDefined();
+		expect(describeConfig(loadConfig([], { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: "/tmp/never-used", TYPETORCH_EXPLORER: "off", ...DEFAULT_ENV }))).toContain("unblessed owners: admin (typetorch.dev logins grant owners admin without device trust)");
+		expect(describeConfig(loadConfig([], { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: "/tmp/never-used", TYPETORCH_EXPLORER: "off", ...ENV }))).not.toContain("without device trust");
+	});
+
+	test("an owner on a browser that was never trusted gets full admin, with no banner and no device tie", async () => {
+		const r = await c.login();
+		expect(r.status).toBe(302);
+		expect(r.location).toBe("/");
+		expect(r.device).toBeUndefined();
+		const info = await check(r.session);
+		expect(info.role).toBe("admin");
+		expect(info.user).toMatchObject({ kind: "roblox", userId: OWNER, login: "typetorch.dev" });
+		expect(info.untrustedOwner).toBeUndefined();
+		expect(info.trustWithToken).toBeUndefined();
+		expect((await h.call("/v1/admin/settings", { headers: { cookie: r.session as string } })).status).toBe(200);
+		expect(h.logs.some((l) => l.includes(`login: typetorch.dev user ${OWNER} role admin (unblessed device, TYPETORCH_CENTRAL_LOGIN_UNBLESSED=admin)`))).toBe(true);
+		expect(h.logs.join("\n")).not.toContain((r.session as string).slice("tt_session=".length));
+	});
+
+	test("a viewer stays read-only, without the banner", async () => {
+		const v = await c.login({ sub: VIEWER });
+		const info = await check(v.session);
+		expect(info.role).toBe("web");
+		expect(info.untrustedOwner).toBeUndefined();
+		expect((await h.call("/v1/admin/settings", { headers: { cookie: v.session as string } })).status).toBe(403);
+	});
+
+	test("someone not on the lists is still refused; the owner list is checked at login", async () => {
+		const r = await c.login({ sub: STRANGER });
+		expect(r.location).toBe("/?login_error=not_owner");
+		expect(r.session).toBeUndefined();
+	});
+
+	test("blessing still works: a trusted browser's login is tied to its device", async () => {
+		const blessed = await h.call("/auth/device", { method: "POST", ip: c.freshIp(), ...json({ token: ADMIN }), headers: { "content-type": "application/json", ...XT } });
+		expect(blessed.status).toBe(200);
+		const device = c.cookieValue(blessed, "tt_device")?.split(";")[0] as string;
+		expect(device).toBeDefined();
+		const ok = await c.login({}, { device });
+		expect(ok.device).toBeDefined();
+		expect((await check(ok.session)).role).toBe("admin");
+		expect(h.logs.some((l) => l.includes(`login: typetorch.dev user ${OWNER} role admin (blessed device)`))).toBe(true);
 	});
 });
 

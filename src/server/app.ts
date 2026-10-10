@@ -938,12 +938,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	/**
 	 * `untrustedOwner`: this read-only session is a listed owner's, signed in with typetorch.dev on a browser that was never
-	 * blessed, so the explorer can say why and offer "Trust this browser". Never for a viewer. `trustWithToken`: whether
+	 * blessed, so the explorer can say why and offer "Trust this browser". Never for a viewer, and never while blessing is
+	 * not required (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=admin). `trustWithToken`: whether
 	 * POST /auth/device takes the admin token here (the token login is on); otherwise `typetorch backend bless`. Nothing is
 	 * granted by the flag itself: blessing this browser (either way) upgrades this session to admin in place.
 	 */
 	function untrustedOwner(principal: Principal): { untrustedOwner?: true; trustWithToken?: boolean } {
-		if (!central || principal.role !== "web" || principal.via !== "cookie") return {};
+		if (!central || central.config.unblessed === "admin" || principal.role !== "web" || principal.via !== "cookie") return {};
 		const user = principal.user;
 		if (user.kind !== "roblox" || user.login !== "typetorch.dev" || auth.roleOfRobloxUser(user.userId) !== "admin") return {};
 		return { untrustedOwner: true, trustWithToken: runtime.get("tokenLogin") };
@@ -1051,8 +1052,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	/**
 	 * GET /auth/typetorch/callback: redeem the code, check the broker's assertion and Roblox's ID token, then the role from
-	 * this backend's own lists (the per-game sign-in's code path). An owner gets admin only on a blessed device; on any
-	 * other device what TYPETORCH_CENTRAL_LOGIN_UNBLESSED says (web, or refused). A fresh session every time.
+	 * this backend's own lists (the per-game sign-in's code path). An owner gets admin on a blessed device; on any other
+	 * device what TYPETORCH_CENTRAL_LOGIN_UNBLESSED says (admin, the default; web; or refused). A fresh session every time.
 	 */
 	async function centralCallback(req: Request, url: URL, ip: string): Promise<Response> {
 		if (!central) return centralOff();
@@ -1080,7 +1081,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (listed === "admin") {
 			rotated = central.devices.use(readCookie(req, DEVICE_COOKIE), adminTokenHash);
 			if (rotated) cookies.push(deviceCookie(req, rotated));
-			else if (central.config.unblessed === "refuse") {
+			else if (central.config.unblessed === "admin") {
+				// TYPETORCH_CENTRAL_LOGIN_UNBLESSED=admin (the default): no device trust required; the owner list, both
+				// signatures and the allow list already passed. The session is not tied to a device.
+			} else if (central.config.unblessed === "refuse") {
 				log(`login: typetorch.dev refused owner ${who.userId} from ${ip}: this device was never blessed (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=refuse)`);
 				return redirect("/?login_error=not_blessed", [clear]);
 			} else role = "web";
@@ -1090,7 +1094,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		authFailures.reset(ip);
 		const deviceId = role === "admin" && rotated ? rotated.slice(0, rotated.indexOf(".")) : undefined;
 		const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}), login: "typetorch.dev" }, role, undefined, deviceId);
-		log(`login: typetorch.dev user ${who.userId} role ${role}${listed === "admin" ? (role === "admin" ? " (blessed device)" : " (owner on a device that was never blessed: read-only)") : ""} from ${ip}`);
+		log(`login: typetorch.dev user ${who.userId} role ${role}${listed === "admin" ? (rotated ? " (blessed device)" : role === "admin" ? " (unblessed device, TYPETORCH_CENTRAL_LOGIN_UNBLESSED=admin)" : " (owner on a device that was never blessed: read-only)") : ""} from ${ip}`);
 		return redirect("/", [...cookies, sessionCookie(req, id)]);
 	}
 
