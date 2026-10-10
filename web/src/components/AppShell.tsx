@@ -10,6 +10,7 @@ import { cn } from "cn";
 import { FilterBar } from "@/components/FilterBar";
 import { FindPlayer } from "@/components/Identity";
 import { SidebarNav } from "@/components/SidebarNav";
+import { UntrustedBrowserBanner } from "@/components/UntrustedBrowserBanner";
 import { LoadingBlock } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -211,6 +212,7 @@ export function AppShell() {
 					)}
 				</header>
 				<main className="flex-1 space-y-4 p-4">
+					<UntrustedBrowserBanner />
 					<Suspense fallback={<LoadingBlock rows={6} />}>
 						<Outlet />
 					</Suspense>

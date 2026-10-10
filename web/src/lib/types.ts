@@ -894,6 +894,10 @@ export interface AuthInfo {
 	version?: string;
 	/** The TypeTorch Dashboard (the typetorch.dev broker's origin), while Sign in with typetorch.dev is on. */
 	dashboard?: string;
+	/** An owner signed in with typetorch.dev on a browser that was never trusted: read-only until it is (never for viewers). */
+	untrustedOwner?: boolean;
+	/** With untrustedOwner: whether the admin token can trust this browser here (POST /auth/device); else the CLI's bless. */
+	trustWithToken?: boolean;
 }
 
 /** Which logins the backend offers (the body of a 401 from the auth check). */

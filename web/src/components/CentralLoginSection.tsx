@@ -18,7 +18,7 @@ import type { BlessedDevice, CentralLoginInfo } from "@/lib/types";
 
 export const DEVICES_KEY = ["admin-devices"] as const;
 
-function blessError(error: unknown): string {
+export function blessError(error: unknown): string {
 	if (error instanceof ApiError) {
 		if (error.status === 401) return "That is not the admin token.";
 		if (error.status === 429) return "Too many tries. Wait a few minutes.";

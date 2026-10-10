@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/components/AppShell";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { AuthProvider } from "@/lib/auth";
 import { reloadCollapsed } from "@/lib/nav-state";
 import { ThemeProvider } from "@/lib/theme";
@@ -66,6 +66,39 @@ describe("app shell", () => {
 		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 		// The page changed with the click.
 		expect(screen.getAllByRole("link", { name: "Players" }).some((l) => l.getAttribute("aria-current") === "page")).toBe(true);
+	});
+
+	const owner = { kind: "roblox" as const, userId: 1001, name: "OwnerName", login: "typetorch.dev" as const };
+
+	it("an owner on an untrusted browser: a banner that trusts it with the admin token, then asks to sign in again", async () => {
+		const bless = vi.spyOn(api, "blessDevice").mockRejectedValueOnce(new ApiError(401, "wrong token", "/auth/device")).mockResolvedValueOnce({ ok: true, blessed: true });
+		mount("/fleet", { ok: true, role: "web", via: "cookie", user: owner, untrustedOwner: true, trustWithToken: true });
+		const banner = screen.getByRole("region", { name: "Untrusted browser" });
+		expect(within(banner).getByText("Read-only: this browser isn't trusted yet")).toBeTruthy();
+		const input = within(banner).getByLabelText("Admin token") as HTMLInputElement;
+		expect(input.type).toBe("password");
+		fireEvent.change(input, { target: { value: "wrong" } });
+		fireEvent.click(within(banner).getByRole("button", { name: "Trust this browser" }));
+		expect(await within(banner).findByText("That is not the admin token.")).toBeTruthy();
+		fireEvent.change(input, { target: { value: " the-admin-token " } });
+		fireEvent.click(within(banner).getByRole("button", { name: "Trust this browser" }));
+		await waitFor(() => expect(bless).toHaveBeenLastCalledWith("the-admin-token"));
+		const again = await within(banner).findByRole("link", { name: "Sign in again" });
+		expect(again.getAttribute("href")).toBe("/auth/typetorch/start");
+		expect(within(banner).queryByLabelText("Admin token")).toBeNull();
+	});
+
+	it("an owner on an untrusted browser with the token login off: points at the CLI, no token form", () => {
+		mount("/fleet", { ok: true, role: "web", via: "cookie", user: owner, untrustedOwner: true, trustWithToken: false });
+		const banner = screen.getByRole("region", { name: "Untrusted browser" });
+		expect(within(banner).getByText(/typetorch backend bless/)).toBeTruthy();
+		expect(within(banner).queryByLabelText("Admin token")).toBeNull();
+	});
+
+	it("a viewer keeps the plain read-only tag, no banner", () => {
+		mount("/fleet", { ok: true, role: "web", via: "cookie", user: { kind: "roblox", userId: 2002, name: "ViewerName", login: "typetorch.dev" } });
+		expect(screen.queryByRole("region", { name: "Untrusted browser" })).toBeNull();
+		expect(screen.getAllByText("read-only").length).toBeGreaterThan(0);
 	});
 
 	it("closes the drawer with the close button", async () => {
