@@ -930,10 +930,23 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			// `parts`: what this server runs, so `typetorch fleet setup` / `settings set analytics` can refuse a game key for a
 			// part that is off (a game key writes to every part that runs; the admin token reads them).
 			const parts = { analytics: config.parts.has("analytics"), fleet: config.parts.has("fleet") };
-			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version, parts, ...dashboard() });
+			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version, parts, ...dashboard(), ...untrustedOwner(principal) });
 		}
 		if (bearer(req) !== undefined) failedAuth(ip, "token check");
 		return json(401, { error: "sign in required", login: loginOptions() });
+	}
+
+	/**
+	 * `untrustedOwner`: this read-only session is a listed owner's, signed in with typetorch.dev on a browser that was never
+	 * blessed, so the explorer can say why and offer "Trust this browser". Never for a viewer. `trustWithToken`: whether
+	 * POST /auth/device takes the admin token here (the token login is on); otherwise `typetorch backend bless`. Nothing is
+	 * granted by it: after blessing, the owner signs in again and the callback decides the role.
+	 */
+	function untrustedOwner(principal: Principal): { untrustedOwner?: true; trustWithToken?: boolean } {
+		if (!central || principal.role !== "web" || principal.via !== "cookie") return {};
+		const user = principal.user;
+		if (user.kind !== "roblox" || user.login !== "typetorch.dev" || auth.roleOfRobloxUser(user.userId) !== "admin") return {};
+		return { untrustedOwner: true, trustWithToken: runtime.get("tokenLogin") };
 	}
 
 	async function login(req: Request, ip: string): Promise<Response> {

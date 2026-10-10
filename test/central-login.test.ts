@@ -309,6 +309,33 @@ describe("Sign in with typetorch.dev", () => {
 		expect(h.logs.some((l) => l.includes(`login: typetorch.dev user ${OWNER} role web`))).toBe(true);
 	});
 
+	test("the check tells an owner on an unblessed browser so (untrustedOwner); blessing never upgrades that session, signing in again does", async () => {
+		const r = await c.login();
+		const check = await asJson(await h.call("/v1/auth/check", { headers: { cookie: r.session as string } }));
+		expect(check.role).toBe("web");
+		expect(check.untrustedOwner).toBe(true);
+		expect(check.trustWithToken).toBe(true);
+		// The admin token on the bless route, from this read-only session (X-TypeTorch + Origin like every cookie write).
+		const ip = c.freshIp();
+		const blessed = await h.call("/auth/device", { method: "POST", ip, ...json({ token: ADMIN }), headers: { "content-type": "application/json", cookie: r.session as string, ...XT, origin: PUBLIC } });
+		expect(blessed.status).toBe(200);
+		expect(JSON.stringify(await asJson(blessed))).not.toContain(ADMIN);
+		const device = c.cookieValue(blessed, "tt_device")?.split(";")[0] as string;
+		expect(device).toBeDefined();
+		// A foreign Origin is refused.
+		expect((await h.call("/auth/device", { method: "POST", ip: c.freshIp(), ...json({ token: ADMIN }), headers: { "content-type": "application/json", cookie: r.session as string, ...XT, origin: "https://evil.example" } })).status).toBe(403);
+		// The session it was sent from stays read-only (no upgrade without a new login).
+		expect(await role(r.session)).toBe("web");
+		// Signing in again on the now-trusted browser: admin, and the flag is gone.
+		const again = await c.login({}, { device });
+		const after = await asJson(await h.call("/v1/auth/check", { headers: { cookie: again.session as string } }));
+		expect(after.role).toBe("admin");
+		expect(after.untrustedOwner).toBeUndefined();
+		expect(after.trustWithToken).toBeUndefined();
+		// The admin token itself (Bearer) never carries it.
+		expect((await asJson(await h.call("/v1/auth/check", { headers: bearer(ADMIN) }))).untrustedOwner).toBeUndefined();
+	});
+
 	test("an owner on a device blessed with the admin token gets admin; the device cookie rotates on every use", async () => {
 		const wrong = await blessWithToken("not-the-admin-token-0123456789abcdef");
 		expect(wrong.status).toBe(401);
@@ -934,7 +961,10 @@ describe("Sign in with typetorch.dev: viewers stay strictly read-only", () => {
 	for (const who of ["viewer", "owner on an unblessed device"] as const) {
 		test(`${who}: the server's configuration, secrets and every write are refused`, async () => {
 			const headers = who === "viewer" ? viewer : owner;
-			expect((await asJson(await h.call("/v1/auth/check", { headers }))).role).toBe("web");
+			const check = await asJson(await h.call("/v1/auth/check", { headers }));
+			expect(check.role).toBe("web");
+			// Only the owner is told the browser isn't trusted yet; a viewer just reads.
+			expect(check.untrustedOwner).toBe(who === "viewer" ? undefined : true);
 			const refused = async (path: string, init: RequestInit = {}) => {
 				const res = await h.call(path, { ...init, headers: { "content-type": "application/json", ...headers } });
 				expect(`${init.method ?? "GET"} ${path} ${res.status}`).toBe(`${init.method ?? "GET"} ${path} 403`);
