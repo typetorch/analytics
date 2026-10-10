@@ -383,10 +383,11 @@ Off unless `TYPETORCH_CENTRAL_LOGIN=on`; the admin token and the per-game Sign i
   the admin sessions it opened. A browser trusted with the admin token stops counting when the token changes.
 
 To try it locally against a broker on `http://127.0.0.1:8788` (typetorch/dash, `bun run dev` and `bun run fake-roblox`):
-`TYPETORCH_CENTRAL_LOGIN=on TYPETORCH_CENTRAL_LOGIN_ISSUER=http://127.0.0.1:8788 TYPETORCH_PUBLIC_URL=http://127.0.0.1:8787
+`TYPETORCH_CENTRAL_LOGIN=on TYPETORCH_CENTRAL_LOGIN_ISSUER=http://127.0.0.1:8788
 TYPETORCH_ROBLOX_BROKER_CLIENT_ID=fake-roblox-client
-TYPETORCH_ROBLOX_BROKER_DISCOVERY=http://127.0.0.1:8790/oauth/.well-known/openid-configuration bun run local` (the fake
-Roblox prints its client id and discovery URL when it starts; use what it prints).
+TYPETORCH_ROBLOX_BROKER_DISCOVERY=http://127.0.0.1:8790/oauth/.well-known/openid-configuration bun run local -- --game
+../template` (the public URL is then `http://localhost:8787`, which the broker accepts as a loopback origin; the fake
+Roblox prints its client id and discovery URL when it starts: use what it prints).
 
 ### On Coolify: the short list
 
