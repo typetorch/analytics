@@ -21,7 +21,7 @@ export const CSRF_HEADER = "x-typetorch";
 /** Who a session belongs to. */
 export type SessionUser =
 	| { kind: "token" }
-	| { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string };
+	| { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string; login?: "typetorch.dev" };
 
 /** What a session (or a Bearer) may do: `admin` reads and manages, `web` only reads. */
 export type AccessRole = "admin" | "web";
@@ -167,9 +167,12 @@ export class Auth {
 		return { session, cookie };
 	}
 
-	/** Whether a Roblox user still holds the role of their session. */
+	/**
+	 * Whether a Roblox user still holds the role of their session. A web session is held by a viewer, or by an owner
+	 * who signed in through typetorch.dev on a device that was never blessed (read-only until the device is blessed).
+	 */
 	robloxStillHolds(userId: number, role: AccessRole): boolean {
-		return role === "admin" ? this.o.isOwner(userId) : this.o.isViewer(userId);
+		return role === "admin" ? this.o.isOwner(userId) : this.o.isViewer(userId) || this.o.isOwner(userId);
 	}
 
 	/**

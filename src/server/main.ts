@@ -39,7 +39,8 @@ async function main(): Promise<void> {
 	// The environment's view, then (names only) what the explorer's Settings page saved over it.
 	const saved = app.settings.overridden();
 	const overrides = saved.length ? `; saved on the Settings page (these win over the environment): ${saved.join(", ")}` : "";
-	console.log(`[backend] listening on ${config.host}:${app.port} (${runtimeName()}); ${describeConfig(config)}${overrides}`);
+	const fingerprint = app.central ? `; instance fingerprint ${app.central.fingerprint}` : "";
+	console.log(`[backend] listening on ${config.host}:${app.port} (${runtimeName()}); ${describeConfig(config)}${fingerprint}${overrides}`);
 }
 
 main().catch((error) => {
