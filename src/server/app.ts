@@ -33,7 +33,8 @@
  *
  *   open
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
- *   GET  /v1/auth/check             which role the credentials have and which parts run (no side effects); 401 says which logins are on
+ *   GET  /v1/auth/check             which role the credentials have and which parts run (no side effects); 401 says which logins are on;
+ *                                   both carry `dashboard` (the typetorch.dev broker's origin) while that login is on
  *   POST /v1/auth/login | logout    explorer session by pasting the admin token
  *   GET  /v1/auth/roblox/start | callback   Sign in with Roblox (owners only)
  *   Sign in with typetorch.dev (TYPETORCH_CENTRAL_LOGIN=on, else 404; plans typetorch-dev-login):
@@ -884,7 +885,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// Auth routes -------------------------------------------------------------------------------------------------------
 
-	const loginOptions = () => ({ token: runtime.get("tokenLogin"), roblox: Boolean(oauth), ...(central ? { typetorch: true } : {}) });
+	// `dashboard`: the typetorch.dev broker's origin (public, the same issuer the login redirects to), for the explorer's
+	// "TypeTorch Dashboard" link. Only while Sign in with typetorch.dev is on.
+	const dashboard = () => (central ? { dashboard: central.config.issuer } : {});
+	const loginOptions = () => ({ token: runtime.get("tokenLogin"), roblox: Boolean(oauth), ...(central ? { typetorch: true, ...dashboard() } : {}) });
 	const secureCookie = (req: Request) => isHttps(req, proxyOpts);
 	const notFound = () => json(404, { error: "not found" });
 	const blockedResponse = (ip: string): Response | undefined => {
@@ -926,7 +930,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			// `parts`: what this server runs, so `typetorch fleet setup` / `settings set analytics` can refuse a game key for a
 			// part that is off (a game key writes to every part that runs; the admin token reads them).
 			const parts = { analytics: config.parts.has("analytics"), fleet: config.parts.has("fleet") };
-			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version, parts });
+			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version, parts, ...dashboard() });
 		}
 		if (bearer(req) !== undefined) failedAuth(ip, "token check");
 		return json(401, { error: "sign in required", login: loginOptions() });
