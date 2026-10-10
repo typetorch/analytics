@@ -436,7 +436,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" | "admin" | "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox, typetorch? } }` without valid credentials |\| "admin" \| "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox, typetorch? } }` without valid credentials |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
 | `GET /auth/typetorch/start`, `/callback` | open (rate limited, lockout) | [Sign in with typetorch.dev](#sign-in-with-typetorchdev-trial); 404 while `TYPETORCH_CENTRAL_LOGIN` is off (so are the next rows) |
