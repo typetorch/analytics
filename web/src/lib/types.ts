@@ -940,7 +940,8 @@ export interface CentralLoginInfo {
 	on: boolean;
 	issuer?: string;
 	fingerprint?: string;
-	unblessed?: "web" | "refuse";
+	/** TYPETORCH_CENTRAL_LOGIN_UNBLESSED: admin (the default: no trusted browser needed), web (read-only) or refuse. */
+	unblessed?: "admin" | "web" | "refuse";
 	blessKeys?: number;
 }
 

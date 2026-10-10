@@ -106,7 +106,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
 | `TYPETORCH_CENTRAL_LOGIN` | no | [Sign in with typetorch.dev](#sign-in-with-typetorchdev). **On by default**; it only turns on with `TYPETORCH_PUBLIC_URL` over https (or http on loopback), otherwise it stays off with a warning and the backend starts as usual (nothing Roblox-specific is needed: the broker publishes TypeTorch's Roblox client id). `off` turns it off: no button, no dashboard link, every route of it answers 404, no instance key is made and no report is sent. |
 | `TYPETORCH_CENTRAL_LOGIN_ISSUER` | no | The broker's origin (default `https://dash.typetorch.dev`; plain `http` only on `localhost` / `127.0.0.1`, for a local broker). |
-| `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` | no | What an owner gets on a browser that was never trusted: `web` (read-only, the default) or `refuse`. |
+| `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` | no | What an owner gets on a browser that was never trusted: `admin` (full admin, the default), `web` (read-only until the browser is trusted) or `refuse` (no session). See the trade-off under [Sign in with typetorch.dev](#sign-in-with-typetorchdev). |
 | `TYPETORCH_CENTRAL_LOGIN_KIDS` | no | Comma-separated broker key ids to pin: an assertion signed by any other key is refused even if the broker publishes it. |
 | `TYPETORCH_CENTRAL_LOGIN_LABEL` | no | The name the origin report gives typetorch.dev (64 characters; default the public URL's host). |
 | `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | Not needed: the backend reads TypeTorch's Roblox OAuth client id (the audience of the Roblox ID token the broker passes on) and Roblox's discovery document from `<issuer>/.well-known/typetorch-login`. Set, this and `TYPETORCH_ROBLOX_BROKER_DISCOVERY` are **pins**: they are used, and a published value that differs refuses every typetorch.dev login (logged once). |
@@ -381,8 +381,10 @@ Roblox are untouched by it. While it is on, the explorer shows a **TypeTorch Das
   the admin token and the per-game sign-in are unaffected. `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` and
   `TYPETORCH_ROBLOX_BROKER_DISCOVERY` optionally pin the values: a published value that differs from a pin refuses
   logins and is logged once.
-- **The role.** A viewer gets `web`; anyone not on the lists is refused like a wrong token. An **owner gets admin only on a
-  trusted ("blessed") browser**; anywhere else `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` decides: `web` (read-only) or `refuse`.
+- **The role.** A viewer gets `web`; anyone not on the lists is refused like a wrong token. An owner gets admin on a
+  trusted ("blessed") browser; anywhere else `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` decides: `admin` (the default), `web`
+  (read-only) or `refuse`. **Trade-off:** with `admin`, anyone who controls an owner's Roblox account (and passes the admin
+  allow list, if set) can administer the backend; set `web` or `refuse` to require trusted browsers for admin.
   Every login makes a fresh session (a session id from before is ended), is counted toward the five-failure lockout when it
   fails, and logs `login: typetorch.dev user <id> role <role>`.
 - **Trusting a browser** (once per browser; the broker never sees it): the admin token in the Settings page's form
@@ -450,7 +452,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
 | `GET /auth/typetorch/start`, `/callback` | open (rate limited, lockout) | [Sign in with typetorch.dev](#sign-in-with-typetorchdev); 404 while `TYPETORCH_CENTRAL_LOGIN` is off (so are the next rows) |

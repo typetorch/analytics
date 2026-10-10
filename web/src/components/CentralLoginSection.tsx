@@ -122,7 +122,9 @@ export function CentralLoginSection({ info }: { info: CentralLoginInfo | undefin
 				{on ? (
 					<>
 						<p className="text-xs text-muted-foreground">
-							Owners get full admin only on a trusted browser; elsewhere they get {info?.unblessed === "refuse" ? "no access" : "read-only access"}.
+							{info?.unblessed === "web" || info?.unblessed === "refuse"
+								? `Owners get full admin only on a trusted browser; elsewhere they get ${info.unblessed === "refuse" ? "no access" : "read-only access"} (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=${info.unblessed}).`
+								: "Owners get full admin on any browser (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=admin): anyone who controls an owner's Roblox account can administer this backend. Set it to web or refuse to require a trusted browser."}
 						</p>
 						<Devices />
 					</>

@@ -36,7 +36,8 @@ services:
       # broker publishes it).
       TYPETORCH_CENTRAL_LOGIN: ${TYPETORCH_CENTRAL_LOGIN:-on}
       TYPETORCH_CENTRAL_LOGIN_ISSUER: ${TYPETORCH_CENTRAL_LOGIN_ISSUER:-}  # default https://dash.typetorch.dev
-      TYPETORCH_CENTRAL_LOGIN_UNBLESSED: ${TYPETORCH_CENTRAL_LOGIN_UNBLESSED:-}
+      # Owners on a browser that was never trusted: admin (default), web (read-only) or refuse.
+      TYPETORCH_CENTRAL_LOGIN_UNBLESSED: ${TYPETORCH_CENTRAL_LOGIN_UNBLESSED:-admin}
       TYPETORCH_CENTRAL_LOGIN_KIDS: ${TYPETORCH_CENTRAL_LOGIN_KIDS:-}
       TYPETORCH_CENTRAL_LOGIN_LABEL: ${TYPETORCH_CENTRAL_LOGIN_LABEL:-}
       # Optional pins: by default the Roblox client id and discovery come from <issuer>/.well-known/typetorch-login;

@@ -63,6 +63,16 @@ describe("the Settings section", () => {
 		await waitFor(() => expect(screen.queryByText(/Firefox/)).toBeNull());
 	});
 
+	it("admin (the default): owners get admin on any browser, and the page says what that means", async () => {
+		vi.spyOn(api, "devices").mockResolvedValue([]);
+		render(withClient(<CentralLoginSection info={{ on: true, fingerprint: FP, unblessed: "admin" }} />));
+		expect(screen.getByText(/full admin on any browser/)).toBeTruthy();
+		expect(screen.getByText(/controls an owner's Roblox account/)).toBeTruthy();
+		expect(screen.queryByText(/read-only access/)).toBeNull();
+		// Trusting browsers still works (it matters again once the mode is web or refuse).
+		expect(await screen.findByText(/No browser is trusted yet/)).toBeTruthy();
+	});
+
 	it("trusts this browser with the admin token once; a wrong token says so", async () => {
 		vi.spyOn(api, "devices").mockResolvedValue([]);
 		const bless = vi.spyOn(api, "blessDevice").mockRejectedValueOnce(new ApiError(401, "wrong token", "/auth/device")).mockResolvedValueOnce({ ok: true, blessed: true });
