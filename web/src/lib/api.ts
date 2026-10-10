@@ -7,6 +7,7 @@
 import type {
 	AuthInfo,
 	BackfillResult,
+	BlessedDevice,
 	DebugAuditEntry,
 	ErrorDetail,
 	ErrorList,
@@ -179,6 +180,12 @@ export function createApi(options: ApiOptions = {}) {
 			request<SettingsView>("/v1/admin/settings", { method: "PATCH", body: JSON.stringify(changes), ...(signal ? { signal } : {}) }),
 		/** One test alert through the saved webhook (the backend allows 3 a minute). */
 		testAlert: (signal?: AbortSignal) => post<TestAlertResult>("/v1/admin/settings/test-alert", {}, signal),
+		/** Sign in with typetorch.dev: the browsers trusted for full admin (owners only). */
+		devices: (signal?: AbortSignal) => get<{ devices: BlessedDevice[] }>("/v1/admin/devices", signal).then((r) => r.devices),
+		revokeDevice: (id: string, signal?: AbortSignal) =>
+			request<{ ok: boolean; devices: BlessedDevice[] }>(`/v1/admin/devices/${encodeURIComponent(id)}`, { method: "DELETE", ...(signal ? { signal } : {}) }).then((r) => r.devices),
+		/** Trusts this browser for full admin through typetorch.dev: the admin token once (sets the device cookie). */
+		blessDevice: (token: string, signal?: AbortSignal) => post<{ ok: boolean; blessed: boolean }>("/auth/device", { token }, signal),
 		/** Chart marks: releases, kernel publishes and backup refreshes in a window, oldest first (GET /v1/fleet/marks). */
 		fleetMarks: (params: { since?: number; until?: number; branch?: string; kinds?: string; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ marks: DeployMark[] }>(`/v1/fleet/marks${qs(params)}`, signal).then((r) => r.marks),

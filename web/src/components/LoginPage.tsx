@@ -1,5 +1,8 @@
-/** The login page: Sign in with Roblox (owners, and read-only viewers) first, the admin token second (hidden when the backend turns it off). */
-import { KeyRound, LogIn } from "lucide-react";
+/**
+ * The login page: Sign in with Roblox (owners, and read-only viewers) first, Sign in with typetorch.dev when the backend
+ * turns it on, the admin token last (hidden when the backend turns it off).
+ */
+import { Globe, KeyRound, LogIn } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -76,20 +79,28 @@ export function LoginPage({ options, initialError, onSignedIn }: { options: Logi
 							</a>
 						</Button>
 					) : null}
-					{options.roblox && options.token ? <div className="text-center text-xs text-muted-foreground">or</div> : null}
+					{options.typetorch ? (
+						<Button asChild className="w-full" size="lg" variant={options.roblox ? "outline" : "default"}>
+							<a href="/auth/typetorch/start">
+								<Globe />
+								Sign in with typetorch.dev
+							</a>
+						</Button>
+					) : null}
+					{(options.roblox || options.typetorch) && options.token ? <div className="text-center text-xs text-muted-foreground">or</div> : null}
 					{options.token ? (
 						<form className="space-y-2" onSubmit={submit}>
 							<Label htmlFor="admin-token" className="text-xs text-muted-foreground">
 								Admin token
 							</Label>
 							<Input id="admin-token" type="password" autoComplete="off" spellCheck={false} placeholder="paste the admin token" value={token} onChange={(e) => setToken(e.target.value)} />
-							<Button type="submit" variant={options.roblox ? "outline" : "default"} className="w-full" disabled={busy || !token.trim()}>
+							<Button type="submit" variant={options.roblox || options.typetorch ? "outline" : "default"} className="w-full" disabled={busy || !token.trim()}>
 								<KeyRound />
 								{busy ? "Checking" : "Sign in with the token"}
 							</Button>
 						</form>
 					) : null}
-					{!options.roblox && !options.token ? <p className="text-sm text-muted-foreground">No login is turned on for this backend.</p> : null}
+					{!options.roblox && !options.token && !options.typetorch ? <p className="text-sm text-muted-foreground">No login is turned on for this backend.</p> : null}
 				</CardContent>
 			</Card>
 		</div>
