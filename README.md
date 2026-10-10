@@ -384,8 +384,9 @@ Off unless `TYPETORCH_CENTRAL_LOGIN=on`; the admin token and the per-game Sign i
 
 To try it locally against a broker on `http://127.0.0.1:8788` (typetorch/dash, `bun run dev` and `bun run fake-roblox`):
 `TYPETORCH_CENTRAL_LOGIN=on TYPETORCH_CENTRAL_LOGIN_ISSUER=http://127.0.0.1:8788 TYPETORCH_PUBLIC_URL=http://127.0.0.1:8787
-TYPETORCH_ROBLOX_BROKER_CLIENT_ID=<the fake's client id> TYPETORCH_ROBLOX_BROKER_DISCOVERY=<the fake's discovery URL>
-bun run local`.
+TYPETORCH_ROBLOX_BROKER_CLIENT_ID=fake-roblox-client
+TYPETORCH_ROBLOX_BROKER_DISCOVERY=http://127.0.0.1:8790/oauth/.well-known/openid-configuration bun run local` (the fake
+Roblox prints its client id and discovery URL when it starts; use what it prints).
 
 ### On Coolify: the short list
 
