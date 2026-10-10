@@ -51,7 +51,7 @@ describe("the Settings section", () => {
 	it("on: the fingerprint, the trusted browsers with revoke, and this browser marked", async () => {
 		vi.spyOn(api, "devices").mockResolvedValue([device({ current: true }), device({ id: "fedcba9876543210", via: "signing key", agent: "Firefox/131 on Linux" })]);
 		const revoke = vi.spyOn(api, "revokeDevice").mockResolvedValue([device({ current: true })]);
-		render(withClient(<CentralLoginSection info={{ on: true, issuer: "https://typetorch.dev", fingerprint: FP, unblessed: "web" }} />));
+		render(withClient(<CentralLoginSection info={{ on: true, issuer: "https://dash.typetorch.dev", fingerprint: FP, unblessed: "web" }} />));
 		expect(screen.getByText(FP)).toBeTruthy();
 		expect(screen.getByText(/read-only access/)).toBeTruthy();
 		expect(await screen.findByText("This browser")).toBeTruthy();

@@ -1,6 +1,7 @@
 /**
  * Sign in with typetorch.dev (plans typetorch-dev-login, "Backend changes" tests): the whole flow against a fake broker
- * (its own Ed25519 key pair, /authorize, /token, /report with the origin challenge, the JWKS) and a fake Roblox (an
+ * (its own Ed25519 key pair, /authorize, /token, /report with the origin challenge, the JWKS, the login metadata at
+ * /.well-known/typetorch-login that names TypeTorch's Roblox client id and discovery) and a fake Roblox (an
  * ES256 key pair, discovery, JWKS). Nothing leaves the process: every request goes to the fake fetch below, and every
  * id, key, token and secret is made up here. No real typetorch.dev or Roblox is ever called.
  */
@@ -96,8 +97,11 @@ class Fakes {
 	challengesIssued: string[] = [];
 	reportTokens = new Map<string, string>();
 	reports: { body: Record<string, unknown>; auth?: string; status: number }[] = [];
-	calls = { token: 0, jwks: 0, report: 0 };
+	calls = { token: 0, jwks: 0, report: 0, metadata: 0 };
 	tokenStatus = 200;
+	/** What /.well-known/typetorch-login answers (dash publishes its Roblox client id and discovery there). */
+	metadata: Record<string, unknown> = { issuer: BROKER, jwks_uri: `${BROKER}/.well-known/jwks.json`, roblox_client_id: BROKER_CLIENT_ID, roblox_discovery: ROBLOX_DISCOVERY };
+	metadataStatus = 200;
 	h?: Harness;
 	now = () => this.h?.now() ?? T0;
 
@@ -109,6 +113,10 @@ class Fakes {
 		if (url === `${BROKER}/.well-known/jwks.json`) {
 			this.calls.jwks++;
 			return reply({ keys: this.brokerKeys.map((k) => ({ kty: "OKP", crv: "Ed25519", kid: k.kid, x: k.x, use: "sig", alg: "EdDSA" })) });
+		}
+		if (url === `${BROKER}/.well-known/typetorch-login`) {
+			this.calls.metadata++;
+			return reply(this.metadata, this.metadataStatus);
 		}
 		if (url === `${BROKER}/token` && init?.method === "POST") {
 			this.calls.token++;
@@ -194,10 +202,10 @@ const ENV = {
 	TYPETORCH_PUBLIC_URL: PUBLIC,
 	TYPETORCH_CENTRAL_LOGIN: "on",
 	TYPETORCH_CENTRAL_LOGIN_ISSUER: BROKER,
-	TYPETORCH_ROBLOX_BROKER_CLIENT_ID: BROKER_CLIENT_ID,
-	TYPETORCH_ROBLOX_BROKER_DISCOVERY: ROBLOX_DISCOVERY,
 	TYPETORCH_WEB_VIEWERS: String(VIEWER),
 };
+/** The optional pins of the broker's published Roblox settings. */
+const PINS = { TYPETORCH_ROBLOX_BROKER_CLIENT_ID: BROKER_CLIENT_ID, TYPETORCH_ROBLOX_BROKER_DISCOVERY: ROBLOX_DISCOVERY };
 
 interface Login {
 	status: number;
@@ -545,16 +553,16 @@ describe("Sign in with typetorch.dev: the challenge while pending", () => {
 describe("Sign in with typetorch.dev: settings and switches", () => {
 	const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: "/tmp/never-used", TYPETORCH_EXPLORER: "off" };
 
-	test("off by default; on needs the public URL and TypeTorch's Roblox client id; the issuer is an origin", () => {
+	test("off by default; on needs only the public URL (no Roblox client id); the pins are optional; the issuer is an origin", () => {
 		expect(loadConfig([], { ...base, TYPETORCH_PUBLIC_URL: PUBLIC }).centralLogin).toBeUndefined();
 		const on = loadConfig([], { ...base, ...ENV });
-		expect(on.centralLogin).toEqual({ issuer: BROKER, unblessed: "web", robloxClientId: BROKER_CLIENT_ID, robloxDiscoveryUrl: ROBLOX_DISCOVERY, label: "backend.example.com" });
-		expect(loadConfig([], { ...base, TYPETORCH_CENTRAL_LOGIN: "on", TYPETORCH_ROBLOX_BROKER_CLIENT_ID: "1" }).warnings.join(" ")).toContain("set TYPETORCH_PUBLIC_URL");
-		const noClient = loadConfig([], { ...base, TYPETORCH_CENTRAL_LOGIN: "on", TYPETORCH_PUBLIC_URL: PUBLIC });
-		expect(noClient.centralLogin).toBeUndefined();
-		expect(noClient.warnings.join(" ")).toContain("TYPETORCH_ROBLOX_BROKER_CLIENT_ID");
+		expect(on.centralLogin).toEqual({ issuer: BROKER, unblessed: "web", label: "backend.example.com" });
+		expect(on.warnings.join(" ")).not.toContain("TYPETORCH_ROBLOX_BROKER_CLIENT_ID");
+		expect(loadConfig([], { ...base, ...ENV, ...PINS }).centralLogin).toEqual({ issuer: BROKER, unblessed: "web", robloxClientId: BROKER_CLIENT_ID, robloxDiscoveryUrl: ROBLOX_DISCOVERY, label: "backend.example.com" });
+		expect(loadConfig([], { ...base, TYPETORCH_CENTRAL_LOGIN: "on" }).warnings.join(" ")).toContain("set TYPETORCH_PUBLIC_URL");
+		expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_ROBLOX_BROKER_CLIENT_ID: "not a client id" })).toThrow(/TYPETORCH_ROBLOX_BROKER_CLIENT_ID/);
 		expect(loadConfig([], { ...base, ...ENV }).centralLogin?.issuer).toBe(BROKER);
-		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_ISSUER: undefined as never }).centralLogin?.issuer).toBe("https://typetorch.dev");
+		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_ISSUER: undefined as never }).centralLogin?.issuer).toBe("https://dash.typetorch.dev");
 		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_ISSUER: "http://127.0.0.1:8788" }).centralLogin?.issuer).toBe("http://127.0.0.1:8788");
 		for (const bad of ["http://broker.example.com", "https://broker.test/path", "https://user:pw@broker.test", "nope"]) {
 			expect(() => loadConfig([], { ...base, ...ENV, TYPETORCH_CENTRAL_LOGIN_ISSUER: bad })).toThrow(/TYPETORCH_CENTRAL_LOGIN_ISSUER/);
@@ -621,6 +629,128 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 			fakes.brokerKeys.push(pinned);
 			h.setNow(h.now() + 61_000);
 			expect((await c.login({ assertionSigner: pinned })).session).toBeDefined();
+		} finally {
+			await h.close();
+		}
+	});
+
+	/** A harness with its own fakes; `ready` adds the owner. */
+	async function own(env: Record<string, string>, setup: (fakes: Fakes) => void = () => {}) {
+		const fakes = new Fakes();
+		fakes.robloxKeys = [await robloxKey("roblox-k1")];
+		setup(fakes);
+		const h = await harness(env, { fetch: fakes.fetch });
+		fakes.h = h;
+		await h.call("/v1/access", { method: "PUT", ...json({ seq: 1, owners: [OWNER] }), headers: { "content-type": "application/json", ...bearer(ADMIN) } });
+		return { h, fakes, c: client(() => ({ h, fakes })) };
+	}
+
+	test("the broker's login metadata names the Roblox client id and discovery: fetched once, cached an hour", async () => {
+		const { h, fakes, c } = await own(ENV, (f) => {
+			f.metadata = { ...f.metadata, roblox_client_id: "5555000011112222" };
+		});
+		try {
+			// The Roblox token is checked against the published client id, not a built-in one.
+			expect((await c.login()).location).toBe("/?login_error=failed");
+			expect(h.logs.some((l) => l.includes("ID token audience is not this app"))).toBe(true);
+			const ok = await c.login({ roblox: (x) => ({ ...x, aud: "5555000011112222" }) });
+			expect(ok.session).toBeDefined();
+			expect(fakes.calls.metadata).toBe(1);
+			h.setNow(h.now() + 3_600_000 + 1000);
+			expect((await c.login({ roblox: (x) => ({ ...x, aud: "5555000011112222" }) })).session).toBeDefined();
+			expect(fakes.calls.metadata).toBe(2);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("login metadata naming another issuer is refused (fails closed, the code is never redeemed)", async () => {
+		for (const issuer of ["https://evil.test", `${BROKER}/`, "https://BROKER.test"]) {
+			const { h, fakes, c } = await own(ENV, (f) => {
+				f.metadata = { ...f.metadata, issuer };
+			});
+			try {
+				const r = await c.login();
+				expect(r.location).toBe("/?login_error=failed");
+				expect(r.session).toBeUndefined();
+				expect(fakes.calls.token).toBe(0);
+				expect(h.logs.some((l) => l.includes("names another issuer"))).toBe(true);
+			} finally {
+				await h.close();
+			}
+		}
+	});
+
+	test("malformed login metadata is refused: a bad client id, a plain-http (non-loopback) discovery, too large", async () => {
+		const bad: [string, (f: Fakes) => void, string][] = [
+			["client id", (f) => (f.metadata = { ...f.metadata, roblox_client_id: "a b" }), "no valid roblox_client_id"],
+			["discovery", (f) => (f.metadata = { ...f.metadata, roblox_discovery: "http://roblox.test/oauth/.well-known/openid-configuration" }), "no valid roblox_discovery"],
+			["size", (f) => (f.metadata = { ...f.metadata, pad: "x".repeat(20_000) }), "too large"],
+		];
+		for (const [, setup, why] of bad) {
+			const { h, fakes, c } = await own(ENV, setup);
+			try {
+				expect((await c.login()).location).toBe("/?login_error=failed");
+				expect(fakes.calls.token).toBe(0);
+				expect(h.logs.some((l) => l.includes(why))).toBe(true);
+			} finally {
+				await h.close();
+			}
+		}
+	});
+
+	test("a pin (TYPETORCH_ROBLOX_BROKER_CLIENT_ID / _DISCOVERY) that differs from the published value refuses logins, logged once", async () => {
+		const { h, fakes, c } = await own({ ...ENV, ...PINS, TYPETORCH_ROBLOX_BROKER_CLIENT_ID: "7777000011112222" });
+		try {
+			for (let i = 0; i < 2; i++) {
+				const r = await c.login({ roblox: (x) => ({ ...x, aud: "7777000011112222" }) });
+				expect(r.location).toBe("/?login_error=failed");
+				expect(r.session).toBeUndefined();
+			}
+			expect(fakes.calls.token).toBe(0);
+			expect(h.logs.filter((l) => l.includes("differs from the pinned one")).length).toBe(1);
+			// The published value changes to match: logins work again.
+			fakes.metadata = { ...fakes.metadata, roblox_client_id: "7777000011112222" };
+			h.setNow(h.now() + 3_600_000 + 1000);
+			expect((await c.login({ roblox: (x) => ({ ...x, aud: "7777000011112222" }) })).session).toBeDefined();
+		} finally {
+			await h.close();
+		}
+		const d = await own({ ...ENV, ...PINS, TYPETORCH_ROBLOX_BROKER_DISCOVERY: "https://other.test/.well-known/openid-configuration" });
+		try {
+			expect((await d.c.login()).location).toBe("/?login_error=failed");
+			expect(d.h.logs.some((l) => l.includes("Roblox discovery URL (TYPETORCH_ROBLOX_BROKER_DISCOVERY) differs from the pinned one"))).toBe(true);
+		} finally {
+			await d.h.close();
+		}
+		// Pins equal to the published values: logins work.
+		const same = await own({ ...ENV, ...PINS });
+		try {
+			expect((await same.c.login()).session).toBeDefined();
+		} finally {
+			await same.h.close();
+		}
+	});
+
+	test("login metadata that can't be fetched fails closed, backs off, and recovers; other sign-ins are untouched", async () => {
+		const { h, fakes, c } = await own(ENV, (f) => (f.metadataStatus = 503));
+		try {
+			const r = await c.login();
+			expect(r.location).toBe("/?login_error=failed");
+			expect(r.session).toBeUndefined();
+			expect(fakes.calls.token).toBe(0);
+			expect(fakes.calls.metadata).toBe(1);
+			// Inside the backoff: no new fetch, still refused.
+			expect((await c.login()).location).toBe("/?login_error=failed");
+			expect(fakes.calls.metadata).toBe(1);
+			// The admin token login is unaffected.
+			const token = await h.call("/v1/auth/login", { method: "POST", ...json({ token: ADMIN }), headers: { "content-type": "application/json", ...XT } });
+			expect(token.status).toBe(200);
+			// After the backoff the broker is back: the login works.
+			fakes.metadataStatus = 200;
+			h.setNow(h.now() + 2_001);
+			expect((await c.login()).session).toBeDefined();
+			expect(fakes.calls.metadata).toBe(2);
 		} finally {
 			await h.close();
 		}

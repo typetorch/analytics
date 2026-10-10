@@ -115,7 +115,7 @@ export function CentralLoginSection({ info }: { info: CentralLoginInfo | undefin
 				</div>
 				{on && info?.fingerprint ? (
 					<div className="space-y-1">
-						<div className="text-xs text-muted-foreground">This backend's fingerprint (paste it into Add project on typetorch.dev)</div>
+						<div className="text-xs text-muted-foreground">This backend's fingerprint (paste it into Add project on dash.typetorch.dev)</div>
 						<code className="block overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-xs">{info.fingerprint}</code>
 					</div>
 				) : null}

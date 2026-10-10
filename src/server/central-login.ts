@@ -9,10 +9,16 @@
  *  2. Roblox's own ID token passed through the broker: signed by Roblox, `aud` TypeTorch's Roblox client id, `nonce` the
  *     cookie's, `sub` the assertion's. So the broker alone can never produce a login.
  *
+ * TypeTorch's Roblox client id and Roblox's discovery document come from the broker's public login metadata
+ * (`<issuer>/.well-known/typetorch-login`: its `issuer` must equal the configured one exactly; cached an hour; a failed
+ * fetch backs off, and until one succeeds every login fails closed). TYPETORCH_ROBLOX_BROKER_CLIENT_ID and
+ * TYPETORCH_ROBLOX_BROKER_DISCOVERY pin them: a pinned value is used, and a published value that differs refuses logins.
+ *
  * Either failing is "not signed in". The broker's answers are never shown to the person; log details carry no token.
  * The role decision, the device check and the session are app.ts's (the per-game sign-in's code path).
  */
 import { createHash, createPublicKey, randomBytes, verify, type KeyObject } from "node:crypto";
+import { discoveryUrlOf, ROBLOX_CLIENT_ID_PATTERN } from "./config.ts";
 import { OAuthError, PENDING_TTL_MS, MAX_PENDING_PER_ADDRESS, RobloxIdTokens, safeEqual, type RobloxIdentity } from "./roblox-oauth.ts";
 
 const MAX_PENDING = 1000;
@@ -24,18 +30,54 @@ const CLOCK_SKEW_MS = 30_000;
 export const ASSERTION_MAX_AGE_MS = 120_000;
 const JTI_MAX = 10_000;
 const MAX_TOKEN_ANSWER = 64 * 1024;
+/** The broker's login metadata: size cap, cache, and the backoff after a failed fetch (doubling up to the max). */
+const MAX_METADATA = 16 * 1024;
+const METADATA_TTL_MS = 3_600_000;
+const METADATA_BACKOFF_MIN_MS = 2_000;
+const METADATA_BACKOFF_MAX_MS = 300_000;
+export const LOGIN_METADATA_PATH = "/.well-known/typetorch-login";
+
+/** What Roblox's ID token is checked against: the broker's published values, or the pins. */
+export interface RobloxSettings {
+	clientId: string;
+	discoveryUrl: string;
+}
+
+/** Reads at most `max` bytes of a body; more is an error (the rest is cancelled). */
+async function readCapped(response: Response, max: number): Promise<string> {
+	const reader = response.body?.getReader();
+	if (!reader) return "";
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		size += value.byteLength;
+		if (size > max) {
+			await reader.cancel().catch(() => {});
+			throw new Error("too long");
+		}
+		chunks.push(value);
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
 
 export interface CentralLoginOptions {
-	/** The broker's origin, e.g. https://typetorch.dev (the assertion's `iss`). */
+	/** The broker's origin, e.g. https://dash.typetorch.dev (the assertion's `iss`). */
 	issuer: string;
 	/** This backend's fingerprint (the assertion's `aud`). */
 	fingerprint: string;
 	/** `<public url>/auth/typetorch/callback` */
 	redirectUri: string;
-	/** TypeTorch's Roblox OAuth client id (the `aud` of Roblox's ID token). */
-	robloxClientId: string;
-	/** Roblox's OIDC discovery document (a fake one in tests and local runs). */
+	/**
+	 * A pin of TypeTorch's Roblox OAuth client id (the `aud` of Roblox's ID token). Unset: the broker's published
+	 * `roblox_client_id` is used. Set: it is used, and a different published value refuses every login.
+	 */
+	robloxClientId?: string;
+	/** A pin of Roblox's OIDC discovery document, same rules (a fake Roblox in tests and local runs). */
 	robloxDiscoveryUrl?: string;
+	/** Where the once-only pin mismatch line goes. */
+	log?: (line: string) => void;
 	/** Only these broker key ids are accepted (TYPETORCH_CENTRAL_LOGIN_KIDS). */
 	pinnedKids?: readonly string[];
 	fetch?: typeof fetch;
@@ -55,7 +97,13 @@ export class CentralLogin {
 	private readonly pending = new Map<string, Pending>();
 	private readonly doFetch: (input: string, init?: RequestInit) => Promise<Response>;
 	private readonly clock: () => number;
-	private readonly roblox: RobloxIdTokens;
+	/** Roblox's discovery and keys, for the discovery URL in use (made again if it changes). */
+	private roblox: { url: string; tokens: RobloxIdTokens } | undefined;
+	private metadata: { at: number; settings: RobloxSettings } | undefined;
+	private metadataFailure: { at: number; backoffMs: number; reason: string } | undefined;
+	private metadataInFlight: Promise<RobloxSettings> | undefined;
+	/** Pin mismatches already logged (one line each). */
+	private readonly loggedMismatch = new Set<string>();
 	private keys: { at: number; fetchedAt: number; byKid: Map<string, KeyObject> } | undefined;
 	/** jti -> when it may be forgotten (its exp). */
 	private readonly seenJti = new Map<string, number>();
@@ -63,7 +111,87 @@ export class CentralLogin {
 	constructor(private readonly o: CentralLoginOptions) {
 		this.doFetch = o.fetch ?? ((input, init) => fetch(input, init));
 		this.clock = o.clock ?? Date.now;
-		this.roblox = new RobloxIdTokens({ allowLoopbackHttp: true, ...(o.robloxDiscoveryUrl ? { discoveryUrl: o.robloxDiscoveryUrl } : {}), ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.clock ? { clock: o.clock } : {}) });
+	}
+
+	/**
+	 * The Roblox client id and discovery URL for the ID token check: the broker's metadata (cached an hour), with the
+	 * pins winning. Throws OAuthError (fail closed) when the metadata can't be had, is malformed, names another issuer,
+	 * or differs from a pin.
+	 */
+	async robloxSettings(): Promise<RobloxSettings> {
+		const now = this.clock();
+		let published: RobloxSettings;
+		if (this.metadata && now - this.metadata.at < METADATA_TTL_MS) published = this.metadata.settings;
+		else {
+			const failed = this.metadataFailure;
+			if (failed && now - failed.at < failed.backoffMs) throw new OAuthError("failed", `typetorch.dev login metadata unavailable (${failed.reason}; retrying later)`);
+			this.metadataInFlight ??= this.fetchMetadata().finally(() => (this.metadataInFlight = undefined));
+			published = await this.metadataInFlight;
+		}
+		const mismatch = (what: string, pinned: string | undefined, value: string) => {
+			if (pinned === undefined || pinned === value) return;
+			const line = `typetorch.dev login: the broker's published ${what} differs from the pinned one; refusing typetorch.dev logins until they match`;
+			if (!this.loggedMismatch.has(what)) {
+				this.loggedMismatch.add(what);
+				this.o.log?.(line);
+			}
+			throw new OAuthError("failed", `typetorch.dev login metadata: ${what} differs from the pin`);
+		};
+		mismatch("Roblox client id (TYPETORCH_ROBLOX_BROKER_CLIENT_ID)", this.o.robloxClientId, published.clientId);
+		mismatch("Roblox discovery URL (TYPETORCH_ROBLOX_BROKER_DISCOVERY)", this.o.robloxDiscoveryUrl, published.discoveryUrl);
+		return published;
+	}
+
+	/** GET <issuer>/.well-known/typetorch-login, validated. A failure starts (or doubles) the backoff. */
+	private async fetchMetadata(): Promise<RobloxSettings> {
+		try {
+			const settings = await this.readMetadata();
+			this.metadata = { at: this.clock(), settings };
+			this.metadataFailure = undefined;
+			return settings;
+		} catch (error) {
+			const reason = error instanceof OAuthError ? error.detail : "unexpected error";
+			const backoffMs = this.metadataFailure ? Math.min(this.metadataFailure.backoffMs * 2, METADATA_BACKOFF_MAX_MS) : METADATA_BACKOFF_MIN_MS;
+			this.metadataFailure = { at: this.clock(), backoffMs, reason };
+			// A stale cached value is not used: the login fails closed until a fetch succeeds.
+			this.metadata = undefined;
+			throw error instanceof OAuthError ? error : new OAuthError("failed", reason);
+		}
+	}
+
+	private async readMetadata(): Promise<RobloxSettings> {
+		let text: string;
+		try {
+			const response = await this.doFetch(new URL(LOGIN_METADATA_PATH, this.o.issuer).toString(), { headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+			if (response.status !== 200) {
+				await response.body?.cancel().catch(() => {});
+				throw new OAuthError("failed", `typetorch.dev login metadata answered ${response.status}`);
+			}
+			text = await readCapped(response, MAX_METADATA);
+		} catch (error) {
+			if (error instanceof OAuthError) throw error;
+			throw new OAuthError("failed", `typetorch.dev login metadata unreachable or too large (${(error as Error).name})`);
+		}
+		let raw: unknown;
+		try {
+			raw = JSON.parse(text);
+		} catch {
+			throw new OAuthError("failed", "typetorch.dev login metadata is not JSON");
+		}
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new OAuthError("failed", "typetorch.dev login metadata is not an object");
+		const m = raw as Record<string, unknown>;
+		if (m.issuer !== this.o.issuer) throw new OAuthError("failed", "typetorch.dev login metadata names another issuer");
+		if (typeof m.roblox_client_id !== "string" || !ROBLOX_CLIENT_ID_PATTERN.test(m.roblox_client_id)) throw new OAuthError("failed", "typetorch.dev login metadata has no valid roblox_client_id");
+		const discoveryUrl = typeof m.roblox_discovery === "string" ? discoveryUrlOf(m.roblox_discovery) : undefined;
+		if (!discoveryUrl) throw new OAuthError("failed", "typetorch.dev login metadata has no valid roblox_discovery (https, or http on loopback)");
+		return { clientId: m.roblox_client_id, discoveryUrl };
+	}
+
+	private robloxTokens(discoveryUrl: string): RobloxIdTokens {
+		if (this.roblox?.url !== discoveryUrl) {
+			this.roblox = { url: discoveryUrl, tokens: new RobloxIdTokens({ allowLoopbackHttp: true, discoveryUrl, ...(this.o.fetch ? { fetch: this.o.fetch } : {}), ...(this.o.clock ? { clock: this.o.clock } : {}) }) };
+		}
+		return this.roblox.tokens;
 	}
 
 	get issuer(): string {
@@ -118,11 +246,13 @@ export class CentralLogin {
 		if (query.error) throw new OAuthError(query.error === "access_denied" ? "denied" : "failed", `typetorch.dev answered error=${query.error.slice(0, 40).replace(/[^\w.-]/g, "_")}`);
 		if (!query.code || query.code.length > 512) throw new OAuthError("failed", "no code");
 
+		// Before the code is redeemed: without the broker's metadata (or with a pin mismatch) nothing can be verified.
+		const roblox = await this.robloxSettings();
 		const answer = await this.redeem(query.code, pending.verifier);
 		const claims = await this.verifyAssertion(answer.assertion, pending.nonce);
 		let identity: RobloxIdentity;
 		try {
-			identity = await this.roblox.verify(answer.robloxIdToken, { clientId: this.o.robloxClientId, nonce: pending.nonce });
+			identity = await this.robloxTokens(roblox.discoveryUrl).verify(answer.robloxIdToken, { clientId: roblox.clientId, nonce: pending.nonce });
 		} catch (error) {
 			const detail = error instanceof OAuthError ? error.detail : "unexpected error";
 			// The broker sent a Roblox token for another login: a live login was redirected (plans: "Trust concentration").
