@@ -12,7 +12,25 @@ export function useAuth(): AuthInfo | null {
 /** The offers on the login page: the backend's list from the 401 body, else the token form only. */
 export function loginOptionsOf(body: unknown): LoginOptions {
 	const login = (body as { login?: Partial<LoginOptions> } | undefined)?.login;
-	return { token: login?.token ?? true, roblox: login?.roblox ?? false, ...(login?.typetorch ? { typetorch: true } : {}) };
+	const dashboard = login?.typetorch ? dashboardUrl(login.dashboard) : undefined;
+	return { token: login?.token ?? true, roblox: login?.roblox ?? false, ...(login?.typetorch ? { typetorch: true } : {}), ...(dashboard ? { dashboard } : {}) };
+}
+
+/**
+ * The TypeTorch Dashboard link: the origin the backend names, only when it is a plain https origin (http on loopback, for a
+ * local broker). Anything else (a path, credentials, another scheme) gets no link.
+ */
+export function dashboardUrl(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length > 256) return undefined;
+	try {
+		const url = new URL(value);
+		const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+		if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) return undefined;
+		if (url.username || url.password || url.origin !== value.replace(/\/$/, "")) return undefined;
+		return url.origin;
+	} catch {
+		return undefined;
+	}
 }
 
 /** The plain sentences for the `login_error` the backend puts in the address after a failed Roblox or typetorch.dev sign-in. */

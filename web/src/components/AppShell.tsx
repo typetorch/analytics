@@ -3,7 +3,7 @@
  * (page title, server status, theme) and the shared filter bar on top.
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { LogOut, Menu, Monitor, Moon, Sun } from "lucide-react";
+import { LayoutDashboard, LogOut, Menu, Monitor, Moon, Sun } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router";
 import { cn } from "cn";
@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
-import { isReadOnly, userLabel, useAuth } from "@/lib/auth";
+import { dashboardUrl, isReadOnly, userLabel, useAuth } from "@/lib/auth";
 import { FILTER_KEYS } from "@/lib/filters";
 import { fmtInt } from "@/lib/format";
 import { findNavItem } from "@/lib/nav";
@@ -98,6 +98,19 @@ function UserMenu() {
 				</Button>
 			) : null}
 		</div>
+	);
+}
+
+/** The TypeTorch Dashboard (typetorch.dev), when the backend has Sign in with typetorch.dev on: an icon in the header. */
+function DashboardLink() {
+	const href = dashboardUrl(useAuth()?.dashboard);
+	if (!href) return null;
+	return (
+		<Button asChild variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground">
+			<a href={href} rel="noopener" aria-label="TypeTorch Dashboard" title="TypeTorch Dashboard">
+				<LayoutDashboard />
+			</a>
+		</Button>
 	);
 }
 
@@ -187,6 +200,7 @@ export function AppShell() {
 						<div className="flex min-w-0 shrink items-center gap-3">
 							<FindPlayer />
 							<ServerStatus />
+							<DashboardLink />
 							<ThemeToggle />
 						</div>
 					</div>

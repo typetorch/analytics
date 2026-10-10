@@ -107,7 +107,7 @@ function Devices() {
 export function CentralLoginSection({ info }: { info: CentralLoginInfo | undefined }) {
 	const on = Boolean(info?.on);
 	return (
-		<Section title="Sign in with typetorch.dev" description="One Roblox sign-in on typetorch.dev for every backend. Set in the environment (TYPETORCH_CENTRAL_LOGIN).">
+		<Section title="Sign in with typetorch.dev" description="One Roblox sign-in on typetorch.dev for every backend. On by default with an https TYPETORCH_PUBLIC_URL; TYPETORCH_CENTRAL_LOGIN=off turns it off (environment only).">
 			<div className="space-y-3" data-central-login={on ? "on" : "off"}>
 				<div className="flex flex-wrap items-center gap-2 text-sm">
 					<Badge variant={on ? "default" : "outline"}>{on ? "On" : "Off"}</Badge>

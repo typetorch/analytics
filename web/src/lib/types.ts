@@ -892,14 +892,18 @@ export interface AuthInfo {
 	via: "bearer" | "cookie";
 	user?: AuthUser;
 	version?: string;
+	/** The TypeTorch Dashboard (the typetorch.dev broker's origin), while Sign in with typetorch.dev is on. */
+	dashboard?: string;
 }
 
 /** Which logins the backend offers (the body of a 401 from the auth check). */
 export interface LoginOptions {
 	token: boolean;
 	roblox: boolean;
-	/** Sign in with typetorch.dev (the backend's TYPETORCH_CENTRAL_LOGIN=on). */
+	/** Sign in with typetorch.dev (on unless the backend sets TYPETORCH_CENTRAL_LOGIN=off). */
 	typetorch?: boolean;
+	/** The TypeTorch Dashboard (the typetorch.dev broker's origin), while Sign in with typetorch.dev is on. */
+	dashboard?: string;
 }
 
 /** A browser blessed for full admin through typetorch.dev (GET /v1/admin/devices). */

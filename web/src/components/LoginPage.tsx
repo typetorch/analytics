@@ -2,7 +2,7 @@
  * The login page: Sign in with Roblox (owners, and read-only viewers) first, Sign in with typetorch.dev when the backend
  * turns it on, the admin token last (hidden when the backend turns it off).
  */
-import { Globe, KeyRound, LogIn } from "lucide-react";
+import { Globe, KeyRound, LayoutDashboard, LogIn } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -86,6 +86,14 @@ export function LoginPage({ options, initialError, onSignedIn }: { options: Logi
 								Sign in with typetorch.dev
 							</a>
 						</Button>
+					) : null}
+					{options.typetorch && options.dashboard ? (
+						<div className="text-center">
+							<a href={options.dashboard} rel="noopener" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
+								<LayoutDashboard className="size-3.5" aria-hidden />
+								TypeTorch Dashboard
+							</a>
+						</div>
 					) : null}
 					{(options.roblox || options.typetorch) && options.token ? <div className="text-center text-xs text-muted-foreground">or</div> : null}
 					{options.token ? (
