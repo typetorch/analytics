@@ -392,6 +392,9 @@ Roblox are untouched by it. While it is on, the explorer shows a **TypeTorch Das
   The device cookie `tt_device` (`HttpOnly`, `SameSite=Lax`, `Secure` over https, 180 days) holds a random secret whose hash
   is in `<data dir>/devices.json`; it rotates on every login. The Settings page lists trusted browsers; revoking one ends
   the admin sessions it opened. A browser trusted with the admin token stops counting when the token changes.
+  Trusting a browser where a listed owner is signed in read-only through typetorch.dev (that browser's own session
+  cookie) upgrades that session to admin in place, with a new session id, as a fresh login would; viewers and sessions
+  in other browsers are never upgraded. The explorer re-checks on focus, so an open page picks it up.
 
 To try it locally against a broker on `http://127.0.0.1:8788` (typetorch/dash, `bun run dev` and `bun run fake-roblox`):
 `TYPETORCH_CENTRAL_LOGIN_ISSUER=http://127.0.0.1:8788 bun run local -- --game ../template`
@@ -447,11 +450,11 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting does not upgrade that session, the owner signs in again); `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
 | `GET /auth/typetorch/start`, `/callback` | open (rate limited, lockout) | [Sign in with typetorch.dev](#sign-in-with-typetorchdev); 404 while `TYPETORCH_CENTRAL_LOGIN` is off (so are the next rows) |
-| `POST /auth/device` | open: the admin token in the body, `X-TypeTorch` header | trusts this browser (device cookie) |
+| `POST /auth/device` | open: the admin token in the body, `X-TypeTorch` header | trusts this browser (device cookie); `{ ok, blessed, upgraded? }`: `upgraded` when this browser's owner read-only typetorch.dev session became admin (new session cookie) |
 | `GET /auth/bless/challenge`, `GET /auth/bless` | open (rate limited, lockout) | the CLI's signed trust link |
 | `GET /api/typetorch/challenge/<token>` | open (rate limited) | the origin challenge, only while a report is pending |
 | `GET /v1/admin/devices`, `DELETE /v1/admin/devices/<id>` | admin | trusted browsers; revoking ends their admin sessions |

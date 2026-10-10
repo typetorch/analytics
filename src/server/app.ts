@@ -940,7 +940,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	 * `untrustedOwner`: this read-only session is a listed owner's, signed in with typetorch.dev on a browser that was never
 	 * blessed, so the explorer can say why and offer "Trust this browser". Never for a viewer. `trustWithToken`: whether
 	 * POST /auth/device takes the admin token here (the token login is on); otherwise `typetorch backend bless`. Nothing is
-	 * granted by it: after blessing, the owner signs in again and the callback decides the role.
+	 * granted by the flag itself: blessing this browser (either way) upgrades this session to admin in place.
 	 */
 	function untrustedOwner(principal: Principal): { untrustedOwner?: true; trustWithToken?: boolean } {
 		if (!central || principal.role !== "web" || principal.via !== "cookie") return {};
@@ -1094,6 +1094,26 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return redirect("/", [...cookies, sessionCookie(req, id)]);
 	}
 
+	/**
+	 * After a bless succeeds in a browser: when that same browser (its own session cookie) holds an owner's read-only
+	 * typetorch.dev session, upgrade it to admin as a fresh login would. The bless proved the admin token or the game's
+	 * signing key; the owner list is checked now. The old session id ends and a new one is issued (no fixation). Viewers,
+	 * token and per-game Roblox sessions, and sessions of other browsers are never touched. Returns the new session cookie.
+	 */
+	function upgradeBlessedSession(req: Request, deviceValue: string, ip: string): string | undefined {
+		const found = auth.cookieSession(req);
+		if (!found) return undefined;
+		const { session, cookie } = found;
+		const user = session.user;
+		if (session.role !== "web" || user.kind !== "roblox" || user.login !== "typetorch.dev") return undefined;
+		if (auth.roleOfRobloxUser(user.userId) !== "admin") return undefined;
+		const deviceId = deviceValue.slice(0, deviceValue.indexOf("."));
+		sessions.destroy(cookie);
+		const id = sessions.create(user, "admin", undefined, deviceId);
+		log(`login: typetorch.dev user ${user.userId} upgraded to admin by blessing this browser from ${ip}`);
+		return sessionCookie(req, id);
+	}
+
 	/** POST /auth/device { token }: the admin token once on this browser blesses it (sets the device cookie). */
 	async function blessWithToken(req: Request, ip: string): Promise<Response> {
 		if (!central) return centralOff();
@@ -1121,7 +1141,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const agent = agentLabel(req.headers.get("user-agent"));
 		const value = central.devices.bless("admin token", { tokenHash: adminTokenHash, ...(agent ? { agent } : {}) });
 		log(`device blessed with the admin token from ${ip}`);
-		return json(200, { ok: true, blessed: true }, { "set-cookie": deviceCookie(req, value) });
+		const upgraded = upgradeBlessedSession(req, value, ip);
+		const res = json(200, { ok: true, blessed: true, ...(upgraded ? { upgraded: true } : {}) }, { "set-cookie": deviceCookie(req, value) });
+		if (upgraded) res.headers.append("set-cookie", upgraded);
+		return res;
 	}
 
 	/** GET /auth/bless/challenge: a one-time challenge for `typetorch backend bless` to sign with the game's signing key. */
@@ -1148,7 +1171,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const agent = agentLabel(req.headers.get("user-agent"));
 		const value = central.devices.bless("signing key", agent ? { agent } : {});
 		log(`device blessed with a signed link from ${ip}`);
-		return redirect("/?blessed=1", [deviceCookie(req, value)]);
+		const upgraded = upgradeBlessedSession(req, value, ip);
+		return redirect("/?blessed=1", [deviceCookie(req, value), ...(upgraded ? [upgraded] : [])]);
 	}
 
 	/** GET /api/typetorch/challenge/<token>: the origin challenge, answered only while a report is pending. */

@@ -309,31 +309,72 @@ describe("Sign in with typetorch.dev", () => {
 		expect(h.logs.some((l) => l.includes(`login: typetorch.dev user ${OWNER} role web`))).toBe(true);
 	});
 
-	test("the check tells an owner on an unblessed browser so (untrustedOwner); blessing never upgrades that session, signing in again does", async () => {
+	test("the check tells an owner on an unblessed browser so (untrustedOwner); blessing that browser upgrades its session in place", async () => {
 		const r = await c.login();
+		// The same owner signed in on another browser (read-only too), and a viewer.
+		const elsewhere = await c.login();
+		const viewer = await c.login({ sub: VIEWER });
+		const post = (session: string | undefined, token: string, origin = PUBLIC) => h.call("/auth/device", { method: "POST", ip: c.freshIp(), ...json({ token }), headers: { "content-type": "application/json", cookie: session as string, ...XT, origin } });
 		const check = await asJson(await h.call("/v1/auth/check", { headers: { cookie: r.session as string } }));
 		expect(check.role).toBe("web");
 		expect(check.untrustedOwner).toBe(true);
 		expect(check.trustWithToken).toBe(true);
+		// A foreign Origin is refused, and upgrades nothing; nor does a wrong token.
+		expect((await post(r.session, ADMIN, "https://evil.example")).status).toBe(403);
+		expect((await post(r.session, "not-the-admin-token-0123456789abcdef")).status).toBe(401);
+		expect(await role(r.session)).toBe("web");
 		// The admin token on the bless route, from this read-only session (X-TypeTorch + Origin like every cookie write).
-		const ip = c.freshIp();
-		const blessed = await h.call("/auth/device", { method: "POST", ip, ...json({ token: ADMIN }), headers: { "content-type": "application/json", cookie: r.session as string, ...XT, origin: PUBLIC } });
+		const blessed = await post(r.session, ADMIN);
 		expect(blessed.status).toBe(200);
-		expect(JSON.stringify(await asJson(blessed))).not.toContain(ADMIN);
+		const body = await asJson(blessed);
+		expect(body).toEqual({ ok: true, blessed: true, upgraded: true });
 		const device = c.cookieValue(blessed, "tt_device")?.split(";")[0] as string;
 		expect(device).toBeDefined();
-		// A foreign Origin is refused.
-		expect((await h.call("/auth/device", { method: "POST", ip: c.freshIp(), ...json({ token: ADMIN }), headers: { "content-type": "application/json", cookie: r.session as string, ...XT, origin: "https://evil.example" } })).status).toBe(403);
-		// The session it was sent from stays read-only (no upgrade without a new login).
-		expect(await role(r.session)).toBe("web");
-		// Signing in again on the now-trusted browser: admin, and the flag is gone.
-		const again = await c.login({}, { device });
-		const after = await asJson(await h.call("/v1/auth/check", { headers: { cookie: again.session as string } }));
+		const set = c.cookieValue(blessed, "tt_session") as string;
+		expect(set).toContain("HttpOnly");
+		expect(set).toContain("SameSite=Strict");
+		const upgraded = set.split(";")[0] as string;
+		// The session id rotated: the old one is gone, the new one is admin and no longer flagged.
+		expect(upgraded).not.toBe(r.session);
+		expect(await role(r.session)).toBeUndefined();
+		const after = await asJson(await h.call("/v1/auth/check", { headers: { cookie: upgraded } }));
 		expect(after.role).toBe("admin");
+		expect(after.user).toMatchObject({ kind: "roblox", userId: OWNER, login: "typetorch.dev" });
 		expect(after.untrustedOwner).toBeUndefined();
 		expect(after.trustWithToken).toBeUndefined();
-		// The admin token itself (Bearer) never carries it.
+		expect(h.logs.some((l) => l.includes(`typetorch.dev user ${OWNER} upgraded to admin`))).toBe(true);
+		const logs = h.logs.join("\n");
+		expect(logs).not.toContain(upgraded.slice("tt_session=".length));
+		expect(logs).not.toContain(ADMIN);
+		// The owner's session on the other browser stays read-only.
+		expect(await role(elsewhere.session)).toBe("web");
+		// A viewer who blesses with the admin token: the device is blessed, the viewer's session stays read-only.
+		const fromViewer = await post(viewer.session, ADMIN);
+		expect(fromViewer.status).toBe(200);
+		expect(await asJson(fromViewer)).toEqual({ ok: true, blessed: true });
+		expect(c.cookieValue(fromViewer, "tt_session")).toBeUndefined();
+		expect(await role(viewer.session)).toBe("web");
+		// The upgraded session is tied to the device it was blessed with: revoking that device ends it.
+		const here = ((await asJson(await h.call("/v1/admin/devices", { headers: { cookie: `${upgraded}; ${device}` } }))).devices as { id: string; current?: boolean }[]).find((d) => d.current) as { id: string };
+		expect(here).toBeDefined();
+		expect((await asJson(await h.call(`/v1/admin/devices/${here.id}`, { method: "DELETE", headers: bearer(ADMIN) }))).sessionsEnded).toBe(1);
+		expect(await role(upgraded)).toBeUndefined();
+		// The admin token itself (Bearer) never carries the flag.
 		expect((await asJson(await h.call("/v1/auth/check", { headers: bearer(ADMIN) }))).untrustedOwner).toBeUndefined();
+	});
+
+	test("an owner taken off the list is not upgraded by a bless (the list is checked at bless time)", async () => {
+		const r = await c.login();
+		expect(await role(r.session)).toBe("web");
+		expect((await h.call("/v1/access", { method: "PUT", ...json({ seq: 2, owners: [] }), headers: { "content-type": "application/json", ...bearer(ADMIN) } })).status).toBe(200);
+		try {
+			const blessed = await h.call("/auth/device", { method: "POST", ip: c.freshIp(), ...json({ token: ADMIN }), headers: { "content-type": "application/json", cookie: r.session as string, ...XT, origin: PUBLIC } });
+			expect(blessed.status).toBe(200);
+			expect(c.cookieValue(blessed, "tt_session")).toBeUndefined();
+			expect(await role(r.session)).toBeUndefined();
+		} finally {
+			expect((await h.call("/v1/access", { method: "PUT", ...json({ seq: 3, owners: [OWNER] }), headers: { "content-type": "application/json", ...bearer(ADMIN) } })).status).toBe(200);
+		}
 	});
 
 	test("an owner on a device blessed with the admin token gets admin; the device cookie rotates on every use", async () => {
@@ -914,6 +955,34 @@ describe("Sign in with typetorch.dev: blessing with the CLI's signed link", () =
 			expect(device).toBeDefined();
 			// Single use.
 			expect((await h.call(link(three.challenge), { ip: "10.40.0.2" })).headers.get("location")).toBe("/?login_error=bless");
+			// The CLI's link pasted into a browser where the owner is signed in read-only: that session becomes admin
+			// (a new id); the owner's session in another browser and a viewer's session stay read-only.
+			const roleOf = async (cookie: string | undefined) => (await asJson(await h.call("/v1/auth/check", { headers: cookie ? { cookie } : {} }))).role as string | undefined;
+			const owner = await c.login();
+			const otherBrowser = await c.login();
+			const viewer = await c.login({ sub: VIEWER });
+			expect(await roleOf(owner.session)).toBe("web");
+			const four = await challenge();
+			const pasted = await h.call(link(four.challenge), { ip: "10.40.0.3", headers: { cookie: owner.session as string } });
+			expect(pasted.headers.get("location")).toBe("/?blessed=1");
+			const setSession = pasted.headers.getSetCookie().find((x) => x.startsWith("tt_session="));
+			expect(setSession).toContain("SameSite=Strict");
+			const upgraded = setSession?.split(";")[0] as string;
+			expect(upgraded).not.toBe(owner.session);
+			expect(await roleOf(owner.session)).toBeUndefined();
+			expect(await roleOf(upgraded)).toBe("admin");
+			expect(await roleOf(otherBrowser.session)).toBe("web");
+			const five = await challenge();
+			const fromViewer = await h.call(link(five.challenge), { ip: "10.40.0.4", headers: { cookie: viewer.session as string } });
+			expect(fromViewer.headers.get("location")).toBe("/?blessed=1");
+			expect(fromViewer.headers.getSetCookie().some((x) => x.startsWith("tt_session="))).toBe(false);
+			expect(await roleOf(viewer.session)).toBe("web");
+			// A bad link upgrades nothing.
+			const six = await challenge();
+			const bad = await h.call(link(six.challenge, other), { ip: "10.40.0.5", headers: { cookie: otherBrowser.session as string } });
+			expect(bad.headers.get("location")).toBe("/?login_error=bless");
+			expect(bad.headers.getSetCookie().some((x) => x.startsWith("tt_session="))).toBe(false);
+			expect(await roleOf(otherBrowser.session)).toBe("web");
 			const r = await c.login({}, { device });
 			expect((await asJson(await h.call("/v1/auth/check", { headers: { cookie: r.session as string } }))).role).toBe("admin");
 			const list = await asJson(await h.call("/v1/admin/devices", { headers: { cookie: r.session as string } }));
