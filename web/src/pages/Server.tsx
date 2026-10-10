@@ -12,6 +12,7 @@ import { ArrowLeft } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ErrorState, KeyValue, LoadingBlock, PageHeader, Section } from "@/components/common";
+import { HealthBadge, ReasonList, reasonLines } from "@/components/HealthReasons";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -105,12 +106,18 @@ function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServ
 					</KeyValue>
 					<KeyValue label="Up">{uptime !== undefined && uptime >= 0 ? fmtDuration(uptime) : "–"}</KeyValue>
 					<KeyValue label="Health">
-						<span title={s.lastError ?? undefined}>{s.health ?? "unknown"}</span>
+						<HealthBadge server={s} />
 					</KeyValue>
 					<KeyValue label="Place version">{placeVersion ?? "–"}</KeyValue>
 					<KeyValue label="Last heartbeat">{fmtAgo(s.lastSeen)}</KeyValue>
 					<KeyValue label="Type">{s.serverType ?? "–"}</KeyValue>
 				</div>
+			) : null}
+			{s && reasonLines(s).length ? (
+				<section aria-label="Why this server needs a look" className="space-y-1">
+					<div className="text-xs font-medium text-muted-foreground">Why it is {s.health && s.health !== "ok" ? s.health : "flagged"}</div>
+					<ReasonList lines={reasonLines(s)} />
+				</section>
 			) : null}
 		</>
 	);

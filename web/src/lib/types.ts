@@ -482,6 +482,18 @@ export interface FleetServer {
 	physFps?: number | null;
 	memMb?: number | null;
 	luaMb?: number | null;
+	/** Why the server needs a look (backend fleet/health.ts); empty or missing when nothing tripped. */
+	reasons?: HealthReason[];
+}
+
+/** One signal behind a server's health: its reading and the line it crossed. */
+export interface HealthReason {
+	signal: "health" | "tps" | "memory" | "heartbeat";
+	label: string;
+	value: number | string;
+	threshold: number | string;
+	unit: string | null;
+	op: "<" | ">" | "!=";
 }
 
 /** Kernel 0.4.0 `bu`: ds DataStore (r read, w write, lr/lw limits, br/bw budget left), ms MemoryStore units, h HTTP, mg MessagingService, by per caller, mem MB. */

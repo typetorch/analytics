@@ -3,7 +3,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DataTable } from "@/components/data-table";
-import type { FleetServer } from "@/lib/types";
+import { reasonLines, reasonText } from "@/components/HealthReasons";
+import type { FleetServer, HealthReason } from "@/lib/types";
 import { budgetPressure, budgetText, memoryHigh, SERVER_COLUMNS, tpsLow, tpsText } from "./Fleet";
 
 beforeAll(() => {
@@ -104,6 +105,31 @@ describe("the fleet servers table", () => {
 		expect(screen.getByTitle(/average 12\.0, slowest second 3\.5, physics 20 FPS \(under 50\)/)).toBeTruthy();
 		expect(screen.getByTitle(/Total 3,203 MB, Lua heap \? \(over 3,000 MB\)/)).toBeTruthy();
 		expect(screen.getByTitle(/Total 812 MB, Lua heap 140\.5 MB$/)).toBeTruthy();
+	});
+
+	it("the Health badge of a server with reasons opens them; a healthy one is plain text", async () => {
+		const reasons: HealthReason[] = [
+			{ signal: "health", label: "Kernel health", value: "degraded", threshold: "ok", unit: null, op: "!=" },
+			{ signal: "memory", label: "Memory", value: 3400, threshold: 3000, unit: "MB", op: ">" },
+		];
+		mount([server("job-a"), server("job-c", { health: "degraded", lastError: "boom", reasons })]);
+		expect(screen.queryByRole("button", { name: /^ok:/ })).toBeNull();
+		const badge = screen.getByRole("button", { name: "degraded: 3 reasons, show why" });
+		expect(badge.getAttribute("title")).toBe(["Kernel health degraded", "Memory 3,400 MB, over 3,000 MB", "Last error: boom"].join("\n"));
+		fireEvent.click(badge);
+		expect(await screen.findByText("Memory 3,400 MB, over 3,000 MB")).toBeTruthy();
+		expect(screen.getByText("Last error: boom")).toBeTruthy();
+	});
+
+	it("words each signal plainly with its reading and line", () => {
+		expect(reasonText({ signal: "tps", label: "TPS", value: 31.2, threshold: 50, unit: "TPS", op: "<" })).toBe("TPS 31.2, under 50");
+		expect(reasonText({ signal: "memory", label: "Memory", value: 3001, threshold: 3000, unit: "MB", op: ">" })).toBe("Memory 3,001 MB, over 3,000 MB");
+		expect(reasonText({ signal: "heartbeat", label: "Heartbeat age", value: 80, threshold: 75, unit: "s", op: ">" })).toBe("Last heartbeat 80 s ago, over 75 s");
+		expect(reasonText({ signal: "health", label: "Kernel health", value: "failed", threshold: "ok", unit: null, op: "!=" })).toBe("Kernel health failed");
+		// The last error only explains the kernel's health; a healthy row has no lines.
+		expect(reasonLines({ reasons: [{ signal: "tps", label: "TPS", value: 40, threshold: 50, unit: "TPS", op: "<" }], lastError: "old" })).toEqual(["TPS 40, under 50"]);
+		expect(reasonLines({ reasons: [], lastError: null })).toEqual([]);
+		expect(reasonLines({ lastError: null })).toEqual([]);
 	});
 
 	it("puts the worst health first on the first click, and sorts 'Seen' by the heartbeat time", () => {

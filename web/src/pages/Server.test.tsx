@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
-import type { FleetServer, FleetServerDetail, RemoteCommand, RemoteOp } from "@/lib/types";
+import type { FleetServer, FleetServerDetail, HealthReason, RemoteCommand, RemoteOp } from "@/lib/types";
 import ServerPage, { CONNECTING_TEXT, WAKING_TEXT } from "./Server";
 
 beforeAll(() => {
@@ -172,6 +172,27 @@ describe("the server page", () => {
 		expect(await screen.findByLabelText("Server TPS over the last 60 minutes")).toBeTruthy();
 		expect(watchServer).not.toHaveBeenCalled();
 		expect(remoteCommand).not.toHaveBeenCalled();
+	});
+
+	it("lists why a degraded server needs a look: each signal, its reading and its line, and the last error", async () => {
+		const reasons: HealthReason[] = [
+			{ signal: "health", label: "Kernel health", value: "degraded", threshold: "ok", unit: null, op: "!=" },
+			{ signal: "tps", label: "TPS", value: 42.5, threshold: 50, unit: "TPS", op: "<" },
+		];
+		mockApi(detail({ server: { ...row, health: "degraded", lastError: "boom at Round:42", reasons } }));
+		mount();
+		const list = await screen.findByRole("region", { name: "Why this server needs a look" });
+		expect(list.textContent).toContain("Why it is degraded");
+		expect(within(list).getByText("Kernel health degraded")).toBeTruthy();
+		expect(within(list).getByText("TPS 42.5, under 50")).toBeTruthy();
+		expect(within(list).getByText("Last error: boom at Round:42")).toBeTruthy();
+	});
+
+	it("a healthy server has no reasons list", async () => {
+		mockApi(detail({ server: { ...row, reasons: [] } }));
+		mount();
+		expect(await screen.findByText("Server 0b5c7d…789abc")).toBeTruthy();
+		expect(screen.queryByRole("region", { name: "Why this server needs a look" })).toBeNull();
 	});
 
 	it("an unknown JobId says there is nothing to debug", async () => {

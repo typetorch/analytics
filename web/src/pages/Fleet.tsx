@@ -5,6 +5,7 @@ import { EmptyState, KeyValue, Metric, PageHeader, QueryState, Section } from "@
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { HealthBadge } from "@/components/HealthReasons";
 import { api } from "@/lib/api";
 import { fmtAgo, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
@@ -25,7 +26,6 @@ const LEVEL_TONE: Record<string, string> = {
 	warning: "bg-[var(--status-warning)]",
 	info: "bg-muted-foreground",
 };
-const HEALTH_TONE: Record<string, string> = { ok: "bg-[var(--status-good)]", degraded: "bg-[var(--status-warning)]", failing: "bg-[var(--status-critical)]" };
 
 /** A colored dot plus its word (color never carries the meaning alone). */
 function Status({ tone, children }: { tone?: string; children: string }) {
@@ -92,9 +92,9 @@ export function budgetText(b: ServerBudget | null | undefined): string {
 	return parts.length ? parts.join(" · ") : "–";
 }
 
-/** Below this TPS a server runs slow (a healthy one runs at 60). The dev menu's Server > Status uses the same line. */
+/** Below this TPS a server runs slow (a healthy one runs at 60). The dev menu's Server > Status and the backend's fleet/health.ts (the Health reasons) use the same line. */
 export const LOW_TPS = 50;
-/** Above this total memory (MB) a server is in trouble; the dev menu's "High memory" issue uses the same line. */
+/** Above this total memory (MB) a server is in trouble; the dev menu's "High memory" issue and the backend's fleet/health.ts use the same line. */
 export const HIGH_MEMORY_MB = 3000;
 
 const known = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
@@ -199,15 +199,11 @@ export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
 		id: "health",
 		header: "Health",
 		type: "enum",
-		order: ["ok", "degraded", "failing"],
-		options: ["ok", "degraded", "failing"],
+		order: ["ok", "unverified", "degraded", "failed", "failing"],
+		options: ["ok", "unverified", "degraded", "failed"],
 		firstSort: "desc",
 		accessor: (s) => s.health ?? "unknown",
-		cell: (s) => (
-			<span title={s.lastError ?? undefined}>
-				<Status tone={HEALTH_TONE[s.health ?? ""]}>{s.health ?? "unknown"}</Status>
-			</span>
-		),
+		cell: (s) => <HealthBadge server={s} />,
 	},
 	// Kernel 0.4.2: TPS (average / slowest second since the previous heartbeat; sorts by the average, slowest first) and
 	// memory; older kernels have none ("–", sorted last).
