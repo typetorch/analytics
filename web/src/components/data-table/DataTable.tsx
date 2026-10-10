@@ -87,6 +87,8 @@ export interface DataTableProps<T> {
 	search?: boolean | "auto";
 	/** Extra controls at the left of the toolbar. */
 	toolbar?: ReactNode;
+	/** Extra items in the Columns menu, under the column checkboxes (e.g. "Add funnel"). Mounted only while the menu is open. */
+	columnsMenu?: ReactNode;
 	/** Makes rows clickable (and focusable: Enter or Space). Clicks on links and buttons inside a row don't count. */
 	onRowClick?: (row: T) => void;
 	isRowSelected?: (row: T) => boolean;
@@ -156,6 +158,7 @@ function TableImpl<T>({
 	maxHeight = "70vh",
 	search: searchMode = "auto",
 	toolbar,
+	columnsMenu,
 	onRowClick,
 	isRowSelected,
 	rowClassName,
@@ -333,7 +336,7 @@ function TableImpl<T>({
 					<span role="status" aria-live="polite" className="text-xs text-muted-foreground tabular-nums">
 						{notice || (filtered && !loading ? `${fmtInt(shown)} of ${fmtInt(total)} rows` : loading ? "Loading" : `${fmtInt(total)} row${total === 1 ? "" : "s"}`)}
 					</span>
-					{hideable.length ? (
+					{hideable.length || columnsMenu ? (
 						<DropdownMenu>
 							<DropdownMenuTrigger asChild>
 								<Button variant="outline" size="sm" aria-label="Columns">
@@ -352,6 +355,12 @@ function TableImpl<T>({
 										</DropdownMenuCheckboxItem>
 									);
 								})}
+								{columnsMenu ? (
+									<>
+										<DropdownMenuSeparator />
+										{columnsMenu}
+									</>
+								) : null}
 								<DropdownMenuSeparator />
 								<DropdownMenuItem
 									onSelect={(e) => {

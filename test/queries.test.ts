@@ -186,6 +186,32 @@ describe("funnel", () => {
 	});
 });
 
+describe("funnel-progress", () => {
+	test("each player's furthest step as a share of the funnel's steps", async () => {
+		const max = new Map<string, number>();
+		for (const e of inRange(30).filter((e) => e.kind === "funnel")) max.set(e.pid as string, Math.max(max.get(e.pid as string) ?? 0, JSON.parse(e.props as string).i));
+		const pids = [...max.keys()].slice(0, 20);
+		const r = await store.query("funnel-progress", {}, { pids: [...pids, "nobody-at-all"] });
+		expect(r.funnels.map((f) => f.name)).toEqual(["onboarding"]);
+		expect(r.funnels[0].steps.map((s) => s.label)).toEqual(["spawned", "moved", "opened_shop", "bought_item", "joined_round"]);
+		expect(r.progress.map((p) => p.pid).sort()).toEqual([...pids].sort());
+		for (const p of r.progress) {
+			expect(p.step).toBe(max.get(p.pid) as number);
+			expect(p.of).toBe(5);
+			expect(p.reached).toBe(p.step);
+			expect(p.share).toBe(p.step / 5);
+		}
+		const one = await store.query("funnel-progress", {}, { funnel: "onboarding", pids: [pids[0]] });
+		expect(one.progress).toHaveLength(1);
+		expect((await store.query("funnel-progress", {}, { funnel: "none_such", pids })).progress).toEqual([]);
+	});
+
+	test("needs pids", async () => {
+		await expect(store.query("funnel-progress", {}, {})).rejects.toThrow(/pids/);
+		await expect(store.query("funnel-progress", {}, { pids: ["bad pid!"] })).rejects.toThrow(/pid/);
+	});
+});
+
 describe("player timeline and graph", () => {
 	const pid = "p0003";
 	const mine = fx.events.filter((e) => e.pid === pid);

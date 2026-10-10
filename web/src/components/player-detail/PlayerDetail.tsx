@@ -1,7 +1,7 @@
 /**
  * The player detail: one container under the Players list. The profile card on top (Roblox headshot and names from the
- * backend, UserId, pid, the range's numbers), the view buttons (Spending, Playtime, Sessions, Timeline), the chosen view
- * below. The view and Chart / Table live in the URL (`view`, `show`), next to the page's pid and filters.
+ * backend, UserId, pid, the range's numbers), its progress in each funnel, the view buttons (Spending, Playtime,
+ * Sessions, Timeline), the chosen view below. The view and Chart / Table live in the URL (`view`, `show`), next to the page's pid and filters.
  */
 import { useQuery } from "@tanstack/react-query";
 import { CalendarDays, Clock, Coins, History, type LucideIcon } from "lucide-react";
@@ -13,6 +13,7 @@ import { Card } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import { describeRange } from "@/lib/filters";
 import { useAnalytics, useFilters } from "@/lib/hooks";
+import { PlayerFunnels } from "./PlayerFunnels";
 import { ProfileCard } from "./ProfileCard";
 import type { Show } from "./SeriesView";
 import { PlaytimeView, SessionsView, SpendingView } from "./StatViews";
@@ -57,6 +58,10 @@ export function PlayerDetail({ pid }: { pid: string }) {
 				<div className="border-b p-4 sm:p-6">
 					<ProfileCard pid={pid} profile={profile} stats={stats.data} statsLoading={stats.isPending} range={describeRange(state)} />
 				</div>
+				<section aria-label="Funnels" className="space-y-2 border-b px-4 py-3 sm:px-6">
+					<h3 className="text-xs font-medium text-muted-foreground">Funnels</h3>
+					<PlayerFunnels pid={pid} />
+				</section>
 				<nav aria-label="Player views" className="border-b p-2 sm:p-3">
 					<div className="grid grid-cols-4 gap-1 rounded-lg bg-muted p-1">
 						{VIEW_BUTTONS.map(({ id, label, icon: Icon }) => (

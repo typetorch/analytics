@@ -172,3 +172,94 @@ export const timeline = defineQuery<TimelineOptions, TimelineResult>({
 		};
 	},
 });
+
+// funnel-progress ---------------------------------------------------------------------------------------------------------
+
+export interface FunnelProgressOptions {
+	/** Only this funnel; without it, every funnel the players logged. */
+	funnel?: string;
+	/** The players to report (at most 500). */
+	pids: string[];
+	stepKey: string;
+	labelKey: string;
+}
+
+export interface FunnelProgress {
+	pid: string;
+	funnel: string;
+	/** The furthest step the player logged. */
+	step: number;
+	label: string | null;
+	/** That step's place among the funnel's steps (1-based) and how many steps the funnel has in the range. */
+	reached: number;
+	of: number;
+	/** reached / of, 0-1. */
+	share: number;
+}
+
+export interface FunnelProgressResult {
+	/** Each funnel's steps (every step anyone logged in the range), in order. */
+	funnels: { name: string; steps: { step: number; label: string | null }[] }[];
+	/** One row per player and funnel they started; a player missing for a funnel never logged a step of it. */
+	progress: FunnelProgress[];
+}
+
+export const funnelProgress = defineQuery<FunnelProgressOptions, FunnelProgressResult>({
+	name: "funnel-progress",
+	summary: "how far given players (pids, at most 500) got in each funnel (or one): furthest step and share of the funnel's steps",
+	defaultDays: 30,
+	options: (input = {}) => {
+		if (!Array.isArray(input.pids) || input.pids.length === 0 || input.pids.length > 500) throw new Error("pids must be a list of 1 to 500 pids");
+		const out: FunnelProgressOptions = {
+			pids: [...new Set(input.pids.map((p) => checkPid(p)))],
+			stepKey: assertSafeKey(input.stepKey ?? PROP_KEYS.funnelStep, "stepKey"),
+			labelKey: assertSafeKey(input.labelKey ?? PROP_KEYS.funnelLabel, "labelKey"),
+		};
+		if (input.funnel !== undefined && input.funnel !== "") out.funnel = assertSafeKey(input.funnel, "funnel");
+		return out;
+	},
+	statements(ctx, f, o) {
+		const d = ctx.dialect;
+		const lim = d.limit;
+		const table = eventsTable(ctx, f);
+		const base =
+			`f AS (SELECT e.name AS name, e.pid AS pid, CAST(${d.jsonNumber("e.props", o.stepKey)} AS BIGINT) AS step, ${d.jsonText("e.props", o.labelKey)} AS label ` +
+			`FROM ${table} e WHERE ${where(f, ctx)} AND e.kind = 'funnel'${o.funnel ? ` AND e.name = ${lit(o.funnel)}` : ""} AND e.pid IS NOT NULL AND e.pid <> '')`;
+		const mine = `pid IN (${o.pids.map(lit).join(", ")})`;
+		// Only the funnels these players started, so a long list of funnels doesn't cost a scan of each.
+		const started = o.funnel ? "" : ` AND name IN (SELECT DISTINCT name FROM f WHERE ${mine})`;
+		return {
+			steps: `WITH ${base} SELECT name, step, label, COUNT(*) AS n FROM f WHERE step IS NOT NULL${started} GROUP BY name, step, label ORDER BY name, step, n DESC ${lim(10_000)}`,
+			players: `WITH ${base} SELECT pid, name, MAX(step) AS maxstep FROM f WHERE step IS NOT NULL AND ${mine} GROUP BY pid, name ORDER BY pid, name ${lim(50_000)}`,
+		};
+	},
+	shape(rows) {
+		const funnels = new Map<string, Map<number, string | null>>();
+		for (const r of rows.steps) {
+			const name = str(r.name);
+			const steps = funnels.get(name) ?? new Map<number, string | null>();
+			funnels.set(name, steps);
+			const step = num(r.step);
+			const label = strOrNull(r.label);
+			// Rows come most-logged label first; a step keeps its first non-null label.
+			if (!steps.has(step) || (steps.get(step) === null && label !== null)) steps.set(step, label);
+		}
+		const ordered = new Map<string, { step: number; label: string | null }[]>();
+		for (const [name, steps] of [...funnels].sort(([a], [b]) => a.localeCompare(b))) {
+			ordered.set(
+				name,
+				[...steps].sort(([a], [b]) => a - b).map(([step, label]) => ({ step, label })),
+			);
+		}
+		const progress: FunnelProgress[] = [];
+		for (const r of rows.players) {
+			const steps = ordered.get(str(r.name));
+			if (!steps?.length) continue;
+			const step = num(r.maxstep);
+			const at = steps.findIndex((s) => s.step === step);
+			const reached = at + 1;
+			progress.push({ pid: str(r.pid), funnel: str(r.name), step, label: steps[at]?.label ?? null, reached, of: steps.length, share: ratio(reached, steps.length) });
+		}
+		return { funnels: [...ordered].map(([name, steps]) => ({ name, steps })), progress };
+	},
+});
