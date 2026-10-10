@@ -961,6 +961,8 @@ export interface ErrorList {
 	kinds: ErrorKind[];
 	totals: { count: number; kinds: number; players: number };
 	more: number;
+	/** Builds (artifact ids) with errors in the window under the other filters, most recently seen first. */
+	builds?: { build: string; n: number; lastAt: string }[];
 }
 
 export interface ErrorDetail {

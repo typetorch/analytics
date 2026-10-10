@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sparkPaths } from "@/components/Sparkline";
 import { api } from "@/lib/api";
 import type { ErrorDetail, ErrorList } from "@/lib/types";
-import Errors, { bucketLabel } from "./Errors";
+import Errors, { artifactOptions, bucketLabel } from "./Errors";
 
 beforeAll(() => {
 	// recharts measures its container.
@@ -59,11 +59,11 @@ const detail: ErrorDetail = {
 	byRealm: [{ realm: "server", n: 12 }],
 };
 
-function mount() {
+function mount(path = "/errors") {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	return render(
 		<QueryClientProvider client={client}>
-			<MemoryRouter initialEntries={["/errors"]}>
+			<MemoryRouter initialEntries={[path]}>
 				<Errors />
 			</MemoryRouter>
 		</QueryClientProvider>,
@@ -94,6 +94,22 @@ describe("Errors page", () => {
 		expect(kind).toHaveBeenCalledWith("fp-boom", expect.objectContaining({ window: "24h" }), expect.anything());
 	});
 
+	it("filters by artifact from the URL, together with the other filters, and shows the choice", async () => {
+		const errors = vi.spyOn(api, "errors").mockResolvedValue({ ...list, builds: [{ build: "b2-000043", n: 2, lastAt: "2026-10-09T11:59:00.000Z" }, { build: "a1b2c3d-000042", n: 11, lastAt: "2026-10-09T11:58:00.000Z" }] });
+		mount("/errors?build=a1b2c3d-000042&realm=server&window=6h");
+		expect(await screen.findByText("Script <player.name> failed: attempt to index nil")).toBeTruthy();
+		expect(errors).toHaveBeenCalledWith(expect.objectContaining({ window: "6h", realm: "server", build: "a1b2c3d-000042", limit: 200 }), expect.anything());
+		expect(screen.getByRole("combobox", { name: "Artifact" }).textContent).toContain("a1b2c3d-000042");
+	});
+
+	it("without an artifact chosen the select says any and the request has no build", async () => {
+		const errors = vi.spyOn(api, "errors").mockResolvedValue(list);
+		mount();
+		expect(await screen.findByText("HTTP 429 from <url>")).toBeTruthy();
+		expect(errors.mock.calls[0]![0]).not.toHaveProperty("build");
+		expect(screen.getByRole("combobox", { name: "Artifact" }).textContent).toContain("Any artifact");
+	});
+
 	it("says so when there are no errors", async () => {
 		vi.spyOn(api, "errors").mockResolvedValue({ ...list, kinds: [], totals: { count: 0, kinds: 0, players: 0 } });
 		mount();
@@ -104,6 +120,16 @@ describe("Errors page", () => {
 		vi.spyOn(api, "errors").mockRejectedValue(new Error("the backend is not answering"));
 		mount();
 		expect(await screen.findByText("the backend is not answering")).toBeTruthy();
+	});
+});
+
+describe("artifact options", () => {
+	it("keeps the backend's order (most recent first) and adds a chosen artifact the window no longer has", () => {
+		const builds = [{ build: "new" }, { build: "old" }];
+		expect(artifactOptions(builds, "")).toEqual(["new", "old"]);
+		expect(artifactOptions(builds, "old")).toEqual(["new", "old"]);
+		expect(artifactOptions(builds, "gone")).toEqual(["gone", "new", "old"]);
+		expect(artifactOptions(undefined, "")).toEqual([]);
 	});
 });
 

@@ -75,6 +75,16 @@ function TextFilter({ value, onCommit, placeholder, label, className }: { value:
 	);
 }
 
+/**
+ * The artifact filter's choices: the builds the backend saw errors from in the window (most recent first), plus the
+ * current choice when the window no longer has it (a shared link), so the select never shows an empty value.
+ */
+export function artifactOptions(builds: { build: string }[] | undefined, current: string): string[] {
+	const out = (builds ?? []).map((b) => b.build);
+	if (current && !out.includes(current)) out.unshift(current);
+	return out;
+}
+
 /** The error kinds' columns; the trend's label names the bucket size of the window being shown. */
 function kindColumns(bucketSeconds: number): DataColumn<ErrorKind>[] {
 	return [
@@ -213,10 +223,12 @@ export default function Errors() {
 	const [window, setWindow] = useParam("window", "24h");
 	const [realm, setRealm] = useParam("realm");
 	const [branch, setBranch] = useParam("branch");
+	const [build, setBuild] = useParam("build");
 	const [q, setQ] = useParam("q");
 	const [selected, setSelected] = useParam("fp");
-	const params: ErrorParams = { window, ...(realm ? { realm } : {}), ...(branch ? { branch } : {}), ...(q ? { q } : {}) };
+	const params: ErrorParams = { window, ...(realm ? { realm } : {}), ...(branch ? { branch } : {}), ...(build ? { build } : {}), ...(q ? { q } : {}) };
 	const list = useQuery({ queryKey: ["errors", "list", params], queryFn: ({ signal }) => api.errors({ ...params, limit: 200 }, signal), refetchInterval: 30_000 });
+	const artifacts = artifactOptions(list.data?.builds, build);
 	const stream = useErrorStream();
 	const streamTone = stream === "live" ? "bg-[var(--status-good)]" : stream === "retrying" ? "bg-[var(--status-critical)]" : "bg-[var(--status-warning)]";
 	return (
@@ -249,6 +261,19 @@ export default function Errors() {
 							</SelectContent>
 						</Select>
 						<TextFilter value={branch} onCommit={setBranch} placeholder="any branch" label="Branch" />
+						<Select value={build || ANY} onValueChange={(v) => setBuild(v === ANY ? "" : v)}>
+							<SelectTrigger className="h-8 w-48 font-mono text-xs" aria-label="Artifact">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value={ANY}>Any artifact</SelectItem>
+								{artifacts.map((a) => (
+									<SelectItem key={a} value={a} className="font-mono text-xs">
+										{a}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
 						<TextFilter value={q} onCommit={setQ} placeholder="search text" label="Search" className="w-40" />
 						<Status tone={streamTone}>{stream === "live" ? "live" : stream === "retrying" ? "stream lost, retrying" : "connecting"}</Status>
 					</>
