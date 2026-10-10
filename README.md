@@ -767,7 +767,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `top-events` | the most logged names per kind | 7 days |
 | `servers` | game servers from `fleet` heartbeat rows (history; the CLI's live view is the fleet API) | recent |
 | `deployReport` | a deploy's results, errors and servers still below its seq, from `fleet` rows | 2 days |
-| `players` | players seen in the range, most recent first (pid, sessions, events, playtime); `search` = part of a pid | 30 days |
+| `players` | players seen in the range, most recent first or `sort: "robux"` for top spenders (pid, sessions, events, playtime, `robux` = Robux spent: distinct server-sent purchase rows, 0 for none); `search` = part of a pid | 30 days |
 | `values` | the branches, artifacts (newest first), channels and devices seen in the range, for filter pickers | 30 days |
 | `events` | the newest rows, optionally of one `kind` / `name` / `pid` (`limit` up to 1,000); `fleet` rows come without props | 7 days |
 | `benchmarks` | the last `days` (7) vs the `days` before: playtime per daily active user, D1/D7 (counted on the return day, days fully over), payer conversion, ARPPU, after-join play-through (first sessions reaching `qualifiedMinutes`) | ends at `to` |

@@ -5,6 +5,7 @@ import { DataTable, type DataColumn } from "@/components/data-table";
 import { IdentityStatus } from "@/components/Identity";
 import { PlayerDetail } from "@/components/player-detail/PlayerDetail";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
+import { ToggleChip } from "@/components/ToggleChip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,10 +39,16 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 		const timer = setTimeout(() => setSearch(text.trim()), 400);
 		return () => clearTimeout(timer);
 	}, [text]);
+	const [topSpenders, setTopSpenders] = useState(false);
 	const valid = search === "" || PID.test(search);
-	const q = useAnalytics("players", { limit: 100, ...(search ? { search } : {}) }, { enabled: valid });
+	// The server returns 100 players: top spenders asks it for the 100 who spent most, not the 100 most recent re-sorted.
+	const q = useAnalytics("players", { limit: 100, ...(search ? { search } : {}), ...(topSpenders ? { sort: "robux" } : {}) }, { enabled: valid });
 	return (
-		<Section title="Players" description="Most recent first. Search by part of a pid, or by a UserId." contentClassName="space-y-3">
+		<Section
+			title="Players"
+			description={topSpenders ? "Most Robux spent first. Search by part of a pid, or by a UserId." : "Most recent first. Search by part of a pid, or by a UserId."}
+			contentClassName="space-y-3"
+		>
 			<div className="flex gap-2">
 				<div className="relative flex-1">
 					<Search className="pointer-events-none absolute top-2 left-2 size-4 text-muted-foreground" />
@@ -62,6 +69,9 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 						Open
 					</Button>
 				) : null}
+				<ToggleChip pressed={topSpenders} className="h-8" onClick={() => setTopSpenders((v) => !v)}>
+					Top spenders
+				</ToggleChip>
 			</div>
 			{!valid ? <p className="text-xs text-muted-foreground">A pid has only letters, digits, _ and -.</p> : null}
 			{missing ? <p className="text-xs text-muted-foreground">No player found for UserId {missing}.</p> : null}
@@ -84,7 +94,7 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 	);
 }
 
-/** The player list: pid with its UserId under it, then when, how often and how long. Sorts by the numbers, not the text. */
+/** The player list: pid with its UserId under it, then when, how often, how long and how much Robux. Sorts by the numbers, not the text. */
 const PLAYER_COLUMNS: DataColumn<PlayerSummary>[] = [
 	{
 		id: "pid",
@@ -106,6 +116,7 @@ const PLAYER_COLUMNS: DataColumn<PlayerSummary>[] = [
 	{ id: "lastSeen", header: "Seen", type: "date", accessor: (p) => p.lastSeen, cell: (p) => fmtAgo(p.lastSeen), format: (_v, p) => fmtAgo(p.lastSeen) },
 	{ id: "sessions", header: "Sessions", accessor: (p) => p.sessions, cell: (p) => fmtInt(p.sessions) },
 	{ id: "playtime", header: "Playtime", accessor: (p) => p.playtimeMinutes, cell: (p) => fmtMinutes(p.playtimeMinutes), format: (_v, p) => fmtMinutes(p.playtimeMinutes) },
+	{ id: "robux", header: "Robux spent", type: "number", align: "right", accessor: (p) => p.robux ?? 0, cell: (p) => fmtInt(p.robux ?? 0) },
 	{ id: "events", header: "Events", accessor: (p) => p.events, defaultHidden: true },
 	{ id: "firstSeen", header: "First seen", type: "date", accessor: (p) => p.firstSeen, defaultHidden: true },
 	{ id: "new", header: "New", type: "boolean", accessor: (p) => p.newInRange, defaultHidden: true },

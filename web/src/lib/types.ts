@@ -250,6 +250,8 @@ export interface PlayerSummary {
 	sessions: number;
 	events: number;
 	playtimeMinutes: number;
+	/** Robux spent in the range (server-sent purchase rows, each once); 0 for none. Older backends leave it out. */
+	robux?: number;
 	newInRange: boolean;
 	/** The UserId, when the server knows it (identity rows). */
 	uid?: number;
