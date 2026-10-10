@@ -44,6 +44,9 @@ function latestHeartbeats(ctx: QueryContext, maxAgeSeconds: number, branch: stri
 	);
 }
 
+export type { HealthReason } from "../fleet/health.ts";
+import type { HealthReason } from "../fleet/health.ts";
+
 export interface ServerInfo {
 	job: string;
 	/** public | private | reserved | studio (the heartbeat's `t`). */
@@ -82,6 +85,11 @@ export interface ServerInfo {
 	physFps?: number | null;
 	memMb?: number | null;
 	luaMb?: number | null;
+	/**
+	 * Fleet API only: why the server needs a look (fleet/health.ts), each signal with its reading and the line it
+	 * crossed; empty when nothing tripped.
+	 */
+	reasons?: HealthReason[];
 }
 
 /** Unix seconds or ms -> ms (the kernel sends seconds). */

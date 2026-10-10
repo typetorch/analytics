@@ -11,6 +11,7 @@
 import { DEPLOY_RESULTS } from "../schema.ts";
 import { toMs, type ServerInfo } from "../queries/fleet.ts";
 import type { FleetDb, SqlValue } from "./db.ts";
+import { healthReasons } from "./health.ts";
 import type { Notifier } from "./notify.ts";
 
 export const LOST_AFTER_MS = 90_000;
@@ -567,6 +568,7 @@ function serverInfo(r: ServerRow, now: number): ServerInfo {
 		physFps: r.phys_fps ?? null,
 		memMb: r.mem_mb ?? null,
 		luaMb: r.lua_mb ?? null,
+		reasons: healthReasons({ health: r.health, tps: r.tps ?? null, memMb: r.mem_mb ?? null, lastSeen: r.last_seen, closed: r.closed_at !== null && r.closed_at !== undefined }, now),
 	};
 }
 
