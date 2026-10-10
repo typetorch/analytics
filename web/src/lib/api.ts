@@ -184,8 +184,11 @@ export function createApi(options: ApiOptions = {}) {
 		devices: (signal?: AbortSignal) => get<{ devices: BlessedDevice[] }>("/v1/admin/devices", signal).then((r) => r.devices),
 		revokeDevice: (id: string, signal?: AbortSignal) =>
 			request<{ ok: boolean; devices: BlessedDevice[] }>(`/v1/admin/devices/${encodeURIComponent(id)}`, { method: "DELETE", ...(signal ? { signal } : {}) }).then((r) => r.devices),
-		/** Trusts this browser for full admin through typetorch.dev: the admin token once (sets the device cookie). */
-		blessDevice: (token: string, signal?: AbortSignal) => post<{ ok: boolean; blessed: boolean }>("/auth/device", { token }, signal),
+		/**
+		 * Trusts this browser for full admin through typetorch.dev: the admin token once (sets the device cookie). `upgraded`: this
+		 * browser's read-only owner session became admin in place (re-check auth).
+		 */
+		blessDevice: (token: string, signal?: AbortSignal) => post<{ ok: boolean; blessed: boolean; upgraded?: boolean }>("/auth/device", { token }, signal),
 		/** Chart marks: releases, kernel publishes and backup refreshes in a window, oldest first (GET /v1/fleet/marks). */
 		fleetMarks: (params: { since?: number; until?: number; branch?: string; kinds?: string; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ marks: DeployMark[] }>(`/v1/fleet/marks${qs(params)}`, signal).then((r) => r.marks),

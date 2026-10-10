@@ -3,9 +3,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthGate } from "@/components/AuthGate";
+import { UntrustedBrowserBanner } from "@/components/UntrustedBrowserBanner";
 import { LoginPage, takeLoginError } from "@/components/LoginPage";
 import { api, ApiError } from "@/lib/api";
-import { loginErrorText, loginOptionsOf, userLabel } from "@/lib/auth";
+import { loginErrorText, loginOptionsOf, useAuth, userLabel } from "@/lib/auth";
 import type { AuthInfo } from "@/lib/types";
 
 afterEach(() => {
@@ -131,5 +132,85 @@ describe("auth gate", () => {
 		render(withClient(<AuthGate>{<p>the app</p>}</AuthGate>));
 		expect(await screen.findByText("Could not reach the backend")).toBeTruthy();
 		expect(screen.getAllByText(/--game/).length).toBeGreaterThan(0);
+	});
+});
+
+describe("auth gate: an owner on an untrusted browser", () => {
+	const owner = { kind: "roblox" as const, userId: 1001, name: "OwnerName", login: "typetorch.dev" as const };
+	const untrusted: AuthInfo = { ok: true, role: "web", via: "cookie", user: owner, untrustedOwner: true, trustWithToken: true };
+	const admin: AuthInfo = { ok: true, role: "admin", via: "cookie", user: owner };
+	function Role() {
+		return <p>role {useAuth()?.role}</p>;
+	}
+	const app = () =>
+		withClient(
+			<AuthGate>
+				<UntrustedBrowserBanner />
+				<Role />
+			</AuthGate>,
+		);
+
+	beforeEach(() => {
+		window.history.replaceState(null, "", "/");
+	});
+
+	it("trusting with the admin token upgrades the open page: auth is asked again and the banner goes, no sign-in step", async () => {
+		const check = vi.spyOn(api, "authCheck").mockResolvedValueOnce(untrusted).mockResolvedValue(admin);
+		const bless = vi.spyOn(api, "blessDevice").mockResolvedValue({ ok: true, blessed: true, upgraded: true });
+		render(app());
+		const banner = await screen.findByRole("region", { name: "Untrusted browser" });
+		expect(screen.getByText("role web")).toBeTruthy();
+		fireEvent.change(screen.getByLabelText("Admin token"), { target: { value: "the-admin-token" } });
+		fireEvent.click(screen.getByRole("button", { name: "Trust this browser" }));
+		await waitFor(() => expect(bless).toHaveBeenCalledWith("the-admin-token"));
+		expect(await screen.findByText("role admin")).toBeTruthy();
+		expect(screen.queryByRole("region", { name: "Untrusted browser" })).toBeNull();
+		expect(banner.isConnected).toBe(false);
+		expect(screen.queryByRole("link", { name: "Sign in again" })).toBeNull();
+		expect(check).toHaveBeenCalledTimes(2);
+	});
+
+	it("a bless done elsewhere (the CLI's link in another tab) shows when the page comes back into focus", async () => {
+		const check = vi.spyOn(api, "authCheck").mockResolvedValueOnce(untrusted).mockResolvedValue(admin);
+		render(app());
+		expect(await screen.findByRole("region", { name: "Untrusted browser" })).toBeTruthy();
+		expect(check).toHaveBeenCalledTimes(1);
+		fireEvent.focus(window);
+		expect(await screen.findByText("role admin")).toBeTruthy();
+		expect(screen.queryByRole("region", { name: "Untrusted browser" })).toBeNull();
+		// Once admin, focus no longer asks again on its own (the usual one-minute staleness applies).
+		const calls = check.mock.calls.length;
+		fireEvent.focus(window);
+		document.dispatchEvent(new Event("visibilitychange"));
+		await new Promise((r) => setTimeout(r, 20));
+		expect(check.mock.calls.length).toBe(calls);
+	});
+
+	it("visibilitychange asks again too", async () => {
+		vi.spyOn(api, "authCheck").mockResolvedValueOnce(untrusted).mockResolvedValue(admin);
+		render(app());
+		expect(await screen.findByRole("region", { name: "Untrusted browser" })).toBeTruthy();
+		document.dispatchEvent(new Event("visibilitychange"));
+		expect(await screen.findByText("role admin")).toBeTruthy();
+	});
+
+	it("opened from the trust link (?blessed=1): admin straight away when upgraded, the flag leaves the address", async () => {
+		window.history.replaceState(null, "", "/fleet?blessed=1");
+		vi.spyOn(api, "authCheck").mockResolvedValue(admin);
+		render(app());
+		expect(await screen.findByText("role admin")).toBeTruthy();
+		expect(window.location.pathname + window.location.search).toBe("/fleet");
+		expect(screen.queryByRole("region", { name: "Untrusted browser" })).toBeNull();
+	});
+
+	it("opened from the trust link but the session was not upgraded (another site's link): trusted, sign in again", async () => {
+		window.history.replaceState(null, "", "/?blessed=1");
+		vi.spyOn(api, "authCheck").mockResolvedValue(untrusted);
+		render(app());
+		const again = await screen.findByRole("link", { name: "Sign in again" });
+		expect(again.getAttribute("href")).toBe("/auth/typetorch/start");
+		expect(screen.getByText("This browser is trusted")).toBeTruthy();
+		expect(screen.queryByLabelText("Admin token")).toBeNull();
+		expect(window.location.search).toBe("");
 	});
 });

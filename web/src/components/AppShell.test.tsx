@@ -70,7 +70,7 @@ describe("app shell", () => {
 
 	const owner = { kind: "roblox" as const, userId: 1001, name: "OwnerName", login: "typetorch.dev" as const };
 
-	it("an owner on an untrusted browser: a banner that trusts it with the admin token, then asks to sign in again", async () => {
+	it("an owner on an untrusted browser: a banner that trusts it with the admin token; not upgraded in place, it asks to sign in again", async () => {
 		const bless = vi.spyOn(api, "blessDevice").mockRejectedValueOnce(new ApiError(401, "wrong token", "/auth/device")).mockResolvedValueOnce({ ok: true, blessed: true });
 		mount("/fleet", { ok: true, role: "web", via: "cookie", user: owner, untrustedOwner: true, trustWithToken: true });
 		const banner = screen.getByRole("region", { name: "Untrusted browser" });

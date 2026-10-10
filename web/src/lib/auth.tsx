@@ -9,6 +9,27 @@ export function useAuth(): AuthInfo | null {
 	return useContext(AuthContext);
 }
 
+/** Whether this page was opened from the CLI's trust link (`/?blessed=1`, read once by AuthGate). */
+const BlessedContext = createContext(false);
+export const BlessedProvider = BlessedContext.Provider;
+export function useBlessedOnLoad(): boolean {
+	return useContext(BlessedContext);
+}
+
+/** Reads and removes `blessed=1` from the address (the backend's redirect after the CLI's trust link). */
+export function takeBlessed(): boolean {
+	try {
+		const url = new URL(window.location.href);
+		if (!url.searchParams.has("blessed")) return false;
+		const on = url.searchParams.get("blessed") === "1";
+		url.searchParams.delete("blessed");
+		window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+		return on;
+	} catch {
+		return false;
+	}
+}
+
 /** The offers on the login page: the backend's list from the 401 body, else the token form only. */
 export function loginOptionsOf(body: unknown): LoginOptions {
 	const login = (body as { login?: Partial<LoginOptions> } | undefined)?.login;
