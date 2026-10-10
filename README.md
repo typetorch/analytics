@@ -104,6 +104,12 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_ADMIN_ALLOW_IPS` | no | Comma-separated addresses and CIDR ranges. When set, admin routes, the explorer and the login answer 404 to every other address. Game routes stay open. |
 | `TYPETORCH_TOKEN_LOGIN` | no | `off` hides and refuses the admin-token login in the browser (the CLI's Bearer token still works). Default `on`. |
 | `ROBLOX_OAUTH_CLIENT_ID`, `ROBLOX_OAUTH_CLIENT_SECRET` | no | Sign in with Roblox (both, plus `TYPETORCH_PUBLIC_URL`). The secret is never logged. |
+| `TYPETORCH_CENTRAL_LOGIN` | no | `on` turns on [Sign in with typetorch.dev](#sign-in-with-typetorchdev-trial) (needs `TYPETORCH_PUBLIC_URL` over https, or http on loopback, and `TYPETORCH_ROBLOX_BROKER_CLIENT_ID`). **Off by default** during the trial: off, there is no button, every route of it answers 404, no instance key is made and no report is sent. |
+| `TYPETORCH_CENTRAL_LOGIN_ISSUER` | no | The broker's origin (`https://typetorch.dev`; plain `http` only on `localhost` / `127.0.0.1`, for a local broker). |
+| `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` | no | What an owner gets on a browser that was never trusted: `web` (read-only, the default) or `refuse`. |
+| `TYPETORCH_CENTRAL_LOGIN_KIDS` | no | Comma-separated broker key ids to pin: an assertion signed by any other key is refused even if the broker publishes it. |
+| `TYPETORCH_CENTRAL_LOGIN_LABEL` | no | The name the origin report gives typetorch.dev (64 characters; default the public URL's host). |
+| `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | TypeTorch's Roblox OAuth client id: the audience of the Roblox ID token the broker passes on (public, not a secret). Required while the built-in constant is empty. `TYPETORCH_ROBLOX_BROKER_DISCOVERY` points the Roblox check at another discovery document (a fake Roblox for local runs). |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
 | `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake) |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
@@ -337,6 +343,50 @@ token login (with the user's name and avatar for the explorer's header). Roblox'
 unread. A failure goes back to the login page with a plain sentence, never a stack. Removing an owner (a higher-`seq`
 `PUT /v1/access` without them) ends their sessions at once.
 
+### Sign in with typetorch.dev (trial)
+
+One Roblox sign-in at typetorch.dev for every backend a person owns or views, without a Roblox OAuth app per game
+(TypeTorch plans `typetorch-dev-login.md`). typetorch.dev is only an identity broker: it confirms who someone is and
+hands this backend a signed statement; the role comes from this backend's own lists, exactly as with Sign in with Roblox.
+Off unless `TYPETORCH_CENTRAL_LOGIN=on`; the admin token and the per-game Sign in with Roblox are untouched by it.
+
+- **Identity.** On the first start with the login on, the backend makes an Ed25519 **instance key** in
+  `<data dir>/instance.key` (mode 0600, backed up with the data folder). Its fingerprint
+  `tt1-<base32 of the first 20 bytes of sha256(public key)>` is printed on the startup line, shown to admins in `/healthz`
+  and on the Settings page; paste it into **Add project** on typetorch.dev. Losing the key means a new fingerprint.
+- **The origin report.** On start, then daily (10 minutes after a failure), and on `POST /v1/central/report`, the backend
+  posts `{ fingerprint, public_key, origin, label, iat, signature }` to `<issuer>/report`, signed over the canonical JSON
+  `{"fingerprint","origin","label","iat"}`. A new origin gets a `202 { challenge }`: the token is served at
+  `/api/typetorch/challenge/<token>` for 60 seconds while the backend polls; once the broker fetched it the answer is
+  `200 { ok, origin, access_token, expires_in }`. The hour-long access token stays in memory and replaces the signature on
+  reports within that hour. Failures are logged at most once an hour and never stop the server; startup never waits on
+  typetorch.dev.
+- **The login.** `GET /auth/typetorch/start` makes `state`, `nonce` and a PKCE verifier (state in a 10-minute `HttpOnly`,
+  `SameSite=Lax` cookie on `/auth/typetorch`) and redirects to `<issuer>/authorize?project=<fingerprint>&redirect_uri=
+  <public url>/auth/typetorch/callback&...`. The callback checks the state, redeems the single-use code at `<issuer>/token`
+  (server to server, no client secret), then verifies **two** signatures: the broker's assertion (EdDSA, keys from
+  `<issuer>/.well-known/jwks.json` cached by `kid`, optional pinning; `iss` = the issuer, `aud` = this backend's
+  fingerprint, never a URL; `nonce`; `exp`; `iat` at most two minutes old; `jti` never seen before) and **Roblox's own ID
+  token** passed through (Roblox's keys, `aud` = TypeTorch's Roblox client id, the same `nonce`, the same `sub`). So
+  typetorch.dev alone can never produce a login. Any failure, including a failed `/token` answer, is "not signed in"; the
+  broker's answers are never shown or logged.
+- **The role.** A viewer gets `web`; anyone not on the lists is refused like a wrong token. An **owner gets admin only on a
+  trusted ("blessed") browser**; anywhere else `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` decides: `web` (read-only) or `refuse`.
+  Every login makes a fresh session (a session id from before is ended), is counted toward the five-failure lockout when it
+  fails, and logs `login: typetorch.dev user <id> role <role>`.
+- **Trusting a browser** (once per browser; the broker never sees it): the admin token in the Settings page's form
+  (`POST /auth/device`, only while the token login is on), or a link signed by the game's signing key
+  (`GET /auth/bless/challenge`, then `GET /auth/bless?challenge=&sig=` with an Ed25519 signature over
+  `typetorch-bless-v1\n<fingerprint>\n<challenge>`; the public keys come from `PUT /v1/access/keys` with the admin token).
+  The device cookie `tt_device` (`HttpOnly`, `SameSite=Lax`, `Secure` over https, 180 days) holds a random secret whose hash
+  is in `<data dir>/devices.json`; it rotates on every login. The Settings page lists trusted browsers; revoking one ends
+  the admin sessions it opened. A browser trusted with the admin token stops counting when the token changes.
+
+To try it locally against a broker on `http://127.0.0.1:8788` (typetorch/dash, `bun run dev` and `bun run fake-roblox`):
+`TYPETORCH_CENTRAL_LOGIN=on TYPETORCH_CENTRAL_LOGIN_ISSUER=http://127.0.0.1:8788 TYPETORCH_PUBLIC_URL=http://127.0.0.1:8787
+TYPETORCH_ROBLOX_BROKER_CLIENT_ID=<the fake's client id> TYPETORCH_ROBLOX_BROKER_DISCOVERY=<the fake's discovery URL>
+bun run local`.
+
 ### On Coolify: the short list
 
 1. https on (a domain on the app; Coolify's proxy gets the certificate).
@@ -386,9 +436,17 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" | "admin" | "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox, typetorch? } }` without valid credentials |\| "admin" \| "web", via, user?, parts: { analytics, fleet } }`; `401 { login: { token, roblox } }` without valid credentials |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
+| `GET /auth/typetorch/start`, `/callback` | open (rate limited, lockout) | [Sign in with typetorch.dev](#sign-in-with-typetorchdev-trial); 404 while `TYPETORCH_CENTRAL_LOGIN` is off (so are the next rows) |
+| `POST /auth/device` | open: the admin token in the body, `X-TypeTorch` header | trusts this browser (device cookie) |
+| `GET /auth/bless/challenge`, `GET /auth/bless` | open (rate limited, lockout) | the CLI's signed trust link |
+| `GET /api/typetorch/challenge/<token>` | open (rate limited) | the origin challenge, only while a report is pending |
+| `GET /v1/admin/devices`, `DELETE /v1/admin/devices/<id>` | admin | trusted browsers; revoking ends their admin sessions |
+| `GET /v1/access/keys` | admin | the signing keys a trust link may use |
+| `PUT /v1/access/keys` | admin token only (not a session) | `{ keys: [base64 raw Ed25519 public key, ...] }` (4 at most) |
+| `POST /v1/central/report` | admin | send the origin report now |
 | `GET /healthz` | open | `{ ok }`; with the admin role: `state` (`ready`, `handover`, `failed`, `stopping`), memory, loader lag, row counts, the bus |
 | `GET /` and the explorer's files | open | the built explorer (404 when it isn't built) |
 
