@@ -1058,8 +1058,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		let role = listed;
 		const cookies = [clear];
+		let rotated: string | undefined;
 		if (listed === "admin") {
-			const rotated = central.devices.use(readCookie(req, DEVICE_COOKIE), adminTokenHash);
+			rotated = central.devices.use(readCookie(req, DEVICE_COOKIE), adminTokenHash);
 			if (rotated) cookies.push(deviceCookie(req, rotated));
 			else if (central.config.unblessed === "refuse") {
 				log(`login: typetorch.dev refused owner ${who.userId} from ${ip}: this device was never blessed (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=refuse)`);
@@ -1069,7 +1070,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		// Never reuse a session id from before the login.
 		sessions.destroy(readCookie(req, SESSION_COOKIE));
 		authFailures.reset(ip);
-		const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}), login: "typetorch.dev" }, role);
+		const deviceId = role === "admin" && rotated ? rotated.slice(0, rotated.indexOf(".")) : undefined;
+		const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}), login: "typetorch.dev" }, role, undefined, deviceId);
 		log(`login: typetorch.dev user ${who.userId} role ${role}${listed === "admin" ? (role === "admin" ? " (blessed device)" : " (owner on a device that was never blessed: read-only)") : ""} from ${ip}`);
 		return redirect("/", [...cookies, sessionCookie(req, id)]);
 	}
@@ -1078,6 +1080,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	async function blessWithToken(req: Request, ip: string): Promise<Response> {
 		if (!central) return centralOff();
 		if (!adminIpOk(ip)) return notFound();
+		// The browser takes the admin token only while the token login is on; otherwise `typetorch backend bless`.
+		if (!runtime.get("tokenLogin")) return json(404, { error: "the token login is off on this server: bless this browser with `typetorch backend bless`" });
 		const blocked = blockedResponse(ip);
 		if (blocked) return blocked;
 		const problem = cookieMutationProblem(req, proxyOpts);
@@ -1435,8 +1439,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const id = path.slice("/v1/admin/devices/".length);
 				if (!/^[0-9a-f]{16}$/.test(id)) return json(400, { error: "bad device id" });
 				if (!central.devices.revoke(id)) return json(404, { error: "no such device" });
-				log(`device ${id} revoked by ${actorOf(admin).who}`);
-				return json(200, { ok: true, devices: central.devices.list(central.devices.idOf(readCookie(req, DEVICE_COOKIE), adminTokenHash)) });
+				// The admin sessions that device opened end with it.
+				const ended = sessions.endWhere((s) => s.device === id);
+				log(`device ${id} revoked by ${actorOf(admin).who}${ended ? `; ${ended} session(s) ended` : ""}`);
+				return json(200, { ok: true, sessionsEnded: ended, devices: central.devices.list(central.devices.idOf(readCookie(req, DEVICE_COOKIE), adminTokenHash)) });
 			}
 			if (path === "/v1/access/keys") {
 				if (method !== "GET" && method !== "PUT") return json(405, { error: "GET or PUT only" });

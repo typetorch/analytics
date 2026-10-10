@@ -33,6 +33,8 @@ export interface Session {
 	seen: number;
 	/** Hash of the admin token this session was made with. */
 	tokenHash: string;
+	/** The blessed device a typetorch.dev admin session came from: revoking the device ends the session. */
+	device?: string;
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -61,11 +63,11 @@ export class Sessions {
 	}
 
 	/** A new session; returns the cookie value (a random 32-byte id, base64url). */
-	create(user: SessionUser, role: AccessRole = "admin", tokenHash: string = this.tokenHash): string {
+	create(user: SessionUser, role: AccessRole = "admin", tokenHash: string = this.tokenHash, device?: string): string {
 		const id = randomBytes(32).toString("base64url");
 		const now = this.clock();
 		this.sweep(now);
-		this.byId.set(sha256(id), { user, role, created: now, seen: now, tokenHash });
+		this.byId.set(sha256(id), { user, role, created: now, seen: now, tokenHash, ...(device ? { device } : {}) });
 		const max = this.options.maxSessions ?? 200;
 		while (this.byId.size > max) this.byId.delete(this.byId.keys().next().value as string);
 		return id;

@@ -329,10 +329,16 @@ describe("Sign in with typetorch.dev", () => {
 		const list = await asJson(await h.call("/v1/admin/devices", { headers: bearer(ADMIN) }));
 		const mine = (list.devices as { id: string; via: string }[]).find((d) => d.via === "admin token") as { id: string };
 		expect(JSON.stringify(list)).not.toMatch(/hash|secret/);
-		expect((await h.call(`/v1/admin/devices/${mine.id}`, { method: "DELETE", headers: bearer(ADMIN) })).status).toBe(200);
+		expect(await role(fresh.session)).toBe("admin");
+		const gone = await asJson(await h.call(`/v1/admin/devices/${mine.id}`, { method: "DELETE", headers: bearer(ADMIN) }));
+		expect(gone.ok).toBe(true);
+		// The admin sessions that device opened end with it; the next login there is read-only.
+		expect(gone.sessionsEnded).toBeGreaterThanOrEqual(1);
+		expect(await role(fresh.session)).toBeUndefined();
 		const revoked = await c.login({}, { device: fresh.device as string });
 		expect(await role(revoked.session)).toBe("web");
 	});
+
 
 	test("a viewer gets the web role; a stranger is refused like a wrong token, with no session", async () => {
 		const viewer = await c.login({ sub: VIEWER });
@@ -579,6 +585,24 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 		} finally {
 			await h.close();
 		}
+	});
+
+	test("blessing with the admin token follows the token login switch (TYPETORCH_TOKEN_LOGIN=off: 404)", async () => {
+		const h = await harness({ ...ENV, TYPETORCH_TOKEN_LOGIN: "off" }, { fetch: new Fakes().fetch });
+		try {
+			const res = await h.call("/auth/device", { method: "POST", ...json({ token: ADMIN }), headers: { "content-type": "application/json", ...XT } });
+			expect(res.status).toBe(404);
+			expect(res.headers.getSetCookie().some((x) => x.startsWith("tt_device="))).toBe(false);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("a public URL over plain http (not loopback) keeps the login off", () => {
+		const c = loadConfig([], { ...base, ...ENV, TYPETORCH_PUBLIC_URL: "http://backend.example.com" });
+		expect(c.centralLogin).toBeUndefined();
+		expect(c.warnings.join(" ")).toContain("must be https");
+		expect(loadConfig([], { ...base, ...ENV, TYPETORCH_PUBLIC_URL: "http://127.0.0.1:8787" }).centralLogin).toBeDefined();
 	});
 
 	test("a pinned kid (TYPETORCH_CENTRAL_LOGIN_KIDS) refuses an assertion from any other key, even one the JWKS lists", async () => {

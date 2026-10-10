@@ -409,6 +409,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		}
 		const label = (env.TYPETORCH_CENTRAL_LOGIN_LABEL ?? (publicUrl ? new URL(publicUrl).host : "")).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 64);
 		if (!publicUrl) warnings.push("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL (the callback is <public url>/auth/typetorch/callback)");
+		else if (!originOf(publicUrl)) warnings.push("Sign in with typetorch.dev is off: TYPETORCH_PUBLIC_URL must be https (plain http only for localhost / 127.0.0.1)");
 		else if (!clientId) warnings.push("Sign in with typetorch.dev is off: set TYPETORCH_ROBLOX_BROKER_CLIENT_ID (TypeTorch's Roblox client id)");
 		else centralLogin = { issuer, unblessed: unblessed as "web" | "refuse", robloxClientId: clientId, label: label || "TypeTorch backend", ...(kids.length ? { kids } : {}), ...(discovery ? { robloxDiscoveryUrl: discovery } : {}) };
 	}
