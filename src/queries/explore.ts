@@ -1,12 +1,14 @@
 /**
  * Small lookups for explorers (the web app's player search, filter bar suggestions and event rows):
- *   players — players seen in the range, most recent first, optionally matching part of a pid;
+ *   players — players seen in the range, most recent first (or top spenders first), optionally matching part of a pid,
+ *             with the Robux each spent in the range;
  *   values  — the branches, artifacts, channels and devices seen in the range (for filter pickers);
  *   events  — the newest rows, optionally of one kind / name / player.
  * `fleet` rows never return their props here: a heartbeat's props can hold a private server's access code (`k`).
  */
 import { assertSafeKey, lit } from "../sql/dialect.ts";
-import { checkPid, defineQuery, eventsTable, intOption, iso, num, playerRows, round, str, strOrNull, where } from "./core.ts";
+import { PROP_KEYS } from "../schema.ts";
+import { checkPid, defineQuery, eventsTable, intOption, iso, num, playerRows, round, SERVER_PURCHASE, str, strOrNull, where } from "./core.ts";
 
 // players -------------------------------------------------------------------------------------------------------------
 
@@ -17,7 +19,12 @@ export interface PlayersOptions {
 	pids?: string[];
 	/** Most players to return (default 50). */
 	limit: number;
+	/** `recent` (default): last seen first. `robux`: most Robux spent first, then last seen. */
+	sort: PlayersSort;
 }
+
+export const PLAYERS_SORTS = ["recent", "robux"] as const;
+export type PlayersSort = (typeof PLAYERS_SORTS)[number];
 
 export interface PlayerSummary {
 	pid: string;
@@ -26,6 +33,12 @@ export interface PlayerSummary {
 	sessions: number;
 	events: number;
 	playtimeMinutes: number;
+	/**
+	 * Robux spent in the range: the sum of `props.robux` over server-sent `purchase` rows (SERVER_PURCHASE, like the
+	 * revenue queries), 0 for none. Purchase rows carry no receipt id, so a purchase is one distinct row (same pid,
+	 * session, time, name and props): a resent copy of a row counts once.
+	 */
+	robux: number;
 	/** Their first-ever session is in the range. */
 	newInRange: boolean;
 	/** The UserId, when the analytics server knows it (identity rows; added by the server, not the query). */
@@ -38,10 +51,12 @@ export interface PlayersResult {
 
 export const players = defineQuery<PlayersOptions, PlayersResult>({
 	name: "players",
-	summary: "players seen in the range, most recent first (pid, sessions, playtime); search = part of a pid",
+	summary: "players seen in the range, most recent first or sort=robux for top spenders (pid, sessions, playtime, Robux spent); search = part of a pid",
 	defaultDays: 30,
 	options: (input = {}) => {
-		const out: PlayersOptions = { limit: intOption(input.limit, "limit", 50, 1, 1000) };
+		const sort = input.sort ?? "recent";
+		if (!PLAYERS_SORTS.includes(sort as PlayersSort)) throw new Error(`sort must be one of ${PLAYERS_SORTS.join(", ")}`);
+		const out: PlayersOptions = { limit: intOption(input.limit, "limit", 50, 1, 1000), sort: sort as PlayersSort };
 		if (input.search !== undefined && input.search !== "") {
 			if (typeof input.search !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(input.search)) throw new Error("search must be 1-64 characters of letters, digits, _ or -");
 			out.search = input.search;
@@ -55,14 +70,21 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 	statements(ctx, f, o) {
 		const parts = [...(o.search ? [`strpos(e.pid, ${lit(o.search)}) > 0`] : []), ...(o.pids ? [`e.pid IN (${o.pids.map(lit).join(", ")})`] : [])];
 		const search = parts.length > 1 ? `(${parts.join(" OR ")})` : (parts[0] ?? "");
+		const table = eventsTable(ctx, f);
+		const robux = ctx.dialect.jsonNumber("props", PROP_KEYS.purchaseRobux);
+		const order = o.sort === "robux" ? "COALESCE(pu.robux, 0) DESC, p.last_t DESC, p.pid" : "p.last_t DESC, p.pid";
 		return {
 			players:
-				`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp FROM ${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx, search)}), ` +
+				`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp FROM ${table} e WHERE ${playerRows(f, ctx, search)}), ` +
+				// One row per distinct purchase row (no receipt id exists; a resent copy is an exact duplicate), server-sent only.
+				`pr AS (SELECT DISTINCT e.pid AS pid, e.sid AS sid, e.t AS t, e.name AS name, e.props AS props, e.src AS esrc FROM ${table} e ` +
+				`WHERE ${playerRows(f, ctx, search)} AND e.kind = 'purchase'), ` +
+				`pu AS (SELECT pid, SUM(COALESCE(${robux}, 0)) AS robux FROM pr WHERE ${SERVER_PURCHASE} GROUP BY pid), ` +
 				`s AS (SELECT sid, MIN(pid) AS pid, MAX(t) - MIN(t) AS len FROM ev GROUP BY sid), ` +
 				`sp AS (SELECT pid, COUNT(*) AS sessions, SUM(len) AS playtime_ms FROM s GROUP BY pid), ` +
 				`p AS (SELECT pid, MIN(t) AS first_t, MAX(t) AS last_t, COUNT(*) AS events, MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew FROM ev GROUP BY pid) ` +
-				`SELECT p.pid AS pid, p.first_t AS first_t, p.last_t AS last_t, p.events AS events, p.isnew AS isnew, sp.sessions AS sessions, sp.playtime_ms AS playtime_ms ` +
-				`FROM p JOIN sp ON sp.pid = p.pid ORDER BY p.last_t DESC, p.pid ${ctx.dialect.limit(o.limit)}`,
+				`SELECT p.pid AS pid, p.first_t AS first_t, p.last_t AS last_t, p.events AS events, p.isnew AS isnew, sp.sessions AS sessions, sp.playtime_ms AS playtime_ms, COALESCE(pu.robux, 0) AS robux ` +
+				`FROM p JOIN sp ON sp.pid = p.pid LEFT JOIN pu ON pu.pid = p.pid ORDER BY ${order} ${ctx.dialect.limit(o.limit)}`,
 		};
 	},
 	shape: (rows) => ({
@@ -73,6 +95,7 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 			sessions: num(r.sessions),
 			events: num(r.events),
 			playtimeMinutes: round(num(r.playtime_ms) / 60_000, 1),
+			robux: round(num(r.robux), 2),
 			newInRange: num(r.isnew) === 1,
 		})),
 	}),
