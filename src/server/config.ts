@@ -68,10 +68,10 @@ export interface ServerConfig {
 	/** Sign in with Roblox: the OAuth app's client id and secret. Both set = on. */
 	robloxOAuth?: { clientId: string; clientSecret: string };
 	/**
-	 * Sign in with typetorch.dev (TYPETORCH_CENTRAL_LOGIN=on; off by default during the trial): the broker's origin, the
+	 * Sign in with typetorch.dev (on by default; TYPETORCH_CENTRAL_LOGIN=off turns it off): the broker's origin, the
 	 * role of an owner on a device that was never blessed, optional pinned key ids, optional pins of TypeTorch's Roblox
 	 * client id and Roblox's discovery document (else read from <issuer>/.well-known/typetorch-login), and the label the
-	 * origin report sends. Needs TYPETORCH_PUBLIC_URL.
+	 * origin report sends. Needs TYPETORCH_PUBLIC_URL over https (or http on loopback); without it the login stays off.
 	 */
 	centralLogin?: CentralLoginConfig;
 	/** The public https URL of this backend (no trailing slash): OAuth redirect, Secure cookies, origin checks. */
@@ -397,9 +397,10 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (oauthId && oauthSecret && !publicUrl) warnings.push("Sign in with Roblox is off: set TYPETORCH_PUBLIC_URL (the redirect is <public url>/v1/auth/roblox/callback)");
 	const robloxOAuth = oauthId && oauthSecret && publicUrl ? { clientId: oauthId, clientSecret: oauthSecret } : undefined;
 
-	// Sign in with typetorch.dev: off unless TYPETORCH_CENTRAL_LOGIN=on (the trial on the central-oauth branch).
+	// Sign in with typetorch.dev: on by default (TYPETORCH_CENTRAL_LOGIN=off turns it off). It only actually turns on with
+	// an https public URL (http on loopback); otherwise it stays off with a warning and the backend starts as usual.
 	let centralLogin: CentralLoginConfig | undefined;
-	if (flag(env, "TYPETORCH_CENTRAL_LOGIN", false)) {
+	if (flag(env, "TYPETORCH_CENTRAL_LOGIN", true)) {
 		const issuer = originOf(env.TYPETORCH_CENTRAL_LOGIN_ISSUER ?? CENTRAL_LOGIN_ISSUER);
 		if (!issuer) throw new Error("TYPETORCH_CENTRAL_LOGIN_ISSUER must be an origin: https://host[:port] (plain http only for localhost / 127.0.0.1), no path");
 		const unblessed = (env.TYPETORCH_CENTRAL_LOGIN_UNBLESSED ?? "web").toLowerCase();

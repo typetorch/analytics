@@ -121,13 +121,17 @@ describe("compose.yaml", () => {
 			env[m[1] as string] = m[2] ?? "";
 		}
 		const config = loadConfig([], env);
-		expect(config.warnings).toEqual([]);
+		expect(config.warnings).toEqual(["Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL (the callback is <public url>/auth/typetorch/callback)"]);
+		expect(config.centralLogin).toBeUndefined();
 		expect(config).toMatchObject({ trustProxy: 1, tokenLogin: true, memoryLimit: "400MB", threads: 2 });
 		expect(config.robloxOAuth).toBeUndefined();
 		expect(config.adminAllowIps).toBeUndefined();
 		expect(config.publicUrl).toBeUndefined();
 	});
 });
+
+/** Sign in with typetorch.dev is on by default and warns (stays off) without a public URL; the files here set none. */
+const notCentral = (warnings: string[]) => warnings.filter((w) => !w.startsWith("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL"));
 
 describe("server/ files", () => {
 	test("the env example loads once the two secrets are filled in, with no warnings, and lists every required name", () => {
@@ -139,7 +143,7 @@ describe("server/ files", () => {
 		writeFileSync(file, text);
 		try {
 			const config = loadConfig(["--env-file", file], { TYPETORCH_EXPLORER: "off" });
-			expect(config.warnings).toEqual([]);
+			expect(notCentral(config.warnings)).toEqual([]);
 			expect(config.apiKeys).toEqual([API]);
 			expect(config.dataDir.replace(/\\/g, "/")).toContain("/var/lib/typetorch-backend");
 			expect(config.trustProxy).toBe(1);

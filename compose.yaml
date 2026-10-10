@@ -31,9 +31,10 @@ services:
       TYPETORCH_TOKEN_LOGIN: ${TYPETORCH_TOKEN_LOGIN:-on}
       ROBLOX_OAUTH_CLIENT_ID: ${ROBLOX_OAUTH_CLIENT_ID:-}
       ROBLOX_OAUTH_CLIENT_SECRET: ${ROBLOX_OAUTH_CLIENT_SECRET:-}
-      # Sign in with typetorch.dev (a trial, off by default; README "Sign in with typetorch.dev"). Needs TYPETORCH_PUBLIC_URL
-      # only: no Roblox client id is set here (the broker publishes it).
-      TYPETORCH_CENTRAL_LOGIN: ${TYPETORCH_CENTRAL_LOGIN:-off}
+      # Sign in with typetorch.dev (on by default, "off" turns it off; README "Sign in with typetorch.dev"). It only turns
+      # on with an https TYPETORCH_PUBLIC_URL (else it stays off with a warning): no Roblox client id is set here (the
+      # broker publishes it).
+      TYPETORCH_CENTRAL_LOGIN: ${TYPETORCH_CENTRAL_LOGIN:-on}
       TYPETORCH_CENTRAL_LOGIN_ISSUER: ${TYPETORCH_CENTRAL_LOGIN_ISSUER:-}  # default https://dash.typetorch.dev
       TYPETORCH_CENTRAL_LOGIN_UNBLESSED: ${TYPETORCH_CENTRAL_LOGIN_UNBLESSED:-}
       TYPETORCH_CENTRAL_LOGIN_KIDS: ${TYPETORCH_CENTRAL_LOGIN_KIDS:-}

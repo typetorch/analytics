@@ -23,11 +23,12 @@ export interface Harness {
 	close(): Promise<void>;
 }
 
+/** Sign in with typetorch.dev is on by default; the harness turns it off (no real broker reports) unless `env` sets it. */
 export async function harness(env: Record<string, string> = {}, options: { fetch?: typeof fetch; reportSleep?: (ms: number) => Promise<void> } = {}): Promise<Harness> {
 	const dir = mkdtempSync(join(tmpdir(), "tt-backend-"));
 	let now = T0;
 	const logs: string[] = [];
-	const config = loadConfig([], { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: dir, PORT: "0", TYPETORCH_MEMORY_LIMIT: "256MB", TYPETORCH_EXPLORER: "off", ...env });
+	const config = loadConfig([], { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: dir, PORT: "0", TYPETORCH_MEMORY_LIMIT: "256MB", TYPETORCH_EXPLORER: "off", TYPETORCH_CENTRAL_LOGIN: "off", ...env });
 	const app = await startApp(config, { clock: () => now, manualJobs: true, log: (l) => logs.push(l), ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.reportSleep ? { reportSleep: options.reportSleep } : {}) });
 	return {
 		app,

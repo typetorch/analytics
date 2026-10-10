@@ -267,7 +267,11 @@ describe("Sign in with typetorch.dev", () => {
 	});
 
 	test("the login page learns of the third way; /healthz shows the fingerprint to the admin token only", async () => {
-		expect((await asJson(await h.call("/v1/auth/check"))).login).toEqual({ token: true, roblox: false, typetorch: true });
+		expect((await asJson(await h.call("/v1/auth/check"))).login).toEqual({ token: true, roblox: false, typetorch: true, dashboard: BROKER });
+		// Signed in, the check names the dashboard (the broker's origin) too; nothing else of the broker's settings.
+		const signed = await asJson(await h.call("/v1/auth/check", { headers: bearer(ADMIN) }));
+		expect(signed.dashboard).toBe(BROKER);
+		expect(JSON.stringify(signed)).not.toContain(h.app.central?.fingerprint as string);
 		expect(await asJson(await h.call("/healthz"))).toEqual({ ok: true });
 		expect((await asJson(await h.call("/healthz", { headers: bearer(ADMIN) }))).central).toMatchObject({ fingerprint: h.app.central?.fingerprint, issuer: BROKER });
 	});
@@ -553,8 +557,43 @@ describe("Sign in with typetorch.dev: the challenge while pending", () => {
 describe("Sign in with typetorch.dev: settings and switches", () => {
 	const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: "/tmp/never-used", TYPETORCH_EXPLORER: "off" };
 
-	test("off by default; on needs only the public URL (no Roblox client id); the pins are optional; the issuer is an origin", () => {
-		expect(loadConfig([], { ...base, TYPETORCH_PUBLIC_URL: PUBLIC }).centralLogin).toBeUndefined();
+	test("on by default with an https public URL; explicit off turns it off", () => {
+		const unset = loadConfig([], { ...base, TYPETORCH_PUBLIC_URL: PUBLIC });
+		expect(unset.centralLogin).toEqual({ issuer: "https://dash.typetorch.dev", unblessed: "web", label: "backend.example.com" });
+		expect(unset.warnings.join(" ")).not.toContain("typetorch.dev");
+		for (const off of ["off", "0", "false", "no", "OFF"]) {
+			const c = loadConfig([], { ...base, TYPETORCH_PUBLIC_URL: PUBLIC, TYPETORCH_CENTRAL_LOGIN: off });
+			expect(c.centralLogin).toBeUndefined();
+			expect(c.warnings.join(" ")).not.toContain("typetorch.dev");
+		}
+	});
+
+	test("unset without an https public URL: off with a warning, nothing else required", () => {
+		const none = loadConfig([], base);
+		expect(none.centralLogin).toBeUndefined();
+		expect(none.warnings.join(" ")).toContain("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL");
+		const http = loadConfig([], { ...base, TYPETORCH_PUBLIC_URL: "http://backend.example.com" });
+		expect(http.centralLogin).toBeUndefined();
+		expect(http.warnings.join(" ")).toContain("must be https");
+	});
+
+	test("unset without a public URL: the backend starts normally, routes 404, no instance key, no report", async () => {
+		let calls = 0;
+		const h = await harness({ TYPETORCH_CENTRAL_LOGIN: undefined as never }, { fetch: (async () => (calls++, new Response("no", { status: 500 }))) as unknown as typeof fetch });
+		try {
+			expect(h.app.central).toBeUndefined();
+			expect((await h.call("/healthz")).status).toBe(200);
+			expect((await h.call("/auth/typetorch/start")).status).toBe(404);
+			expect(existsSync(join(h.dir, "instance.key"))).toBe(false);
+			expect(calls).toBe(0);
+			const login = await h.call("/v1/auth/login", { method: "POST", ...json({ token: ADMIN }), headers: { "content-type": "application/json", ...XT } });
+			expect(login.status).toBe(200);
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("on needs only the public URL (no Roblox client id); the pins are optional; the issuer is an origin", () => {
 		const on = loadConfig([], { ...base, ...ENV });
 		expect(on.centralLogin).toEqual({ issuer: BROKER, unblessed: "web", label: "backend.example.com" });
 		expect(on.warnings.join(" ")).not.toContain("TYPETORCH_ROBLOX_BROKER_CLIENT_ID");
@@ -580,6 +619,7 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 		const h = await harness({ TYPETORCH_PUBLIC_URL: PUBLIC, TYPETORCH_CENTRAL_LOGIN: "off", TYPETORCH_CENTRAL_LOGIN_ISSUER: BROKER }, { fetch: (async () => (calls++, new Response("no", { status: 500 }))) as unknown as typeof fetch });
 		try {
 			expect((await asJson(await h.call("/v1/auth/check"))).login).toEqual({ token: true, roblox: false });
+			expect((await asJson(await h.call("/v1/auth/check", { headers: bearer(ADMIN) }))).dashboard).toBeUndefined();
 			for (const path of ["/auth/typetorch/start", "/auth/typetorch/callback?code=x&state=y", "/auth/bless/challenge", "/auth/bless?challenge=a&sig=b", "/api/typetorch/challenge/abc"]) {
 				expect(`${path} ${(await h.call(path)).status}`).toBe(`${path} 404`);
 			}

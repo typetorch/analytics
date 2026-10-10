@@ -46,8 +46,10 @@ describe("environment", () => {
 		const c = loadConfig([], { ...base, TYPETORCH_API_KEY_PREVIOUS: PREVIOUS });
 		expect(c.apiKeys).toEqual([API, PREVIOUS]);
 		expect(c).toMatchObject({ host: "127.0.0.1", port: 8787, tokenLogin: true, trustProxy: 0 });
-		// The only warning: remove the previous key once the rotation is done.
-		expect(c.warnings).toEqual([expect.stringContaining("TYPETORCH_API_KEY_PREVIOUS is set")]);
+		// The warnings: remove the previous key once the rotation is done; Sign in with typetorch.dev (on by default) needs
+		// a public URL, so it stays off.
+		expect(c.warnings).toEqual([expect.stringContaining("TYPETORCH_API_KEY_PREVIOUS is set"), expect.stringContaining("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL")]);
+		expect(c.centralLogin).toBeUndefined();
 		expect(c.sessionIdleMs).toBe(12 * 3_600_000);
 		expect(c.sessionMaxMs).toBe(7 * 86_400_000);
 		expect(c.loginMaxFailures).toBe(5);
@@ -115,7 +117,7 @@ describe("environment", () => {
 	});
 
 	test("the new name wins when both are set, and says so", () => {
-		const c = loadConfig([], { ...base, PORT: "8200", TT_ANALYTICS_PORT: "9999" });
+		const c = loadConfig([], { ...base, PORT: "8200", TT_ANALYTICS_PORT: "9999", TYPETORCH_CENTRAL_LOGIN: "off" });
 		expect(c.port).toBe(8200);
 		expect(c.warnings).toEqual(["TT_ANALYTICS_PORT is ignored because PORT is set; remove it"]);
 	});
@@ -761,7 +763,8 @@ describe("which proxies are believed (TYPETORCH_TRUSTED_PROXIES, TYPETORCH_CLOUD
 	});
 
 	test("env: the lists parse; a trusted proxy on a public HOST without a list warns; the previous API key warns", () => {
-		const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_EXPLORER: "off" };
+		// Sign in with typetorch.dev off: on by default it warns about the missing public URL.
+		const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_EXPLORER: "off", TYPETORCH_CENTRAL_LOGIN: "off" };
 		const c = loadConfig([], { ...base, TYPETORCH_TRUSTED_PROXIES: "10.0.0.0/8, 172.16.0.0/12", TYPETORCH_CLOUDFLARE: "on", HOST: "0.0.0.0", TYPETORCH_TRUST_PROXY: "1" });
 		expect(c.trustedProxies?.length).toBe(2);
 		expect(c.cloudflareIps?.length).toBe(CLOUDFLARE_IPS.length);
